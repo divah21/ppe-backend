@@ -1,0 +1,252 @@
+const express = require('express');
+const router = express.Router();
+const { PPEItem, Stock } = require('../../models');
+const { authenticate } = require('../../middlewares/auth_middleware');
+const { requireRole } = require('../../middlewares/role_middleware');
+const { auditLog } = require('../../middlewares/audit_middleware');
+const { body, param } = require('express-validator');
+const { validate } = require('../../middlewares/validation_middleware');
+const { Op } = require('sequelize');
+
+/**
+ * @route   GET /api/v1/ppe
+ * @desc    Get all PPE items
+ * @access  Private
+ */
+router.get('/', authenticate, async (req, res, next) => {
+  try {
+    const { category, isMandatory, search, page = 1, limit = 50 } = req.query;
+
+    const where = {};
+    
+    if (category) where.category = category;
+    if (isMandatory !== undefined) where.isMandatory = isMandatory === 'true';
+    
+    if (search) {
+      where[Op.or] = [
+        { name: { [Op.iLike]: `%${search}%` } },
+        { itemCode: { [Op.iLike]: `%${search}%` } },
+        { description: { [Op.iLike]: `%${search}%` } }
+      ];
+    }
+
+    const offset = (page - 1) * limit;
+
+    const { count, rows: ppeItems } = await PPEItem.findAndCountAll({
+      where,
+      include: [{
+        model: Stock,
+        as: 'stocks',
+        required: false
+      }],
+      limit: parseInt(limit),
+      offset,
+      order: [['name', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: ppeItems,
+      pagination: {
+        total: count,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(count / limit)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/ppe/:id
+ * @desc    Get PPE item by ID
+ * @access  Private
+ */
+router.get('/:id', authenticate, async (req, res, next) => {
+  try {
+    const ppeItem = await PPEItem.findByPk(req.params.id, {
+      include: [{
+        model: Stock,
+        as: 'stocks'
+      }]
+    });
+
+    if (!ppeItem) {
+      return res.status(404).json({
+        success: false,
+        message: 'PPE item not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: ppeItem
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   POST /api/v1/ppe
+ * @desc    Create new PPE item
+ * @access  Private (Admin, Stores)
+ */
+router.post(
+  '/',
+  authenticate,
+  requireRole('admin', 'stores'),
+  [
+    body('name').trim().notEmpty().withMessage('PPE name is required'),
+    body('itemCode').trim().notEmpty().withMessage('Item code is required'),
+    body('category').trim().notEmpty().withMessage('Category is required'),
+    body('replacementFrequency').isInt({ min: 1 }).withMessage('Replacement frequency must be at least 1 month'),
+    body('isMandatory').isBoolean().withMessage('isMandatory must be a boolean'),
+    body('description').optional().trim(),
+    body('specifications').optional().trim()
+  ],
+  validate,
+  auditLog('CREATE', 'PPEItem'),
+  async (req, res, next) => {
+    try {
+      const {
+        name,
+        itemCode,
+        category,
+        replacementFrequency,
+        isMandatory,
+        description,
+        specifications
+      } = req.body;
+
+      // Check if item code exists
+      const existing = await PPEItem.findOne({ where: { itemCode } });
+      if (existing) {
+        return res.status(409).json({
+          success: false,
+          message: 'Item code already exists'
+        });
+      }
+
+      const ppeItem = await PPEItem.create({
+        name,
+        itemCode,
+        category,
+        replacementFrequency,
+        isMandatory,
+        description,
+        specifications
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'PPE item created successfully',
+        data: ppeItem
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   PUT /api/v1/ppe/:id
+ * @desc    Update PPE item
+ * @access  Private (Admin, Stores)
+ */
+router.put(
+  '/:id',
+  authenticate,
+  requireRole('admin', 'stores'),
+  [
+    param('id').isUUID().withMessage('Invalid PPE item ID'),
+    body('name').optional().trim().notEmpty().withMessage('PPE name cannot be empty'),
+    body('itemCode').optional().trim().notEmpty().withMessage('Item code cannot be empty'),
+    body('category').optional().trim().notEmpty().withMessage('Category cannot be empty'),
+    body('replacementFrequency').optional().isInt({ min: 1 }).withMessage('Replacement frequency must be at least 1 month'),
+    body('isMandatory').optional().isBoolean().withMessage('isMandatory must be a boolean'),
+    body('description').optional().trim(),
+    body('specifications').optional().trim()
+  ],
+  validate,
+  auditLog('UPDATE', 'PPEItem'),
+  async (req, res, next) => {
+    try {
+      const ppeItem = await PPEItem.findByPk(req.params.id);
+
+      if (!ppeItem) {
+        return res.status(404).json({
+          success: false,
+          message: 'PPE item not found'
+        });
+      }
+
+      // Check if item code is being changed and already exists
+      if (req.body.itemCode && req.body.itemCode !== ppeItem.itemCode) {
+        const existing = await PPEItem.findOne({ where: { itemCode: req.body.itemCode } });
+        if (existing) {
+          return res.status(409).json({
+            success: false,
+            message: 'Item code already exists'
+          });
+        }
+      }
+
+      await ppeItem.update(req.body);
+
+      res.json({
+        success: true,
+        message: 'PPE item updated successfully',
+        data: ppeItem
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   DELETE /api/v1/ppe/:id
+ * @desc    Delete PPE item
+ * @access  Private (Admin only)
+ */
+router.delete(
+  '/:id',
+  authenticate,
+  requireRole('admin'),
+  auditLog('DELETE', 'PPEItem'),
+  async (req, res, next) => {
+    try {
+      const ppeItem = await PPEItem.findByPk(req.params.id);
+
+      if (!ppeItem) {
+        return res.status(404).json({
+          success: false,
+          message: 'PPE item not found'
+        });
+      }
+
+      // Check if PPE item has stock or allocations
+      const stock = await Stock.findOne({ where: { ppeItemId: ppeItem.id } });
+      if (stock && stock.quantity > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Cannot delete PPE item with existing stock. Clear stock first.'
+        });
+      }
+
+      await ppeItem.destroy();
+
+      res.json({
+        success: true,
+        message: 'PPE item deleted successfully'
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+module.exports = router;

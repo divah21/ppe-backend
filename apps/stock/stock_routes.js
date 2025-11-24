@@ -1,0 +1,352 @@
+const express = require('express');
+const router = express.Router();
+const { Stock, PPEItem } = require('../../models');
+const { sequelize } = require('../../database/db');
+const { authenticate } = require('../../middlewares/auth_middleware');
+const { requireRole } = require('../../middlewares/role_middleware');
+const { auditLog } = require('../../middlewares/audit_middleware');
+const { body, param } = require('express-validator');
+const { validate } = require('../../middlewares/validation_middleware');
+const { Op } = require('sequelize');
+const { validateRequestedSize } = require('../../middlewares/size_validation');
+
+/**
+ * @route   GET /api/v1/stock
+ * @desc    Get all stock items
+ * @access  Private
+ */
+router.get('/', authenticate, async (req, res, next) => {
+  try {
+    const { ppeItemId, lowStock, search, page = 1, limit = 50 } = req.query;
+
+    const where = {};
+    
+    if (ppeItemId) where.ppeItemId = ppeItemId;
+
+    // Low stock filter
+    if (lowStock === 'true') {
+      where[Op.and] = [
+        db.where(db.col('quantity'), '<=', db.col('minLevel'))
+      ];
+    }
+
+    const include = [{
+      model: PPEItem,
+      as: 'ppeItem',
+      ...(search && {
+        where: {
+          [Op.or]: [
+            { name: { [Op.iLike]: `%${search}%` } },
+            { itemCode: { [Op.iLike]: `%${search}%` } },
+            { category: { [Op.iLike]: `%${search}%` } }
+          ]
+        }
+      })
+    }];
+
+    const offset = (page - 1) * limit;
+
+    const { count, rows: stockItems } = await Stock.findAndCountAll({
+      where,
+      include,
+      limit: parseInt(limit),
+      offset,
+      order: [['updatedAt', 'DESC']]
+    });
+
+    res.json({
+      success: true,
+      data: stockItems,
+      pagination: {
+        total: count,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(count / limit)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/stock/low-stock
+ * @desc    Get low stock items
+ * @access  Private (Stores)
+ */
+router.get('/low-stock', authenticate, requireRole('stores', 'admin'), async (req, res, next) => {
+  try {
+    const stockItems = await Stock.findAll({
+      include: [{
+        model: PPEItem,
+        as: 'ppeItem'
+      }],
+      order: [
+        [sequelize.literal('quantity - "minLevel"'), 'ASC']
+      ]
+    });
+
+    const lowStock = stockItems.filter(item => item.quantity <= item.minLevel);
+
+    res.json({
+      success: true,
+      data: lowStock,
+      meta: {
+        totalLowStock: lowStock.length,
+        criticalStock: lowStock.filter(item => item.quantity === 0).length
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/stock/:id
+ * @desc    Get stock item by ID
+ * @access  Private
+ */
+router.get('/:id', authenticate, async (req, res, next) => {
+  try {
+    const stock = await Stock.findByPk(req.params.id, {
+      include: [{
+        model: PPEItem,
+        as: 'ppeItem'
+      }]
+    });
+
+    if (!stock) {
+      return res.status(404).json({
+        success: false,
+        message: 'Stock item not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: stock
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   POST /api/v1/stock
+ * @desc    Add stock item
+ * @access  Private (Stores, Admin)
+ */
+router.post(
+  '/',
+  authenticate,
+  requireRole('stores', 'admin'),
+  [
+    body('ppeItemId').isUUID().withMessage('Invalid PPE item ID'),
+    body('quantity').isInt({ min: 0 }).withMessage('Quantity must be a positive integer'),
+    body('minLevel').isInt({ min: 0 }).withMessage('Min level must be a positive integer'),
+    body('unitCost').isDecimal({ decimal_digits: '0,2' }).withMessage('Unit cost must be a valid decimal'),
+    body('size').optional().isString().withMessage('Size must be a string'),
+    body('color').optional().isString().withMessage('Color must be a string'),
+    body('location').optional().isString().withMessage('Location must be a string'),
+    body('supplier').optional().trim().notEmpty().withMessage('Supplier cannot be empty'),
+    body('batchNumber').optional().trim()
+  ],
+  validate,
+  auditLog('CREATE', 'Stock'),
+  async (req, res, next) => {
+    try {
+      const { ppeItemId, quantity, minLevel, unitCost, supplier, batchNumber, size, color, location } = req.body;
+
+      // Check if PPE item exists
+      const ppeItem = await PPEItem.findByPk(ppeItemId);
+      if (!ppeItem) {
+        return res.status(404).json({
+          success: false,
+          message: 'PPE item not found'
+        });
+      }
+
+      // Validate size against item's size scale
+      if (size !== undefined) {
+        const result = await validateRequestedSize(ppeItem, size);
+        if (!result.valid) {
+          return res.status(400).json({ success: false, message: result.message });
+        }
+      }
+
+      // Check if stock entry already exists for this variant
+      const existing = await Stock.findOne({ where: { ppeItemId, size: size || null, color: color || null, location: location || 'Main Store' } });
+      if (existing) {
+        return res.status(409).json({
+          success: false,
+          message: 'Stock entry already exists for this PPE item/variant. Use update endpoint to modify.'
+        });
+      }
+
+      const stock = await Stock.create({
+        ppeItemId,
+        quantity,
+        minLevel,
+        unitCost,
+        supplier,
+        batchNumber,
+        size: size || null,
+        color: color || null,
+        location: location || 'Main Store'
+      });
+
+      const createdStock = await Stock.findByPk(stock.id, {
+        include: [{ model: PPEItem, as: 'ppeItem' }]
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Stock item created successfully',
+        data: createdStock
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   PUT /api/v1/stock/:id
+ * @desc    Update stock item
+ * @access  Private (Stores, Admin)
+ */
+router.put(
+  '/:id',
+  authenticate,
+  requireRole('stores', 'admin'),
+  [
+    param('id').isUUID().withMessage('Invalid stock ID'),
+    body('quantity').optional().isInt({ min: 0 }).withMessage('Quantity must be a positive integer'),
+    body('minLevel').optional().isInt({ min: 0 }).withMessage('Min level must be a positive integer'),
+    body('unitCost').optional().isDecimal({ decimal_digits: '0,2' }).withMessage('Unit cost must be a valid decimal'),
+    body('supplier').optional().trim(),
+    body('batchNumber').optional().trim()
+  ],
+  validate,
+  auditLog('UPDATE', 'Stock'),
+  async (req, res, next) => {
+    try {
+      const stock = await Stock.findByPk(req.params.id);
+
+      if (!stock) {
+        return res.status(404).json({
+          success: false,
+          message: 'Stock item not found'
+        });
+      }
+
+      await stock.update(req.body);
+
+      const updatedStock = await Stock.findByPk(stock.id, {
+        include: [{ model: PPEItem, as: 'ppeItem' }]
+      });
+
+      res.json({
+        success: true,
+        message: 'Stock item updated successfully',
+        data: updatedStock
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   PUT /api/v1/stock/:id/adjust
+ * @desc    Adjust stock quantity (add or remove)
+ * @access  Private (Stores, Admin)
+ */
+router.put(
+  '/:id/adjust',
+  authenticate,
+  requireRole('stores', 'admin'),
+  [
+    param('id').isUUID().withMessage('Invalid stock ID'),
+    body('adjustment').isInt().withMessage('Adjustment must be an integer'),
+    body('reason').trim().notEmpty().withMessage('Reason is required')
+  ],
+  validate,
+  auditLog('UPDATE', 'Stock'),
+  async (req, res, next) => {
+    try {
+      const { adjustment, reason } = req.body;
+
+      const stock = await Stock.findByPk(req.params.id, {
+        include: [{ model: PPEItem, as: 'ppeItem' }]
+      });
+
+      if (!stock) {
+        return res.status(404).json({
+          success: false,
+          message: 'Stock item not found'
+        });
+      }
+
+      const newQuantity = stock.quantity + adjustment;
+
+      if (newQuantity < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Adjustment would result in negative stock'
+        });
+      }
+
+      await stock.update({ quantity: newQuantity });
+
+      res.json({
+        success: true,
+        message: `Stock adjusted successfully. ${adjustment > 0 ? 'Added' : 'Removed'} ${Math.abs(adjustment)} units.`,
+        data: stock,
+        meta: {
+          adjustment,
+          reason,
+          previousQuantity: stock.quantity - adjustment,
+          newQuantity: stock.quantity
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   DELETE /api/v1/stock/:id
+ * @desc    Delete stock item
+ * @access  Private (Admin only)
+ */
+router.delete(
+  '/:id',
+  authenticate,
+  requireRole('admin'),
+  auditLog('DELETE', 'Stock'),
+  async (req, res, next) => {
+    try {
+      const stock = await Stock.findByPk(req.params.id);
+
+      if (!stock) {
+        return res.status(404).json({
+          success: false,
+          message: 'Stock item not found'
+        });
+      }
+
+      await stock.destroy();
+
+      res.json({
+        success: true,
+        message: 'Stock item deleted successfully'
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+module.exports = router;
