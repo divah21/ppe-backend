@@ -9,6 +9,26 @@ const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
 
 /**
+ * @route   GET /api/v1/users/roles
+ * @desc    Get all roles
+ * @access  Private
+ */
+router.get('/roles', authenticate, async (req, res, next) => {
+  try {
+    const roles = await Role.findAll({
+      order: [['name', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: roles
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * @route   GET /api/v1/users
  * @desc    Get all users
  * @access  Private (Admin only)
@@ -60,6 +80,104 @@ router.get('/', authenticate, requireRole('admin'), async (req, res, next) => {
     next(error);
   }
 });
+
+/**
+ * @route   POST /api/v1/users
+ * @desc    Create new user
+ * @access  Private (Admin only)
+ */
+router.post(
+  '/',
+  authenticate,
+  requireRole('admin'),
+  [
+    body('username').trim().notEmpty().withMessage('Username is required')
+      .isLength({ min: 3 }).withMessage('Username must be at least 3 characters'),
+    body('password').trim().notEmpty().withMessage('Password is required')
+      .isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+    body('firstName').trim().notEmpty().withMessage('First name is required'),
+    body('lastName').trim().notEmpty().withMessage('Last name is required'),
+    body('email').trim().isEmail().withMessage('Invalid email').normalizeEmail(),
+    body('roleId').isUUID().withMessage('Invalid role ID'),
+    body('departmentId').optional().isUUID().withMessage('Invalid department ID'),
+    body('sectionId').optional().isUUID().withMessage('Invalid section ID')
+  ],
+  validate,
+  auditLog('CREATE', 'User'),
+  async (req, res, next) => {
+    try {
+      const { username, password, firstName, lastName, email, roleId, departmentId, sectionId } = req.body;
+
+      // Check if username already exists
+      const existingUsername = await User.findOne({ where: { username } });
+      if (existingUsername) {
+        return res.status(409).json({
+          success: false,
+          message: 'Username already exists'
+        });
+      }
+
+      // Check if email already exists
+      const existingEmail = await User.findOne({ where: { email } });
+      if (existingEmail) {
+        return res.status(409).json({
+          success: false,
+          message: 'Email already exists'
+        });
+      }
+
+      // Verify role exists
+      const role = await Role.findByPk(roleId);
+      if (!role) {
+        return res.status(404).json({
+          success: false,
+          message: 'Role not found'
+        });
+      }
+
+      // Verify department exists if provided
+      if (departmentId) {
+        const department = await Department.findByPk(departmentId);
+        if (!department) {
+          return res.status(404).json({
+            success: false,
+            message: 'Department not found'
+          });
+        }
+      }
+
+      // Create user
+      const user = await User.create({
+        username,
+        firstName,
+        lastName,
+        email,
+        roleId,
+        departmentId: departmentId || null,
+        sectionId: sectionId || null,
+        passwordHash: password, // Will be hashed by the beforeCreate hook in the model
+        isActive: true
+      });
+
+      // Fetch complete user data with associations
+      const createdUser = await User.findByPk(user.id, {
+        include: [
+          { model: Role, as: 'role' },
+          { model: Department, as: 'department', required: false }
+        ],
+        attributes: { exclude: ['passwordHash'] }
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'User created successfully',
+        data: createdUser
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 /**
  * @route   GET /api/v1/users/:id

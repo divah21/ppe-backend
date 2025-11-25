@@ -19,6 +19,14 @@ router.get('/', authenticate, async (req, res, next) => {
 
     const where = {};
     
+    // ROLE-BASED FILTERING: Section Rep can only see employees in their section
+    if (req.userRole === 'section-rep' && req.user.sectionId) {
+      where.sectionId = req.user.sectionId;
+    } else if (req.userRole === 'dept-rep' && req.user.departmentId) {
+      // Department Rep can see all employees in their department
+      // Will be filtered via include below
+    }
+    
     if (search) {
       where[Op.or] = [
         { worksNumber: { [Op.iLike]: `%${search}%` } },
@@ -46,6 +54,9 @@ router.get('/', authenticate, async (req, res, next) => {
     // Filter by department through section
     if (departmentId) {
       include[0].where = { departmentId };
+    } else if (req.userRole === 'dept-rep' && req.user.departmentId) {
+      // Department Rep sees only their department
+      include[0].where = { departmentId: req.user.departmentId };
     }
 
     const offset = (page - 1) * limit;

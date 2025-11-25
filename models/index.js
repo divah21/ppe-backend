@@ -64,17 +64,20 @@ JobTitlePPEMatrix.belongsTo(PPEItem, { foreignKey: 'ppeItemId', as: 'ppeItem' })
 PPEItem.hasMany(JobTitlePPEMatrix, { foreignKey: 'ppeItemId', as: 'jobTitleRequirements' });
 
 // Request <-> User (created by)
-Request.belongsTo(User, { foreignKey: 'createdById', as: 'createdBy' });
-User.hasMany(Request, { foreignKey: 'createdById', as: 'createdRequests' });
+Request.belongsTo(User, { foreignKey: 'requestedById', as: 'createdBy' });
+User.hasMany(Request, { foreignKey: 'requestedById', as: 'createdRequests' });
 
 // Request <-> Employee (target employee)
-Request.belongsTo(Employee, { foreignKey: 'targetEmployeeId', as: 'targetEmployee' });
-Employee.hasMany(Request, { foreignKey: 'targetEmployeeId', as: 'requests' });
+Request.belongsTo(Employee, { foreignKey: 'employeeId', as: 'targetEmployee' });
+Employee.hasMany(Request, { foreignKey: 'employeeId', as: 'requests' });
 
 // Request <-> User (approvers)
-Request.belongsTo(User, { foreignKey: 'hodApproverId', as: 'hodApprover', allowNull: true });
+Request.belongsTo(User, { foreignKey: 'sectionRepApproverId', as: 'sectionRepApprover', allowNull: true });
 Request.belongsTo(User, { foreignKey: 'deptRepApproverId', as: 'deptRepApprover', allowNull: true });
+Request.belongsTo(User, { foreignKey: 'hodApproverId', as: 'hodApprover', allowNull: true });
 Request.belongsTo(User, { foreignKey: 'storesApproverId', as: 'storesApprover', allowNull: true });
+Request.belongsTo(User, { foreignKey: 'rejectedById', as: 'rejectedBy', allowNull: true });
+Request.belongsTo(User, { foreignKey: 'fulfilledByUserId', as: 'fulfilledBy', allowNull: true });
 
 // Request <-> Department (for filtering/reporting)
 Request.belongsTo(Department, { foreignKey: 'departmentId', as: 'department' });
@@ -116,17 +119,13 @@ Department.hasMany(Budget, { foreignKey: 'departmentId', as: 'budgets' });
 Budget.belongsTo(Section, { foreignKey: 'sectionId', as: 'section', allowNull: true });
 Section.hasMany(Budget, { foreignKey: 'sectionId', as: 'budgets' });
 
+// FailureReport <-> Employee
+FailureReport.belongsTo(Employee, { foreignKey: 'employeeId', as: 'employee' });
+Employee.hasMany(FailureReport, { foreignKey: 'employeeId', as: 'failureReports' });
+
 // FailureReport <-> PPEItem
 FailureReport.belongsTo(PPEItem, { foreignKey: 'ppeItemId', as: 'ppeItem' });
 PPEItem.hasMany(FailureReport, { foreignKey: 'ppeItemId', as: 'failureReports' });
-
-// FailureReport <-> User (reported by)
-FailureReport.belongsTo(User, { foreignKey: 'reportedById', as: 'reportedBy' });
-User.hasMany(FailureReport, { foreignKey: 'reportedById', as: 'reportedFailures' });
-
-// FailureReport <-> User (reviewed by SHEQ)
-FailureReport.belongsTo(User, { foreignKey: 'sheqReviewerId', as: 'sheqReviewer', allowNull: true });
-User.hasMany(FailureReport, { foreignKey: 'sheqReviewerId', as: 'reviewedFailures' });
 
 // FailureReport <-> Allocation (optional link to specific allocation)
 FailureReport.belongsTo(Allocation, { foreignKey: 'allocationId', as: 'allocation', allowNull: true });

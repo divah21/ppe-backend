@@ -23,6 +23,7 @@ const allocationRoutes = require('./apps/allocations/allocation_routes');
 const budgetRoutes = require('./apps/budgets/budget_routes');
 const valuationRoutes = require('./apps/valuation/valuation_routes');
 const sizesRoutes = require('./apps/sizes/size_routes');
+const failureRoutes = require('./apps/failures/failure_routes');
 
 // Import error handlers
 const { errorHandler, notFound } = require('./middlewares/error_handler');
@@ -99,6 +100,7 @@ app.use(`${API_PREFIX}/allocations`, allocationRoutes);
 app.use(`${API_PREFIX}/budgets`, budgetRoutes);
 app.use(`${API_PREFIX}/valuation`, valuationRoutes);
 app.use(`${API_PREFIX}/sizes`, sizesRoutes);
+app.use(`${API_PREFIX}/failures`, failureRoutes);
 
 // 404 Handler
 app.use(notFound);

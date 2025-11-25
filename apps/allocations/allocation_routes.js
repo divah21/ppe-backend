@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Allocation, Employee, PPEItem, User, Request, RequestItem, Stock } = require('../../models');
+const { Allocation, Employee, PPEItem, User, Request, RequestItem, Stock, Section } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
@@ -21,11 +21,14 @@ router.get('/', authenticate, async (req, res, next) => {
       fromDate,
       toDate,
       renewalDue,
+      departmentId,
+      sectionId,
       page = 1,
       limit = 50
     } = req.query;
 
     const where = {};
+    const employeeWhere = {};
     
     if (employeeId) where.employeeId = employeeId;
     if (ppeItemId) where.ppeItemId = ppeItemId;
@@ -36,6 +39,14 @@ router.get('/', authenticate, async (req, res, next) => {
         ...where.issueDate,
         [Op.lte]: new Date(toDate)
       };
+    }
+
+    // Filter by department or section via employee
+    if (departmentId) {
+      employeeWhere['$employee.section.department_id$'] = departmentId;
+    }
+    if (sectionId) {
+      employeeWhere['$employee.section_id$'] = sectionId;
     }
 
     // Filter by renewal due date
@@ -54,9 +65,15 @@ router.get('/', authenticate, async (req, res, next) => {
     const offset = (page - 1) * limit;
 
     const { count, rows: allocations } = await Allocation.findAndCountAll({
-      where,
+      where: { ...where, ...employeeWhere },
       include: [
-        { model: Employee, as: 'employee' },
+        { 
+          model: Employee, 
+          as: 'employee',
+          include: [
+            { model: Section, as: 'section' }
+          ]
+        },
         { model: PPEItem, as: 'ppeItem' },
         { model: User, as: 'issuedBy', attributes: ['id', 'username', 'firstName', 'lastName'] }
       ],

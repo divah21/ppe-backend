@@ -7,6 +7,30 @@ const FailureReport = sequelize.define('FailureReport', {
     defaultValue: DataTypes.UUIDV4,
     primaryKey: true
   },
+  employeeId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: {
+      model: 'employees',
+      key: 'id'
+    }
+  },
+  ppeItemId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: {
+      model: 'ppe_items',
+      key: 'id'
+    }
+  },
+  allocationId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'allocations',
+      key: 'id'
+    }
+  },
   description: {
     type: DataTypes.TEXT,
     allowNull: false

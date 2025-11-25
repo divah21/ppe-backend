@@ -63,9 +63,11 @@ router.get('/', authenticate, async (req, res) => {
     } else if (userRole === 'department-rep' && req.user.departmentId) {
       // Dept Rep sees requests from their department that need their approval
       where.status = { [Op.in]: ['dept-rep-review', 'hod-review', 'stores-review', 'approved', 'fulfilled'] };
+      where['$targetEmployee.section.department_id$'] = req.user.departmentId;
     } else if (userRole === 'hod-hos' && req.user.departmentId) {
       // HOD sees requests from their department that need their approval
       where.status = { [Op.in]: ['hod-review', 'stores-review', 'approved', 'fulfilled'] };
+      where['$targetEmployee.section.department_id$'] = req.user.departmentId;
     } else if (userRole === 'stores') {
       // Stores sees all requests that reached stores stage
       where.status = { [Op.in]: ['stores-review', 'approved', 'fulfilled'] };

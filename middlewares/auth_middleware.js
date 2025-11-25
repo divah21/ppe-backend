@@ -30,11 +30,23 @@ const authenticate = async (req, res, next) => {
 
     // Get user from database
     const user = await User.findByPk(decoded.userId, {
-      include: [{
-        model: Role,
-        as: 'role',
-        attributes: ['id', 'name', 'description', 'permissions']
-      }],
+      include: [
+        {
+          model: Role,
+          as: 'role',
+          attributes: ['id', 'name', 'description', 'permissions']
+        },
+        {
+          model: require('../models/department'),
+          as: 'department',
+          attributes: ['id', 'name']
+        },
+        {
+          model: require('../models/section'),
+          as: 'section',
+          attributes: ['id', 'name', 'departmentId']
+        }
+      ],
       attributes: { exclude: ['passwordHash'] }
     });
 

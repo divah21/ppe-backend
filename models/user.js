@@ -48,6 +48,22 @@ const User = sequelize.define('User', {
     type: DataTypes.BOOLEAN,
     defaultValue: true
   },
+  departmentId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'departments',
+      key: 'id'
+    }
+  },
+  sectionId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'sections',
+      key: 'id'
+    }
+  },
   lastLogin: {
     type: DataTypes.DATE,
     allowNull: true

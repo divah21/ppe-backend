@@ -1,23 +1,12 @@
 const { sequelize } = require('./db');
 const models = require('../models');
 
-const syncDatabase = async () => {
+const syncDatabase = async (options = {}) => {
   try {
     console.log('🔄 Starting database synchronization...\n');
     
-    // First, ensure migrations ran
-    console.log('Running pre-sync migrations...');
-    const { exec } = require('child_process');
-    await new Promise((resolve, reject) => {
-      exec('node database/migrate.js', (error, stdout) => {
-        if (error) reject(error);
-        console.log(stdout);
-        resolve();
-      });
-    });
-    
     // Sync all models - creates new tables
-    await sequelize.sync();
+    await sequelize.sync(options);
     
     console.log('\n✅ Database synchronized successfully!');
     console.log('\n📊 Models synced:');

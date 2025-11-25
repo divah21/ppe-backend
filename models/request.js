@@ -9,16 +9,25 @@ const Request = sequelize.define('Request', {
   },
   status: {
     type: DataTypes.ENUM(
-      'pending',
-      'hod-approved',
-      'dept-rep-approved',
-      'stores-approved',
-      'rejected',
-      'completed',
-      'cancelled'
+      'pending',           // Created by Section Rep
+      'dept-rep-review',   // Approved by Section Rep, waiting for Dept Rep
+      'hod-review',        // Approved by Dept Rep, waiting for HOD
+      'stores-review',     // Approved by HOD, waiting for Stores
+      'approved',          // Approved by Stores, ready to fulfill
+      'fulfilled',         // Items issued to employee
+      'rejected',          // Rejected at any stage
+      'cancelled'          // Cancelled by requester
     ),
     defaultValue: 'pending',
     allowNull: false
+  },
+  sectionRepApprovalDate: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  sectionRepComment: {
+    type: DataTypes.TEXT,
+    allowNull: true
   },
   requestType: {
     type: DataTypes.ENUM('new', 'replacement', 'emergency', 'annual'),
@@ -32,19 +41,19 @@ const Request = sequelize.define('Request', {
     type: DataTypes.TEXT,
     allowNull: true
   },
-  hodApprovalDate: {
-    type: DataTypes.DATE,
-    allowNull: true
-  },
-  hodComment: {
-    type: DataTypes.TEXT,
-    allowNull: true
-  },
   deptRepApprovalDate: {
     type: DataTypes.DATE,
     allowNull: true
   },
   deptRepComment: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  hodApprovalDate: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  hodComment: {
     type: DataTypes.TEXT,
     allowNull: true
   },
@@ -56,7 +65,19 @@ const Request = sequelize.define('Request', {
     type: DataTypes.TEXT,
     allowNull: true
   },
-  completedDate: {
+  fulfilledDate: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  fulfilledByUserId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  rejectedById: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  rejectedAt: {
     type: DataTypes.DATE,
     allowNull: true
   }
