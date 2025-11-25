@@ -175,14 +175,14 @@ router.post(
         });
       }
 
-      // Allow fulfillment for requests that are approved/ready for stores processing
+      // Allow fulfillment for requests that are approved by stores (legacy 'approved')
       const currentStatus = (request.status || '').toString().toLowerCase();
-      const allowed = ['stores-approved', 'stores-processing'];
+      const allowed = ['approved'];
       if (!allowed.includes(currentStatus)) {
         await transaction.rollback();
         return res.status(400).json({
           success: false,
-          message: `Request must be one of: ${allowed.join(', ')} before fulfillment. Current status: ${request.status}`
+          message: `Request must be '${allowed[0]}' before fulfillment. Current status: ${request.status}`
         });
       }
 

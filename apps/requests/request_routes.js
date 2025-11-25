@@ -454,7 +454,7 @@ router.put('/:id/stores-approve', authenticate, authorize(['stores', 'admin']), 
     }
 
     await request.update({
-      status: 'stores-approved',
+      status: 'approved',
       storesApprovalDate: new Date(),
       storesApproverId: req.user.id,
       storesComment: comment
@@ -474,7 +474,7 @@ router.put('/:id/stores-approve', authenticate, authorize(['stores', 'admin']), 
 
     res.json({
       success: true,
-      message: 'Request stores-approved. Ready for fulfillment.',
+      message: 'Request approved. Ready for fulfillment.',
       data: updatedRequest
     });
   } catch (error) {
