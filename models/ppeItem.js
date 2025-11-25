@@ -94,6 +94,18 @@ const PPEItem = sequelize.define('PPEItem', {
     allowNull: true,
     comment: 'References size_scales.code to indicate which size set applies'
   },
+  availableSizes: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    field: 'available_sizes',
+    comment: 'JSON array of available sizes for this item (e.g., ["S", "M", "L", "XL"])'
+  },
+  availableColors: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    field: 'available_colors',
+    comment: 'JSON array of available colors for this item (e.g., ["Blue", "Red", "Yellow"])'
+  },
   isActive: {
     type: DataTypes.BOOLEAN,
     defaultValue: true

@@ -144,18 +144,33 @@ router.post(
     body('ppeItemId').isUUID().withMessage('Invalid PPE item ID'),
     body('quantity').isInt({ min: 0 }).withMessage('Quantity must be a positive integer'),
     body('minLevel').isInt({ min: 0 }).withMessage('Min level must be a positive integer'),
-    body('unitCost').isDecimal({ decimal_digits: '0,2' }).withMessage('Unit cost must be a valid decimal'),
+    body('maxLevel').optional().isInt({ min: 0 }).withMessage('Max level must be a positive integer'),
+    body('reorderPoint').optional().isInt({ min: 0 }).withMessage('Reorder point must be a positive integer'),
+    body('unitCost').optional().isDecimal({ decimal_digits: '0,2' }).withMessage('Unit cost must be a valid decimal'),
+    body('unitPriceUSD').isDecimal({ decimal_digits: '0,2' }).withMessage('Unit price USD must be a valid decimal'),
     body('size').optional().isString().withMessage('Size must be a string'),
     body('color').optional().isString().withMessage('Color must be a string'),
     body('location').optional().isString().withMessage('Location must be a string'),
+    body('binLocation').optional().isString().withMessage('Bin location must be a string'),
     body('supplier').optional().trim().notEmpty().withMessage('Supplier cannot be empty'),
-    body('batchNumber').optional().trim()
+    body('batchNumber').optional().trim(),
+    body('expiryDate').optional().isISO8601().withMessage('Expiry date must be a valid date'),
+    body('stockAccount').optional().isString().withMessage('Stock account must be a string'),
+    body('notes').optional().isString().withMessage('Notes must be a string'),
+    body('eligibleDepartments').optional().isArray().withMessage('Eligible departments must be an array'),
+    body('eligibleDepartments.*').optional().isUUID().withMessage('Each department ID must be a UUID'),
+    body('eligibleSections').optional().isArray().withMessage('Eligible sections must be an array'),
+    body('eligibleSections.*').optional().isUUID().withMessage('Each section ID must be a UUID')
   ],
   validate,
   auditLog('CREATE', 'Stock'),
   async (req, res, next) => {
     try {
-      const { ppeItemId, quantity, minLevel, unitCost, supplier, batchNumber, size, color, location } = req.body;
+      const { 
+        ppeItemId, quantity, minLevel, maxLevel, reorderPoint, unitCost, unitPriceUSD,
+        supplier, batchNumber, size, color, location, binLocation, expiryDate, 
+        stockAccount, notes, eligibleDepartments, eligibleSections 
+      } = req.body;
 
       // Check if PPE item exists
       const ppeItem = await PPEItem.findByPk(ppeItemId);
@@ -187,12 +202,21 @@ router.post(
         ppeItemId,
         quantity,
         minLevel,
-        unitCost,
-        supplier,
-        batchNumber,
+        maxLevel: maxLevel || null,
+        reorderPoint: reorderPoint || null,
+        unitCost: unitCost || null,
+        unitPriceUSD,
+        supplier: supplier || null,
+        batchNumber: batchNumber || null,
         size: size || null,
         color: color || null,
-        location: location || 'Main Store'
+        location: location || 'Main Store',
+        binLocation: binLocation || null,
+        expiryDate: expiryDate || null,
+        stockAccount: stockAccount || null,
+        notes: notes || null,
+        eligibleDepartments: eligibleDepartments || null,
+        eligibleSections: eligibleSections || null
       });
 
       const createdStock = await Stock.findByPk(stock.id, {

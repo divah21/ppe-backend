@@ -91,6 +91,20 @@ const Stock = sequelize.define('Stock', {
   notes: {
     type: DataTypes.TEXT,
     allowNull: true
+  },
+  eligibleDepartments: {
+    type: DataTypes.ARRAY(DataTypes.UUID),
+    allowNull: true,
+    defaultValue: null,
+    field: 'eligible_departments',
+    comment: 'Array of department IDs that can access this stock. NULL means all departments'
+  },
+  eligibleSections: {
+    type: DataTypes.ARRAY(DataTypes.UUID),
+    allowNull: true,
+    defaultValue: null,
+    field: 'eligible_sections',
+    comment: 'Array of section IDs that can access this stock. NULL means all sections'
   }
 }, {
   tableName: 'stocks',

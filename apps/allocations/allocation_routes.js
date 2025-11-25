@@ -149,7 +149,7 @@ router.post(
   requireRole('stores', 'admin'),
   auditLog('CREATE', 'Allocation'),
   async (req, res, next) => {
-    const transaction = await db.transaction();
+    const transaction = await db.sequelize.transaction();
 
     try {
       const { requestId } = req.params;
@@ -158,7 +158,7 @@ router.post(
       // Get request with items
       const request = await Request.findByPk(requestId, {
         include: [
-          { model: Employee, as: 'employee' },
+          { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section' }] },
           {
             model: RequestItem,
             as: 'items',
@@ -175,11 +175,14 @@ router.post(
         });
       }
 
-      if (request.status !== 'stores-approved') {
+      // Allow fulfillment for requests that are approved/ready for stores processing
+      const currentStatus = (request.status || '').toString().toLowerCase();
+      const allowed = ['stores-approved', 'stores-processing'];
+      if (!allowed.includes(currentStatus)) {
         await transaction.rollback();
         return res.status(400).json({
           success: false,
-          message: 'Request must be stores-approved before fulfillment'
+          message: `Request must be one of: ${allowed.join(', ')} before fulfillment. Current status: ${request.status}`
         });
       }
 
@@ -197,16 +200,26 @@ router.post(
           });
         }
 
-        // Check stock availability
-        const stock = await Stock.findOne({
-          where: { ppeItemId: requestItem.ppeItemId }
-        });
+        // Check stock availability (including size if applicable)
+        const requestedSize = allocItem.size || requestItem.size;
+        const stockWhere = { ppeItemId: requestItem.ppeItemId };
+        
+        // Only add size constraint if the item has size variants and a size is specified
+        if (requestItem.ppeItem.hasSizeVariants && requestedSize) {
+          stockWhere.size = requestedSize;
+        } else if (!requestItem.ppeItem.hasSizeVariants) {
+          // For non-sized items, ensure we get stock with no size specified
+          stockWhere.size = null;
+        }
+        
+        const stock = await Stock.findOne({ where: stockWhere });
 
         if (!stock || stock.quantity < allocItem.quantity) {
           await transaction.rollback();
+          const sizeInfo = requestedSize ? ` (size: ${requestedSize})` : '';
           return res.status(400).json({
             success: false,
-            message: `Insufficient stock for ${requestItem.ppeItem.name}`
+            message: `Insufficient stock for ${requestItem.ppeItem.name}${sizeInfo}. Available: ${stock ? stock.quantity : 0}, Requested: ${allocItem.quantity}`
           });
         }
 
@@ -283,7 +296,7 @@ router.put(
   requireRole('stores', 'admin'),
   auditLog('UPDATE', 'Allocation'),
   async (req, res, next) => {
-    const transaction = await db.transaction();
+    const transaction = await db.sequelize.transaction();
 
     try {
       const { returnReason, condition } = req.body;
@@ -360,7 +373,7 @@ router.put(
   requireRole('stores', 'admin'),
   auditLog('CREATE', 'Allocation'),
   async (req, res, next) => {
-    const transaction = await db.transaction();
+    const transaction = await db.sequelize.transaction();
 
     try {
       const { quantity, size } = req.body;
@@ -377,18 +390,26 @@ router.put(
         });
       }
 
-      // Check stock
-      const stock = await Stock.findOne({
-        where: { ppeItemId: oldAllocation.ppeItemId }
-      });
+      // Check stock (including size if applicable)
+      const renewalSize = size || oldAllocation.size;
+      const stockWhere = { ppeItemId: oldAllocation.ppeItemId };
+      
+      if (oldAllocation.ppeItem.hasSizeVariants && renewalSize) {
+        stockWhere.size = renewalSize;
+      } else if (!oldAllocation.ppeItem.hasSizeVariants) {
+        stockWhere.size = null;
+      }
+      
+      const stock = await Stock.findOne({ where: stockWhere });
 
       const renewalQty = quantity || oldAllocation.quantity;
 
       if (!stock || stock.quantity < renewalQty) {
         await transaction.rollback();
+        const sizeInfo = renewalSize ? ` (size: ${renewalSize})` : '';
         return res.status(400).json({
           success: false,
-          message: 'Insufficient stock for renewal'
+          message: `Insufficient stock for renewal${sizeInfo}. Available: ${stock ? stock.quantity : 0}, Requested: ${renewalQty}`
         });
       }
 
