@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Employee, Section, Department, Allocation, PPEItem, Request } = require('../../models');
+const { Employee, Section, Department, Allocation, PPEItem, Request, JobTitlePPEMatrix, Stock, JobTitle } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { validate } = require('../../middlewares/validation_middleware');
@@ -48,6 +48,11 @@ router.get('/', authenticate, async (req, res, next) => {
           model: Department,
           as: 'department'
         }]
+      },
+      {
+        model: JobTitle,
+        as: 'jobTitleRef',
+        required: false
       }
     ];
 
@@ -100,6 +105,11 @@ router.get('/:id', authenticate, async (req, res, next) => {
             model: Department,
             as: 'department'
           }]
+        },
+        {
+          model: JobTitle,
+          as: 'jobTitleRef',
+          required: false
         }
       ]
     });
@@ -189,6 +199,132 @@ router.get('/:id/requests', authenticate, async (req, res, next) => {
 });
 
 /**
+ * @route   GET /api/v1/employees/:id/ppe-eligibility
+ * @desc    Get employee details plus PPE eligibility and sizing table
+ * @access  Private
+ */
+router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
+  try {
+    const employee = await Employee.findByPk(req.params.id, {
+      include: [
+        {
+          model: Section,
+          as: 'section',
+          include: [{
+            model: Department,
+            as: 'department'
+          }]
+        }
+      ]
+    });
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: 'Employee not found'
+      });
+    }
+
+    // Get PPE matrix for employee job title
+    // Support both new jobTitleId approach and legacy jobTitle string
+    const matrixWhere = { isActive: true };
+    if (employee.jobTitleId) {
+      matrixWhere.jobTitleId = employee.jobTitleId;
+    } else if (employee.jobTitle) {
+      matrixWhere.jobTitle = employee.jobTitle;
+    }
+
+    const matrixEntries = await JobTitlePPEMatrix.findAll({
+      where: matrixWhere,
+      include: [{ model: PPEItem, as: 'ppeItem' }]
+    });
+
+    // Latest allocations per PPE item for this employee
+    const allocations = await Allocation.findAll({
+      where: { employeeId: employee.id },
+      include: [{ model: PPEItem, as: 'ppeItem' }],
+      order: [['issueDate', 'DESC']]
+    });
+
+    const latestByItem = {};
+    for (const alloc of allocations) {
+      if (!latestByItem[alloc.ppeItemId]) {
+        latestByItem[alloc.ppeItemId] = alloc;
+      }
+    }
+
+    const now = new Date();
+
+    const eligibility = [];
+
+    for (const entry of matrixEntries) {
+      const ppeItem = entry.ppeItem;
+
+      // Determine available sizes either from PPE item metadata or stock variants
+      let sizes = Array.isArray(ppeItem.availableSizes) ? ppeItem.availableSizes : null;
+      if (!sizes && ppeItem.hasSizeVariants) {
+        const stockRows = await Stock.findAll({
+          where: { ppeItemId: ppeItem.id },
+          attributes: ['size'],
+          group: ['size']
+        });
+        sizes = stockRows
+          .map(s => s.size)
+          .filter(v => v !== null && v !== undefined)
+          .sort();
+      }
+
+      const latestAlloc = latestByItem[ppeItem.id];
+      let lastIssueDate = null;
+      let nextDueDate = null;
+      let eligibleNowForAnnual = true;
+
+      if (latestAlloc) {
+        lastIssueDate = latestAlloc.issueDate;
+        const months = latestAlloc.replacementFrequency || entry.replacementFrequency || ppeItem.replacementFrequency || 12;
+        const due = new Date(lastIssueDate);
+        due.setMonth(due.getMonth() + months);
+        nextDueDate = due;
+        eligibleNowForAnnual = now >= due;
+      }
+
+      eligibility.push({
+        ppeItemId: ppeItem.id,
+        itemName: ppeItem.name,
+        itemCode: ppeItem.itemCode,
+        category: ppeItem.category,
+        quantityRequired: entry.quantityRequired,
+        replacementFrequency: entry.replacementFrequency || ppeItem.replacementFrequency || null,
+        sizes,
+        hasSizeVariants: ppeItem.hasSizeVariants,
+        lastIssueDate,
+        nextDueDate,
+        eligibleNowForAnnual
+      });
+    }
+
+    const responseEmployee = {
+      id: employee.id,
+      name: `${employee.firstName} ${employee.lastName}`,
+      worksNumber: employee.worksNumber,
+      jobTitle: employee.jobTitle,
+      section: employee.section ? employee.section.name : null,
+      department: employee.section && employee.section.department ? employee.section.department.name : null
+    };
+
+    res.json({
+      success: true,
+      data: {
+        employee: responseEmployee,
+        eligibility
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * @route   POST /api/v1/employees
  * @desc    Create new employee
  * @access  Private (Admin, Section Rep, Department Rep)
@@ -207,6 +343,7 @@ router.post(
         firstName,
         lastName,
         jobType,
+        jobTitleId,
         sectionId,
         email,
         phoneNumber,
@@ -232,12 +369,24 @@ router.post(
         });
       }
 
+      // Verify job title exists if provided
+      if (jobTitleId) {
+        const jobTitle = await JobTitle.findByPk(jobTitleId);
+        if (!jobTitle) {
+          return res.status(404).json({
+            success: false,
+            message: 'Job title not found'
+          });
+        }
+      }
+
       // Create employee
       const employee = await Employee.create({
         worksNumber,
         firstName,
         lastName,
         jobType,
+        jobTitleId,
         sectionId,
         email,
         phoneNumber,
@@ -247,11 +396,18 @@ router.post(
 
       // Get employee with relations
       const createdEmployee = await Employee.findByPk(employee.id, {
-        include: [{
-          model: Section,
-          as: 'section',
-          include: [{ model: Department, as: 'department' }]
-        }]
+        include: [
+          {
+            model: Section,
+            as: 'section',
+            include: [{ model: Department, as: 'department' }]
+          },
+          {
+            model: JobTitle,
+            as: 'jobTitleRef',
+            required: false
+          }
+        ]
       });
 
       res.status(201).json({
@@ -307,11 +463,18 @@ router.put(
 
       // Get updated employee with relations
       const updatedEmployee = await Employee.findByPk(employee.id, {
-        include: [{
-          model: Section,
-          as: 'section',
-          include: [{ model: Department, as: 'department' }]
-        }]
+        include: [
+          {
+            model: Section,
+            as: 'section',
+            include: [{ model: Department, as: 'department' }]
+          },
+          {
+            model: JobTitle,
+            as: 'jobTitleRef',
+            required: false
+          }
+        ]
       });
 
       res.json({
@@ -327,7 +490,7 @@ router.put(
 
 /**
  * @route   DELETE /api/v1/employees/:id
- * @desc    Delete employee (soft delete)
+ * @desc    Delete employee (hard delete with cascade)
  * @access  Private (Admin only)
  */
 router.delete(
@@ -346,12 +509,12 @@ router.delete(
         });
       }
 
-      // Soft delete (deactivate)
-      await employee.update({ isActive: false });
+      // Hard delete - will cascade to related records (allocations, requests, etc.)
+      await employee.destroy();
 
       res.json({
         success: true,
-        message: 'Employee deactivated successfully'
+        message: 'Employee and all related records deleted successfully'
       });
     } catch (error) {
       next(error);

@@ -84,10 +84,34 @@ const requireDepartment = (req, res, next) => {
   next();
 };
 
+/**
+ * Middleware for routes that require admin or stores role
+ */
+const adminOrStoresMiddleware = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({
+      success: false,
+      message: 'Authentication required'
+    });
+  }
+
+  const userRole = req.user.role.name;
+
+  if (userRole !== 'admin' && userRole !== 'stores') {
+    return res.status(403).json({
+      success: false,
+      message: 'Access denied. Admin or Stores role required'
+    });
+  }
+
+  next();
+};
+
 module.exports = {
   requireRole,
   requirePermission,
   requireDepartment,
+  adminOrStoresMiddleware,
   // Alias to support existing route usage patterns like authorize(['admin','sheq'])
   authorize: (roles) => requireRole(...(Array.isArray(roles) ? roles : [roles]))
 };

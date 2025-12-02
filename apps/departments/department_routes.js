@@ -6,6 +6,7 @@ const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
+const { Op } = require('sequelize');
 
 /**
  * @route   GET /api/v1/departments
@@ -36,9 +37,9 @@ router.get('/', authenticate, async (req, res, next) => {
         const sections = await Section.findAll({ where: { departmentId: dept.id } });
         const sectionIds = sections.map(s => s.id);
         
-        const employeeCount = await Employee.count({
-          where: { sectionId: sectionIds }
-        });
+        const employeeCount = sectionIds.length > 0 ? await Employee.count({
+          where: { sectionId: { [Op.in]: sectionIds } }
+        }) : 0;
 
         dept.dataValues.stats = {
           sectionCount: sections.length,

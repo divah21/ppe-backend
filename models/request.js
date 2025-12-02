@@ -16,7 +16,8 @@ const Request = sequelize.define('Request', {
       'approved',          // Approved by Stores, ready to fulfill
       'fulfilled',         // Items issued to employee
       'rejected',          // Rejected at any stage
-      'cancelled'          // Cancelled by requester
+      'cancelled',         // Cancelled by requester
+      'sheq-review'        // Waiting for SHEQ Manager approval (replacement requests)
     ),
     defaultValue: 'pending',
     allowNull: false
@@ -32,6 +33,11 @@ const Request = sequelize.define('Request', {
   requestType: {
     type: DataTypes.ENUM('new', 'replacement', 'emergency', 'annual'),
     defaultValue: 'replacement'
+  },
+  isEmergencyVisitor: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+    allowNull: false
   },
   comment: {
     type: DataTypes.TEXT,
@@ -65,6 +71,18 @@ const Request = sequelize.define('Request', {
     type: DataTypes.TEXT,
     allowNull: true
   },
+  sheqApprovalDate: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  sheqComment: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  sheqApproverId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
   fulfilledDate: {
     type: DataTypes.DATE,
     allowNull: true
@@ -80,10 +98,44 @@ const Request = sequelize.define('Request', {
   rejectedAt: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+  // Foreign Keys (explicitly defined for clarity and to set constraints)
+  employeeId: {
+    type: DataTypes.UUID,
+    allowNull: true,  // Nullable for guest/visitor requests
+    references: {
+      model: 'employees',
+      key: 'id'
+    }
+  },
+  requestedById: {
+    type: DataTypes.UUID,
+    allowNull: false,  // Required - who created the request
+    references: {
+      model: 'users',
+      key: 'id'
+    }
+  },
+  departmentId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'departments',
+      key: 'id'
+    }
+  },
+  sectionId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'sections',
+      key: 'id'
+    }
   }
 }, {
   tableName: 'requests',
-  timestamps: true
+  timestamps: true,
+  underscored: true
 });
 
 module.exports = Request;

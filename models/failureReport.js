@@ -10,6 +10,7 @@ const FailureReport = sequelize.define('FailureReport', {
   employeeId: {
     type: DataTypes.UUID,
     allowNull: false,
+    field: 'employee_id',
     references: {
       model: 'employees',
       key: 'id'
@@ -18,6 +19,7 @@ const FailureReport = sequelize.define('FailureReport', {
   ppeItemId: {
     type: DataTypes.UUID,
     allowNull: false,
+    field: 'ppe_item_id',
     references: {
       model: 'ppe_items',
       key: 'id'
@@ -26,6 +28,7 @@ const FailureReport = sequelize.define('FailureReport', {
   allocationId: {
     type: DataTypes.UUID,
     allowNull: true,
+    field: 'allocation_id',
     references: {
       model: 'allocations',
       key: 'id'
@@ -36,46 +39,82 @@ const FailureReport = sequelize.define('FailureReport', {
     allowNull: false
   },
   failureType: {
-    type: DataTypes.ENUM('defect', 'wear', 'damage', 'expired', 'other'),
-    defaultValue: 'wear'
+    type: DataTypes.ENUM('damage', 'defect', 'lost', 'wear'),
+    defaultValue: 'damage',
+    field: 'failure_type'
   },
   observedAt: {
     type: DataTypes.STRING(255),
     allowNull: true,
+    field: 'observed_at',
     comment: 'Location or section where failure observed'
   },
   reportedDate: {
     type: DataTypes.DATE,
     allowNull: false,
-    defaultValue: DataTypes.NOW
+    defaultValue: DataTypes.NOW,
+    field: 'reported_date'
+  },
+  failureDate: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    field: 'failure_date',
+    comment: 'Date when the failure occurred'
+  },
+  brand: {
+    type: DataTypes.STRING(255),
+    allowNull: true,
+    field: 'brand',
+    comment: 'Brand or type of the PPE that failed'
+  },
+  remarks: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+    field: 'remarks',
+    comment: 'Additional remarks or notes'
   },
   reviewedBySHEQ: {
     type: DataTypes.BOOLEAN,
-    defaultValue: false
+    defaultValue: false,
+    field: 'reviewed_by_s_h_e_q'
   },
   sheqDecision: {
     type: DataTypes.TEXT,
-    allowNull: true
+    allowNull: true,
+    field: 'sheq_decision'
   },
   sheqReviewDate: {
     type: DataTypes.DATE,
-    allowNull: true
+    allowNull: true,
+    field: 'sheq_review_date'
   },
   actionTaken: {
     type: DataTypes.TEXT,
-    allowNull: true
+    allowNull: true,
+    field: 'action_taken'
   },
   severity: {
     type: DataTypes.ENUM('low', 'medium', 'high', 'critical'),
     defaultValue: 'medium'
   },
   status: {
-    type: DataTypes.ENUM('reported', 'under-review', 'resolved', 'closed'),
-    defaultValue: 'reported'
+    type: DataTypes.ENUM('pending', 'investigating', 'resolved', 'replaced'),
+    defaultValue: 'pending'
+  },
+  createdAt: {
+    type: DataTypes.DATE,
+    allowNull: false,
+    field: 'created_at'
+  },
+  updatedAt: {
+    type: DataTypes.DATE,
+    allowNull: false,
+    field: 'updated_at'
   }
 }, {
   tableName: 'failure_reports',
-  timestamps: true
+  timestamps: true,
+  underscored: false
 });
 
 module.exports = FailureReport;

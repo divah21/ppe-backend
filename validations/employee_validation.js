@@ -19,9 +19,15 @@ const createEmployeeValidation = [
     .withMessage('Last name is required'),
   
   body('jobType')
+    .optional()
     .trim()
     .notEmpty()
-    .withMessage('Job type is required'),
+    .withMessage('Job type cannot be empty if provided'),
+  
+  body('jobTitleId')
+    .optional()
+    .isUUID()
+    .withMessage('Invalid job title ID'),
   
   body('sectionId')
     .isUUID()
@@ -79,6 +85,11 @@ const updateEmployeeValidation = [
     .trim()
     .notEmpty()
     .withMessage('Job type cannot be empty'),
+  
+  body('jobTitleId')
+    .optional()
+    .isUUID()
+    .withMessage('Invalid job title ID'),
   
   body('sectionId')
     .optional()

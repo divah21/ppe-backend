@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock } = require('../../models');
+const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock, Matrix, JobTitle } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { authorize } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
@@ -26,12 +26,27 @@ const { sequelize } = require('../../database/db');
  */
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { status, page = 1, limit = 50 } = req.query;
+    const { 
+      status, 
+      requestType, 
+      employeeId, 
+      sectionId, 
+      departmentId, 
+      ppeItemId,
+      page = 1, 
+      limit = 50 
+    } = req.query;
     const userRole = req.user.role.name;
     const offset = (page - 1) * limit;
 
     const where = {};
+    
+    // Apply filters
     if (status) where.status = status;
+    if (requestType) where.requestType = requestType;
+    if (employeeId) where.employeeId = employeeId;
+    if (sectionId) where.sectionId = sectionId;
+    if (departmentId) where.departmentId = departmentId;
 
     // Role-based filtering
     let include = [
@@ -71,12 +86,25 @@ router.get('/', authenticate, async (req, res) => {
       where.status = { [Op.in]: ['stores-review', 'approved', 'fulfilled'] };
     }
 
+    // PPE Item filter (requires filtering through RequestItems)
+    let itemWhere = {};
+    if (ppeItemId) {
+      itemWhere.ppeItemId = ppeItemId;
+    }
+
     const { count, rows: requests } = await Request.findAndCountAll({
       where,
-      include,
+      include: include.map(inc => {
+        // Add where clause to items include if filtering by PPE item
+        if (inc.as === 'items' && ppeItemId) {
+          return { ...inc, where: itemWhere, required: true };
+        }
+        return inc;
+      }),
       limit: parseInt(limit),
       offset,
-      order: [['createdAt', 'DESC']]
+      order: [['createdAt', 'DESC']],
+      distinct: true // Important when filtering by associated table
     });
 
     res.json({
@@ -163,14 +191,23 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
   try {
     const { employeeId, items, requestReason, requestType = 'replacement' } = req.body;
 
-    // Validate employee exists
-    const employee = await Employee.findByPk(employeeId);
-    if (!employee) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: 'Employee not found'
+    // Special handling for emergency requests with visitor profile
+    const isEmergencyVisitor = employeeId === 'visitor' || employeeId === 'emergency';
+
+    let employee = null;
+    if (!isEmergencyVisitor) {
+      // Validate employee exists
+      employee = await Employee.findByPk(employeeId, {
+        include: [{ model: JobTitle, as: 'jobTitleRef' }]
       });
+      
+      if (!employee) {
+        await transaction.rollback();
+        return res.status(404).json({
+          success: false,
+          message: 'Employee not found'
+        });
+      }
     }
 
     // Validate all PPE items exist
@@ -187,13 +224,101 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
       });
     }
 
+    // ELIGIBILITY VALIDATION based on request type
+    if (!isEmergencyVisitor && employee) {
+      
+      // Get employee's PPE matrix (eligibility)
+      const { Matrix } = require('../../models');
+      const eligibility = await Matrix.findAll({
+        where: { jobTitleId: employee.jobTitleId },
+        include: [{ model: PPEItem, as: 'ppeItemRef' }]
+      });
+
+      const eligibleItemIds = eligibility.map(e => e.ppeItemId);
+
+      // Get employee's current allocations
+      const currentAllocations = await Allocation.findAll({
+        where: { 
+          employeeId,
+          status: 'active'
+        }
+      });
+
+      // Validate based on request type
+      switch (requestType) {
+        case 'annual':
+          // Annual: Can only request when due based on last issue date
+          for (const item of items) {
+            // Check if item is in employee's matrix
+            if (!eligibleItemIds.includes(item.ppeItemId)) {
+              await transaction.rollback();
+              return res.status(400).json({
+                success: false,
+                message: `Item is not in employee's PPE matrix for annual issue`
+              });
+            }
+
+            // Check if item is due
+            const allocation = currentAllocations.find(a => a.ppeItemId === item.ppeItemId);
+            const matrixItem = eligibility.find(e => e.ppeItemId === item.ppeItemId);
+            
+            if (allocation) {
+              const nextDueDate = new Date(allocation.nextRenewalDate);
+              const today = new Date();
+              
+              if (today < nextDueDate) {
+                const itemName = matrixItem?.ppeItemRef?.name || 'Unknown item';
+                await transaction.rollback();
+                return res.status(400).json({
+                  success: false,
+                  message: `${itemName} is not due yet. Next renewal date: ${nextDueDate.toLocaleDateString()}`
+                });
+              }
+            }
+          }
+          break;
+
+        case 'new':
+          // New issue: No restrictions, typically auto-populated with full matrix
+          // Already validated items exist above
+          break;
+
+        case 'replacement':
+          // Replacement: Can request before due date, but only items in matrix
+          for (const item of items) {
+            if (!eligibleItemIds.includes(item.ppeItemId)) {
+              await transaction.rollback();
+              return res.status(400).json({
+                success: false,
+                message: 'Replacement items must be within employee\'s PPE matrix'
+              });
+            }
+          }
+          break;
+
+        case 'emergency':
+          // Emergency: No restrictions (handled by isEmergencyVisitor flag)
+          break;
+
+        default:
+          await transaction.rollback();
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid request type'
+          });
+      }
+    }
+
     // Create request
     const request = await Request.create({
-      employeeId,
+      employeeId: isEmergencyVisitor ? null : employeeId,
       requestedById: req.user.id,
+      departmentId: req.user.departmentId,
+      sectionId: req.user.sectionId,
       comment: requestReason,
       requestType,
-      status: 'pending'
+      status: 'pending',
+      isEmergencyVisitor: isEmergencyVisitor || false
     }, { transaction });
 
     // Create request items
@@ -234,7 +359,7 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
 
     res.status(201).json({
       success: true,
-      message: 'Request created successfully. Awaiting your approval to forward to Department Representative.',
+      message: 'Request created successfully. Awaiting your approval to forward.',
       data: createdRequest
     });
   } catch (error) {
@@ -257,7 +382,12 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
   try {
     const { comment } = req.body;
     
-    const request = await Request.findByPk(req.params.id);
+    const request = await Request.findByPk(req.params.id, {
+      include: [
+        { model: Employee, as: 'targetEmployee' },
+        { model: User, as: 'createdBy', attributes: ['id', 'sectionId'] }
+      ]
+    });
     
     if (!request) {
       return res.status(404).json({
@@ -266,11 +396,18 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
       });
     }
 
-    if (request.requestedById !== req.user.id && req.user.role.name !== 'admin') {
-      return res.status(403).json({
-        success: false,
-        message: 'You can only approve your own requests'
-      });
+    // Section rep/supervisor should be able to approve requests from their section
+    // The workflow is: Section Rep creates → Section Supervisor approves → HOD/SHEQ
+    if (req.user.role.name !== 'admin') {
+      // Check if user is from the same section as the requester
+      const requesterSectionId = request.createdBy?.sectionId || request.sectionId;
+      
+      if (req.user.sectionId !== requesterSectionId) {
+        return res.status(403).json({
+          success: false,
+          message: 'You can only approve requests from your section'
+        });
+      }
     }
 
     if (request.status !== 'pending') {
@@ -280,8 +417,29 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
       });
     }
 
+    // Determine next status based on request type
+    let nextStatus;
+    let successMessage;
+    
+    switch (request.requestType) {
+      case 'replacement':
+        // Replacement: Section Rep → SHEQ Manager
+        nextStatus = 'sheq-review';
+        successMessage = 'Request approved and forwarded to SHEQ Manager';
+        break;
+      
+      case 'annual':
+      case 'new':
+      case 'emergency':
+      default:
+        // Annual/New/Emergency: Section Rep → HOD (skipping Dept Rep for now)
+        nextStatus = 'hod-review';
+        successMessage = 'Request approved and forwarded to Head of Department';
+        break;
+    }
+
     await request.update({
-      status: 'dept-rep-review',
+      status: nextStatus,
       sectionRepApprovalDate: new Date(),
       sectionRepApproverId: req.user.id,
       sectionRepComment: comment
@@ -298,7 +456,7 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
 
     res.json({
       success: true,
-      message: 'Request approved and forwarded to Department Representative',
+      message: successMessage,
       data: updatedRequest
     });
   } catch (error) {
@@ -416,6 +574,64 @@ router.put('/:id/hod-approve', authenticate, authorize(['hod-hos', 'admin']), au
     res.json({
       success: true,
       message: 'Request approved and forwarded to Stores',
+      data: updatedRequest
+    });
+  } catch (error) {
+    console.error('Error approving request:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to approve request',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   PUT /api/v1/requests/:id/sheq-approve
+ * @desc    SHEQ Manager approves replacement request
+ * @access  Private (SHEQ Manager only)
+ */
+router.put('/:id/sheq-approve', authenticate, authorize(['sheq', 'admin']), auditLog('UPDATE', 'Request'), async (req, res) => {
+  try {
+    const { comment } = req.body;
+    
+    const request = await Request.findByPk(req.params.id);
+    
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+
+    if (request.status !== 'sheq-review') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot approve request with status: ${request.status}. Must be in sheq-review status.`
+      });
+    }
+
+    // After SHEQ approval for replacement requests, go to HOD
+    await request.update({
+      status: 'hod-review',
+      sheqApprovalDate: new Date(),
+      sheqApproverId: req.user.id,
+      sheqComment: comment
+    });
+
+    const updatedRequest = await Request.findByPk(request.id, {
+      include: [
+        { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }] },
+        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        { model: User, as: 'sectionRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        { model: User, as: 'sheqApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
+      ]
+    });
+
+    res.json({
+      success: true,
+      message: 'Request approved by SHEQ and forwarded to Head of Department',
       data: updatedRequest
     });
   } catch (error) {
@@ -667,6 +883,128 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
     res.status(500).json({
       success: false,
       message: 'Failed to fulfill request',
+      error: error.message
+    });
+  }
+});
+
+// Cancel request (Section Rep can cancel their own pending requests)
+router.put('/:id/cancel', authenticate, authorize(['section-rep', 'admin']), auditLog('UPDATE', 'Request'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { cancellationReason } = req.body;
+
+    const request = await Request.findByPk(id);
+    
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+
+    // Only pending requests can be cancelled
+    if (request.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Only pending requests can be cancelled'
+      });
+    }
+
+    // Section rep can only cancel their own requests
+    if (req.user.role.name === 'section-rep' && request.createdByUserId !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only cancel your own requests'
+      });
+    }
+
+    await request.update({
+      status: 'cancelled',
+      rejectionReason: cancellationReason || 'Cancelled by requester',
+      rejectionDate: new Date(),
+      rejectedByUserId: req.user.id
+    });
+
+    const updatedRequest = await Request.findByPk(request.id, {
+      include: [
+        { model: Employee, as: 'targetEmployee' },
+        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] }
+      ]
+    });
+
+    res.json({
+      success: true,
+      message: 'Request cancelled successfully',
+      data: updatedRequest
+    });
+  } catch (error) {
+    console.error('Error cancelling request:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to cancel request',
+      error: error.message
+    });
+  }
+});
+
+// Delete request (Section Rep can delete their own pending requests)
+router.delete('/:id', authenticate, authorize(['section-rep', 'admin']), auditLog('DELETE', 'Request'), async (req, res) => {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const { id } = req.params;
+
+    const request = await Request.findByPk(id);
+    
+    if (!request) {
+      await transaction.rollback();
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found. It may have already been deleted.'
+      });
+    }
+
+    // Only pending requests can be deleted
+    if (request.status !== 'pending') {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Only pending requests can be deleted'
+      });
+    }
+
+    // Section rep can only delete their own requests
+    if (req.user.role.name === 'section-rep' && request.createdByUserId !== req.user.id) {
+      await transaction.rollback();
+      return res.status(403).json({
+        success: false,
+        message: 'You can only delete your own requests'
+      });
+    }
+
+    // Delete request items first
+    await RequestItem.destroy({
+      where: { requestId: id },
+      transaction
+    });
+
+    // Delete the request
+    await request.destroy({ transaction });
+
+    await transaction.commit();
+
+    res.json({
+      success: true,
+      message: 'Request deleted successfully',
+      data: { id }
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Error deleting request:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete request',
       error: error.message
     });
   }

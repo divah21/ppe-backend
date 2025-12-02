@@ -12,10 +12,16 @@ const JobTitlePPEMatrix = sequelize.define('JobTitlePPEMatrix', {
     defaultValue: DataTypes.UUIDV4,
     primaryKey: true
   },
+  jobTitleId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    field: 'jobTitleId', // Database column is camelCase (quoted)
+    comment: 'Reference to JobTitle entity (new approach)'
+  },
   jobTitle: {
     type: DataTypes.STRING(100),
-    allowNull: false,
-    comment: 'Job title from employee record'
+    allowNull: true,
+    comment: 'Legacy: Job title string (deprecated - use jobTitleId instead)'
   },
   ppeItemId: {
     type: DataTypes.UUID,
@@ -63,7 +69,7 @@ const JobTitlePPEMatrix = sequelize.define('JobTitlePPEMatrix', {
 }, {
   tableName: 'job_title_ppe_matrix',
   timestamps: true,
-  underscored: true,
+  underscored: true, // Database uses snake_case columns
   indexes: [
     {
       unique: true,

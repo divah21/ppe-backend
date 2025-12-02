@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { FailureReport, Employee, PPEItem, Allocation } = require('../../models');
+const { FailureReport, Employee, PPEItem, Allocation, Section, Department } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
@@ -10,15 +10,36 @@ const { validate } = require('../../middlewares/validation_middleware');
 /**
  * @route   GET /api/v1/failures
  * @desc    Get all failure reports
- * @access  Private (Stores, SHEQ, Admin)
+ * @access  Private (Section Rep, HOD, Dept Rep, Stores, SHEQ, Admin)
  */
-router.get('/', authenticate, requireRole('stores', 'sheq', 'admin'), async (req, res, next) => {
+router.get('/', authenticate, requireRole('section-rep', 'hod', 'department-rep', 'stores', 'sheq', 'admin'), async (req, res, next) => {
   try {
-    const { status, severity, page = 1, limit = 50 } = req.query;
+    const {
+      status,
+      severity,
+      employeeId,
+      ppeItemId,
+      environment,
+      brand,
+      fromDate,
+      toDate,
+      page = 1,
+      limit = 50
+    } = req.query;
 
     const where = {};
     if (status) where.status = status;
     if (severity) where.severity = severity;
+    if (employeeId) where.employeeId = employeeId;
+    if (ppeItemId) where.ppeItemId = ppeItemId;
+    if (environment) where.observedAt = environment;
+    if (fromDate) where.reportedDate = { $gte: new Date(fromDate) };
+    if (toDate) {
+      where.reportedDate = {
+        ...where.reportedDate,
+        $lte: new Date(toDate)
+      };
+    }
 
     const offset = (page - 1) * limit;
 
@@ -28,12 +49,17 @@ router.get('/', authenticate, requireRole('stores', 'sheq', 'admin'), async (req
         {
           model: Employee,
           as: 'employee',
-          attributes: ['id', 'firstName', 'lastName', 'worksNumber']
+          attributes: ['id', 'firstName', 'lastName', 'worksNumber', 'jobTitle', 'sectionId'],
+          include: [{
+            model: Section,
+            as: 'section',
+            include: [{ model: Department, as: 'department' }]
+          }]
         },
         {
           model: PPEItem,
           as: 'ppeItem',
-          attributes: ['id', 'name', 'itemCode', 'category']
+          attributes: ['id', 'name', 'itemCode', 'category', 'supplier', 'productName']
         },
         {
           model: Allocation,
@@ -111,18 +137,21 @@ router.post(
   authenticate,
   [
     body('description').trim().notEmpty().withMessage('Description is required'),
-    body('failureType').isIn(['defect', 'wear', 'damage', 'expired', 'other']).withMessage('Invalid failure type'),
+    body('failureType').isIn(['damage', 'defect', 'lost', 'wear']).withMessage('Invalid failure type'),
     body('severity').isIn(['low', 'medium', 'high', 'critical']).withMessage('Invalid severity'),
     body('employeeId').isUUID().withMessage('Invalid employee ID'),
     body('ppeItemId').isUUID().withMessage('Invalid PPE item ID'),
     body('allocationId').optional().isUUID().withMessage('Invalid allocation ID'),
-    body('observedAt').optional().trim()
+    body('observedAt').optional().trim(),
+    body('brand').optional().trim(),
+    body('failureDate').optional().isISO8601().withMessage('Invalid failure date'),
+    body('remarks').optional().trim()
   ],
   validate,
   auditLog('CREATE', 'FailureReport'),
   async (req, res, next) => {
     try {
-      const { description, failureType, severity, employeeId, ppeItemId, allocationId, observedAt } = req.body;
+      const { description, failureType, severity, employeeId, ppeItemId, allocationId, observedAt, brand, failureDate, remarks } = req.body;
 
       // Verify employee exists
       const employee = await Employee.findByPk(employeeId);
@@ -150,8 +179,11 @@ router.post(
         ppeItemId,
         allocationId,
         observedAt,
+        brand,
+        failureDate: failureDate || new Date(),
+        remarks,
         reportedDate: new Date(),
-        status: 'reported'
+        status: 'pending'
       });
 
       const createdReport = await FailureReport.findByPk(report.id, {

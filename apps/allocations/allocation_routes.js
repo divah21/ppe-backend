@@ -139,6 +139,161 @@ router.get('/renewals', authenticate, requireRole('stores', 'admin'), async (req
 });
 
 /**
+ * @route   GET /api/v1/allocations/expiry-by-item
+ * @desc    Get allocations with expiry dates, grouped by PPE item
+ * @access  Private (Stores, HOD, Admin)
+ */
+router.get('/expiry-by-item', authenticate, requireRole('stores', 'hod-hos', 'admin'), async (req, res, next) => {
+  try {
+    const { daysAhead = 90, departmentId, sectionId } = req.query;
+
+    const now = new Date();
+    const future = new Date();
+    future.setDate(future.getDate() + parseInt(daysAhead));
+
+    const where = {
+      status: 'active',
+      expiryDate: {
+        [Op.gte]: now,
+        [Op.lte]: future
+      }
+    };
+
+    const employeeWhere = {};
+    if (departmentId) {
+      employeeWhere['$employee.section.department_id$'] = departmentId;
+    }
+    if (sectionId) {
+      employeeWhere['$employee.section_id$'] = sectionId;
+    }
+
+    const allocations = await Allocation.findAll({
+      where: { ...where, ...employeeWhere },
+      include: [
+        {
+          model: Employee,
+          as: 'employee',
+          include: [{ model: Section, as: 'section' }]
+        },
+        { model: PPEItem, as: 'ppeItem' }
+      ],
+      order: [['expiryDate', 'ASC']]
+    });
+
+    const byItem = {};
+    for (const alloc of allocations) {
+      const key = alloc.ppeItemId;
+      if (!byItem[key]) {
+        byItem[key] = {
+          ppeItemId: alloc.ppeItemId,
+          itemName: alloc.ppeItem.name,
+          itemCode: alloc.ppeItem.itemCode,
+          category: alloc.ppeItem.category,
+          totalQuantity: 0,
+          allocations: []
+        };
+      }
+      byItem[key].totalQuantity += alloc.quantity;
+      byItem[key].allocations.push({
+        id: alloc.id,
+        employeeId: alloc.employeeId,
+        employeeName: alloc.employee ? `${alloc.employee.firstName} ${alloc.employee.lastName}` : null,
+        issueDate: alloc.issueDate,
+        expiryDate: alloc.expiryDate,
+        quantity: alloc.quantity,
+        size: alloc.size
+      });
+    }
+
+    res.json({
+      success: true,
+      data: Object.values(byItem),
+      meta: { daysAhead: parseInt(daysAhead) }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/allocations/expiry-by-personnel
+ * @desc    Get allocations due or nearing expiry per employee
+ * @access  Private (Stores, HOD, Admin)
+ */
+router.get('/expiry-by-personnel', authenticate, requireRole('stores', 'hod-hos', 'admin'), async (req, res, next) => {
+  try {
+    const { daysAhead = 90, departmentId, sectionId } = req.query;
+
+    const now = new Date();
+    const future = new Date();
+    future.setDate(future.getDate() + parseInt(daysAhead));
+
+    const where = {
+      status: 'active',
+      expiryDate: {
+        [Op.gte]: now,
+        [Op.lte]: future
+      }
+    };
+
+    const employeeWhere = {};
+    if (departmentId) {
+      employeeWhere['$employee.section.department_id$'] = departmentId;
+    }
+    if (sectionId) {
+      employeeWhere['$employee.section_id$'] = sectionId;
+    }
+
+    const allocations = await Allocation.findAll({
+      where: { ...where, ...employeeWhere },
+      include: [
+        {
+          model: Employee,
+          as: 'employee',
+          include: [{ model: Section, as: 'section' }]
+        },
+        { model: PPEItem, as: 'ppeItem' }
+      ],
+      order: [['expiryDate', 'ASC']]
+    });
+
+    const byEmployee = {};
+    for (const alloc of allocations) {
+      const emp = alloc.employee;
+      const key = alloc.employeeId;
+      if (!byEmployee[key]) {
+        byEmployee[key] = {
+          employeeId: alloc.employeeId,
+          employeeName: emp ? `${emp.firstName} ${emp.lastName}` : null,
+          worksNumber: emp ? emp.worksNumber : null,
+          section: emp && emp.section ? emp.section.name : null,
+          departmentId: emp && emp.section ? emp.section.departmentId : null,
+          items: []
+        };
+      }
+      byEmployee[key].items.push({
+        allocationId: alloc.id,
+        ppeItemId: alloc.ppeItemId,
+        itemName: alloc.ppeItem.name,
+        itemCode: alloc.ppeItem.itemCode,
+        quantity: alloc.quantity,
+        size: alloc.size,
+        issueDate: alloc.issueDate,
+        expiryDate: alloc.expiryDate
+      });
+    }
+
+    res.json({
+      success: true,
+      data: Object.values(byEmployee),
+      meta: { daysAhead: parseInt(daysAhead) }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * @route   POST /api/v1/allocations/fulfill/:requestId
  * @desc    Fulfill request and create allocations
  * @access  Private (Stores only)

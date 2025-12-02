@@ -3,6 +3,7 @@ const Role = require('./role');
 const User = require('./user');
 const Department = require('./department');
 const Section = require('./section');
+const JobTitle = require('./jobTitle');
 const CostCenter = require('./costCenter');
 const Employee = require('./employee');
 const PPEItem = require('./ppeItem');
@@ -39,6 +40,10 @@ Section.hasMany(User, { foreignKey: 'sectionId', as: 'users' });
 Department.hasMany(Section, { foreignKey: 'departmentId', as: 'sections' });
 Section.belongsTo(Department, { foreignKey: 'departmentId', as: 'department' });
 
+// Section <-> JobTitle
+Section.hasMany(JobTitle, { foreignKey: 'sectionId', as: 'jobTitles' });
+JobTitle.belongsTo(Section, { foreignKey: 'sectionId', as: 'section' });
+
 // Department <-> CostCenter
 Department.hasMany(CostCenter, { foreignKey: 'departmentId', as: 'costCenters' });
 CostCenter.belongsTo(Department, { foreignKey: 'departmentId', as: 'department' });
@@ -46,6 +51,10 @@ CostCenter.belongsTo(Department, { foreignKey: 'departmentId', as: 'department' 
 // Employee <-> Section
 Employee.belongsTo(Section, { foreignKey: 'sectionId', as: 'section' });
 Section.hasMany(Employee, { foreignKey: 'sectionId', as: 'employees' });
+
+// Employee <-> JobTitle
+Employee.belongsTo(JobTitle, { foreignKey: 'jobTitleId', as: 'jobTitleRef', allowNull: true });
+JobTitle.hasMany(Employee, { foreignKey: 'jobTitleId', as: 'employees' });
 
 // Employee <-> CostCenter
 Employee.belongsTo(CostCenter, { foreignKey: 'costCenterId', as: 'costCenter' });
@@ -59,6 +68,10 @@ PPEItem.hasMany(Stock, { foreignKey: 'ppeItemId', as: 'stocks' });
 Size.belongsTo(SizeScale, { foreignKey: 'scaleId', as: 'scale' });
 SizeScale.hasMany(Size, { foreignKey: 'scaleId', as: 'sizes' });
 
+// JobTitlePPEMatrix <-> JobTitle
+JobTitlePPEMatrix.belongsTo(JobTitle, { foreignKey: 'jobTitleId', as: 'jobTitleRef', allowNull: true });
+JobTitle.hasMany(JobTitlePPEMatrix, { foreignKey: 'jobTitleId', as: 'ppeRequirements' });
+
 // JobTitlePPEMatrix <-> PPEItem
 JobTitlePPEMatrix.belongsTo(PPEItem, { foreignKey: 'ppeItemId', as: 'ppeItem' });
 PPEItem.hasMany(JobTitlePPEMatrix, { foreignKey: 'ppeItemId', as: 'jobTitleRequirements' });
@@ -69,7 +82,7 @@ User.hasMany(Request, { foreignKey: 'requestedById', as: 'createdRequests' });
 
 // Request <-> Employee (target employee)
 Request.belongsTo(Employee, { foreignKey: 'employeeId', as: 'targetEmployee' });
-Employee.hasMany(Request, { foreignKey: 'employeeId', as: 'requests' });
+Employee.hasMany(Request, { foreignKey: 'employeeId', as: 'requests', onDelete: 'CASCADE' });
 
 // Request <-> User (approvers)
 Request.belongsTo(User, { foreignKey: 'sectionRepApproverId', as: 'sectionRepApprover', allowNull: true });
@@ -101,7 +114,7 @@ PPEItem.hasMany(Allocation, { foreignKey: 'ppeItemId', as: 'allocations' });
 
 // Allocation <-> Employee
 Allocation.belongsTo(Employee, { foreignKey: 'employeeId', as: 'employee' });
-Employee.hasMany(Allocation, { foreignKey: 'employeeId', as: 'allocations' });
+Employee.hasMany(Allocation, { foreignKey: 'employeeId', as: 'allocations', onDelete: 'CASCADE' });
 
 // Allocation <-> User (issued by)
 Allocation.belongsTo(User, { foreignKey: 'issuedById', as: 'issuedBy' });
@@ -121,7 +134,7 @@ Section.hasMany(Budget, { foreignKey: 'sectionId', as: 'budgets' });
 
 // FailureReport <-> Employee
 FailureReport.belongsTo(Employee, { foreignKey: 'employeeId', as: 'employee' });
-Employee.hasMany(FailureReport, { foreignKey: 'employeeId', as: 'failureReports' });
+Employee.hasMany(FailureReport, { foreignKey: 'employeeId', as: 'failureReports', onDelete: 'CASCADE' });
 
 // FailureReport <-> PPEItem
 FailureReport.belongsTo(PPEItem, { foreignKey: 'ppeItemId', as: 'ppeItem' });
@@ -137,7 +150,7 @@ User.hasMany(AuditLog, { foreignKey: 'userId', as: 'auditLogs' });
 
 // Document <-> Employee (for PPE cards, etc.)
 Document.belongsTo(Employee, { foreignKey: 'employeeId', as: 'employee', allowNull: true });
-Employee.hasMany(Document, { foreignKey: 'employeeId', as: 'documents' });
+Employee.hasMany(Document, { foreignKey: 'employeeId', as: 'documents', onDelete: 'CASCADE' });
 
 // Document <-> User (uploaded by)
 Document.belongsTo(User, { foreignKey: 'uploadedById', as: 'uploadedBy' });
@@ -157,6 +170,7 @@ module.exports = {
   User,
   Department,
   Section,
+  JobTitle,
   CostCenter,
   Employee,
   PPEItem,

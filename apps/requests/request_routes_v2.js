@@ -26,12 +26,14 @@ const { sequelize } = require('../../database/db');
  */
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { status, page = 1, limit = 50 } = req.query;
+    const { status, requestType, employeeId, sectionId, departmentId, ppeItemId, page = 1, limit = 50 } = req.query;
     const userRole = req.user.role.name;
     const offset = (page - 1) * limit;
 
     const where = {};
     if (status) where.status = status;
+    if (requestType) where.requestType = requestType;
+    if (employeeId) where.employeeId = employeeId;
 
     // Role-based filtering
     let include = [
@@ -73,6 +75,19 @@ router.get('/', authenticate, async (req, res) => {
       where.status = { [Op.in]: ['stores-review', 'approved', 'fulfilled'] };
     }
 
+    // Filter by section or department via employee
+    if (sectionId) {
+      where['$targetEmployee.section_id$'] = sectionId;
+    }
+    if (departmentId) {
+      where['$targetEmployee.section.department_id$'] = departmentId;
+    }
+
+    // Filter by PPE item via request items
+    if (ppeItemId) {
+      where['$items.ppe_item_id$'] = ppeItemId;
+    }
+
     const { count, rows: requests } = await Request.findAndCountAll({
       where,
       include,
@@ -96,6 +111,72 @@ router.get('/', authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to fetch requests',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   PUT /api/v1/requests/:id/sheq-approve
+ * @desc    SHEQ Manager approves replacement request
+ * @access  Private (SHEQ only)
+ */
+router.put('/:id/sheq-approve', authenticate, authorize(['sheq', 'admin']), auditLog('UPDATE', 'Request'), async (req, res) => {
+  try {
+    const { comment } = req.body;
+
+    const request = await Request.findByPk(req.params.id);
+
+    if (!request) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+
+    if (request.requestType !== 'replacement') {
+      return res.status(400).json({
+        success: false,
+        message: 'SHEQ approval is only applicable to replacement requests'
+      });
+    }
+
+    if (request.status !== 'sheq-review') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot approve request with status: ${request.status}`
+      });
+    }
+
+    await request.update({
+      status: 'hod-review',
+      sheqApprovalDate: new Date(),
+      sheqApproverId: req.user.id,
+      sheqComment: comment
+    });
+
+    const updatedRequest = await Request.findByPk(request.id, {
+      include: [
+        { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }] },
+        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        { model: User, as: 'sectionRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        { model: User, as: 'deptRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        { model: User, as: 'hodApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        { model: User, as: 'storesApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
+      ]
+    });
+
+    res.json({
+      success: true,
+      message: 'Request approved by SHEQ and forwarded to Head of Department',
+      data: updatedRequest
+    });
+  } catch (error) {
+    console.error('Error approving request by SHEQ:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to approve request by SHEQ',
       error: error.message
     });
   }
@@ -163,15 +244,44 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
   const transaction = await sequelize.transaction();
   
   try {
-    const { employeeId, items, requestReason, requestType = 'replacement' } = req.body;
+    const { employeeId, items: bodyItems, requestReason, requestType = 'replacement' } = req.body;
 
-    // Validate employee exists
-    const employee = await Employee.findByPk(employeeId);
+    // For emergency/visitor issues, allow a special visitor employee profile to be used.
+    // For normal flows, employeeId must be a valid employee.
+    let employee = null;
+    if (employeeId) {
+      employee = await Employee.findByPk(employeeId);
+    }
+
     if (!employee) {
       await transaction.rollback();
       return res.status(404).json({
         success: false,
-        message: 'Employee not found'
+        message: 'Employee (or visitor profile) not found'
+      });
+    }
+
+    let items = bodyItems || [];
+
+    // For new employee issues, auto-populate from job title PPE matrix if items not provided
+    if (requestType === 'new' && (!items || items.length === 0)) {
+      const matrixEntries = await JobTitlePPEMatrix.findAll({
+        where: { jobTitle: employee.jobTitle, isActive: true }
+      });
+
+      items = matrixEntries.map(entry => ({
+        ppeItemId: entry.ppeItemId,
+        quantity: entry.quantityRequired,
+        size: null,
+        reason: 'Initial issue from PPE matrix'
+      }));
+    }
+
+    if (!items || items.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'At least one PPE item is required for the request'
       });
     }
 
@@ -188,6 +298,71 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
         message: 'One or more PPE items not found'
       });
     }
+
+    // Eligibility rules
+    const now = new Date();
+
+    // Load matrix for employee for rules that depend on it
+    const matrixEntries = await JobTitlePPEMatrix.findAll({
+      where: { jobTitle: employee.jobTitle, isActive: true }
+    });
+    const matrixItemIds = new Set(matrixEntries.map(e => e.ppeItemId));
+
+    // Replacement: requested items must be in matrix
+    if (requestType === 'replacement') {
+      const invalidItems = items.filter(i => !matrixItemIds.has(i.ppeItemId));
+      if (invalidItems.length > 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Replacement requests can only contain PPE items from the employee PPE matrix',
+          data: { invalidItemIds: invalidItems.map(i => i.ppeItemId) }
+        });
+      }
+    }
+
+    // Annual: ensure items are due based on last issue / renewal
+    if (requestType === 'annual') {
+      const allocations = await Allocation.findAll({
+        where: { employeeId },
+        order: [['issueDate', 'DESC']]
+      });
+      const latestByItem = {};
+      for (const alloc of allocations) {
+        if (!latestByItem[alloc.ppeItemId]) {
+          latestByItem[alloc.ppeItemId] = alloc;
+        }
+      }
+
+      const notDue = [];
+      for (const item of items) {
+        const latestAlloc = latestByItem[item.ppeItemId];
+        if (!latestAlloc) {
+          continue; // Never issued before, treat as due
+        }
+        const months = latestAlloc.replacementFrequency || 12;
+        const due = new Date(latestAlloc.issueDate);
+        due.setMonth(due.getMonth() + months);
+        if (now < due) {
+          notDue.push({
+            ppeItemId: item.ppeItemId,
+            lastIssueDate: latestAlloc.issueDate,
+            nextDueDate: due
+          });
+        }
+      }
+
+      if (notDue.length > 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Annual request contains items that are not yet due',
+          data: { notDue }
+        });
+      }
+    }
+
+    // Emergency: no additional eligibility restrictions (matrix or due dates)
 
     // Create request
     const request = await Request.create({
@@ -282,8 +457,20 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
       });
     }
 
+    let nextStatus;
+    if (request.requestType === 'replacement') {
+      // Replacement: Section Rep -> SHEQ -> HOD -> Stores
+      nextStatus = 'sheq-review';
+    } else if (request.requestType === 'annual') {
+      // Annual: Section Rep -> HOD -> Stores (skip dept-rep)
+      nextStatus = 'hod-review';
+    } else {
+      // Default (e.g. new, emergency) keeps legacy dept-rep step
+      nextStatus = 'dept-rep-review';
+    }
+
     await request.update({
-      status: 'dept-rep-review',
+      status: nextStatus,
       sectionRepApprovalDate: new Date(),
       sectionRepApproverId: req.user.id,
       sectionRepComment: comment
@@ -298,9 +485,16 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
       ]
     });
 
+    const message =
+      nextStatus === 'sheq-review'
+        ? 'Request approved and forwarded to SHEQ Manager'
+        : nextStatus === 'hod-review'
+        ? 'Request approved and forwarded to Head of Department'
+        : 'Request approved and forwarded to Department Representative';
+
     res.json({
       success: true,
-      message: 'Request approved and forwarded to Department Representative',
+      message,
       data: updatedRequest
     });
   } catch (error) {

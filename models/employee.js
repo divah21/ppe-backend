@@ -44,9 +44,15 @@ const Employee = sequelize.define('Employee', {
     allowNull: true,
     comment: 'Cost center for budget tracking'
   },
+  jobTitleId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'Reference to JobTitle entity'
+  },
   jobTitle: {
     type: DataTypes.STRING(100),
-    allowNull: true
+    allowNull: true,
+    comment: 'Legacy field - use jobTitleId instead'
   },
   jobType: {
     type: DataTypes.STRING(100),
@@ -66,7 +72,8 @@ const Employee = sequelize.define('Employee', {
   }
 }, {
   tableName: 'employees',
-  timestamps: true
+  timestamps: true,
+  underscored: false // Use camelCase for column names
 });
 
 // Virtual field for full name
