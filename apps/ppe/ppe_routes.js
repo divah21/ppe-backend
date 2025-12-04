@@ -105,7 +105,11 @@ router.post(
     body('replacementFrequency').isInt({ min: 1 }).withMessage('Replacement frequency must be at least 1 month'),
     body('isMandatory').isBoolean().withMessage('isMandatory must be a boolean'),
     body('description').optional().trim(),
-    body('specifications').optional().trim()
+    body('specifications').optional().trim(),
+    body('hasSizeVariants').optional().isBoolean().withMessage('hasSizeVariants must be a boolean'),
+    body('hasColorVariants').optional().isBoolean().withMessage('hasColorVariants must be a boolean'),
+    body('sizeScale').optional().trim(),
+    body('availableSizes').optional().isArray().withMessage('availableSizes must be an array')
   ],
   validate,
   auditLog('CREATE', 'PPEItem'),
@@ -118,7 +122,11 @@ router.post(
         replacementFrequency,
         isMandatory,
         description,
-        specifications
+        specifications,
+        hasSizeVariants,
+        hasColorVariants,
+        sizeScale,
+        availableSizes
       } = req.body;
 
       // Check if item code exists
@@ -137,7 +145,11 @@ router.post(
         replacementFrequency,
         isMandatory,
         description,
-        specifications
+        specifications,
+        hasSizeVariants: hasSizeVariants || false,
+        hasColorVariants: hasColorVariants || false,
+        sizeScale: sizeScale || null,
+        availableSizes: availableSizes || null
       });
 
       res.status(201).json({
@@ -168,7 +180,11 @@ router.put(
     body('replacementFrequency').optional().isInt({ min: 1 }).withMessage('Replacement frequency must be at least 1 month'),
     body('isMandatory').optional().isBoolean().withMessage('isMandatory must be a boolean'),
     body('description').optional().trim(),
-    body('specifications').optional().trim()
+    body('specifications').optional().trim(),
+    body('hasSizeVariants').optional().isBoolean().withMessage('hasSizeVariants must be a boolean'),
+    body('hasColorVariants').optional().isBoolean().withMessage('hasColorVariants must be a boolean'),
+    body('sizeScale').optional().trim(),
+    body('availableSizes').optional().isArray().withMessage('availableSizes must be an array')
   ],
   validate,
   auditLog('UPDATE', 'PPEItem'),

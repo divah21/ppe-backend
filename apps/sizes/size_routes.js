@@ -1,6 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const { authenticate } = require('../../middlewares/auth_middleware');
+const { requireRole } = require('../../middlewares/role_middleware');
+const { auditLog } = require('../../middlewares/audit_middleware');
+const { body, param } = require('express-validator');
+const { validate } = require('../../middlewares/validation_middleware');
 const { SizeScale, Size, PPEItem } = require('../../models');
 
 /**
@@ -59,5 +63,210 @@ router.get('/for-item/:ppeItemId', authenticate, async (req, res, next) => {
     next(err);
   }
 });
+
+/**
+ * @route   POST /api/v1/sizes/scales
+ * @desc    Create a new size scale
+ * @access  Private (Admin, Stores)
+ */
+router.post(
+  '/scales',
+  authenticate,
+  requireRole('admin', 'stores'),
+  [
+    body('code').trim().notEmpty().withMessage('Code is required'),
+    body('name').trim().notEmpty().withMessage('Name is required'),
+    body('description').optional().trim()
+  ],
+  validate,
+  auditLog('CREATE', 'SizeScale'),
+  async (req, res, next) => {
+    try {
+      const { code, name, description } = req.body;
+
+      // Check if code exists
+      const existing = await SizeScale.findOne({ where: { code } });
+      if (existing) {
+        return res.status(409).json({
+          success: false,
+          message: 'Size scale code already exists'
+        });
+      }
+
+      const scale = await SizeScale.create({ code, name, description });
+      res.status(201).json({ success: true, data: scale });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * @route   PUT /api/v1/sizes/scales/:id
+ * @desc    Update a size scale
+ * @access  Private (Admin, Stores)
+ */
+router.put(
+  '/scales/:id',
+  authenticate,
+  requireRole('admin', 'stores'),
+  [
+    param('id').isUUID().withMessage('Invalid size scale ID'),
+    body('name').optional().trim().notEmpty().withMessage('Name cannot be empty'),
+    body('description').optional().trim()
+  ],
+  validate,
+  auditLog('UPDATE', 'SizeScale'),
+  async (req, res, next) => {
+    try {
+      const scale = await SizeScale.findByPk(req.params.id);
+      if (!scale) {
+        return res.status(404).json({ success: false, message: 'Size scale not found' });
+      }
+
+      await scale.update(req.body);
+      res.json({ success: true, data: scale });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * @route   DELETE /api/v1/sizes/scales/:id
+ * @desc    Delete a size scale
+ * @access  Private (Admin)
+ */
+router.delete(
+  '/scales/:id',
+  authenticate,
+  requireRole('admin'),
+  auditLog('DELETE', 'SizeScale'),
+  async (req, res, next) => {
+    try {
+      const scale = await SizeScale.findByPk(req.params.id);
+      if (!scale) {
+        return res.status(404).json({ success: false, message: 'Size scale not found' });
+      }
+
+      // Check if any PPE items use this scale
+      const itemsUsingScale = await PPEItem.count({ where: { sizeScale: scale.code } });
+      if (itemsUsingScale > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot delete size scale. ${itemsUsingScale} PPE item(s) are using it.`
+        });
+      }
+
+      await scale.destroy();
+      res.json({ success: true, message: 'Size scale deleted successfully' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * @route   POST /api/v1/sizes/:scaleId/sizes
+ * @desc    Add a size to a scale
+ * @access  Private (Admin, Stores)
+ */
+router.post(
+  '/:scaleId/sizes',
+  authenticate,
+  requireRole('admin', 'stores'),
+  [
+    param('scaleId').isUUID().withMessage('Invalid scale ID'),
+    body('value').trim().notEmpty().withMessage('Size value is required'),
+    body('displayOrder').optional().isInt().withMessage('Display order must be an integer')
+  ],
+  validate,
+  auditLog('CREATE', 'Size'),
+  async (req, res, next) => {
+    try {
+      const scale = await SizeScale.findByPk(req.params.scaleId);
+      if (!scale) {
+        return res.status(404).json({ success: false, message: 'Size scale not found' });
+      }
+
+      const { value, displayOrder } = req.body;
+
+      // Check if size value already exists in this scale
+      const existing = await Size.findOne({ where: { scaleId: scale.id, value } });
+      if (existing) {
+        return res.status(409).json({
+          success: false,
+          message: 'Size value already exists in this scale'
+        });
+      }
+
+      const size = await Size.create({
+        scaleId: scale.id,
+        value,
+        displayOrder: displayOrder || 0
+      });
+
+      res.status(201).json({ success: true, data: size });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * @route   PUT /api/v1/sizes/size/:id
+ * @desc    Update a size
+ * @access  Private (Admin, Stores)
+ */
+router.put(
+  '/size/:id',
+  authenticate,
+  requireRole('admin', 'stores'),
+  [
+    param('id').isUUID().withMessage('Invalid size ID'),
+    body('value').optional().trim().notEmpty().withMessage('Size value cannot be empty'),
+    body('displayOrder').optional().isInt().withMessage('Display order must be an integer')
+  ],
+  validate,
+  auditLog('UPDATE', 'Size'),
+  async (req, res, next) => {
+    try {
+      const size = await Size.findByPk(req.params.id);
+      if (!size) {
+        return res.status(404).json({ success: false, message: 'Size not found' });
+      }
+
+      await size.update(req.body);
+      res.json({ success: true, data: size });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * @route   DELETE /api/v1/sizes/size/:id
+ * @desc    Delete a size
+ * @access  Private (Admin)
+ */
+router.delete(
+  '/size/:id',
+  authenticate,
+  requireRole('admin'),
+  auditLog('DELETE', 'Size'),
+  async (req, res, next) => {
+    try {
+      const size = await Size.findByPk(req.params.id);
+      if (!size) {
+        return res.status(404).json({ success: false, message: 'Size not found' });
+      }
+
+      await size.destroy();
+      res.json({ success: true, message: 'Size deleted successfully' });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 module.exports = router;

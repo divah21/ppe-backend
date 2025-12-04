@@ -12,56 +12,135 @@ const { validateRequestedSize } = require('../../middlewares/size_validation');
 
 /**
  * @route   GET /api/v1/stock
- * @desc    Get all stock items
+ * @desc    Get all stock items (grouped by PPE item with size variants)
  * @access  Private
  */
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    const { ppeItemId, lowStock, search, page = 1, limit = 50 } = req.query;
+    const { ppeItemId, lowStock, search, page = 1, limit = 50, grouped = 'true' } = req.query;
 
-    const where = {};
-    
-    if (ppeItemId) where.ppeItemId = ppeItemId;
+    // If not grouped, return flat list (for backward compatibility)
+    if (grouped !== 'true') {
+      const where = {};
+      if (ppeItemId) where.ppeItemId = ppeItemId;
 
-    // Low stock filter
-    if (lowStock === 'true') {
-      where[Op.and] = [
-        db.where(db.col('quantity'), '<=', db.col('minLevel'))
+      const include = [{
+        model: PPEItem,
+        as: 'ppeItem',
+        ...(search && {
+          where: {
+            [Op.or]: [
+              { name: { [Op.iLike]: `%${search}%` } },
+              { itemCode: { [Op.iLike]: `%${search}%` } },
+              { category: { [Op.iLike]: `%${search}%` } }
+            ]
+          }
+        })
+      }];
+
+      const offset = (page - 1) * limit;
+      const { count, rows: stockItems } = await Stock.findAndCountAll({
+        where,
+        include,
+        limit: parseInt(limit),
+        offset,
+        order: [['updatedAt', 'DESC']]
+      });
+
+      return res.json({
+        success: true,
+        data: stockItems,
+        pagination: {
+          total: count,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: Math.ceil(count / limit)
+        }
+      });
+    }
+
+    // Grouped mode: aggregate stock by PPE item
+    const ppeWhere = {};
+    if (search) {
+      ppeWhere[Op.or] = [
+        { name: { [Op.iLike]: `%${search}%` } },
+        { itemCode: { [Op.iLike]: `%${search}%` } },
+        { category: { [Op.iLike]: `%${search}%` } }
       ];
     }
 
-    const include = [{
-      model: PPEItem,
-      as: 'ppeItem',
-      ...(search && {
-        where: {
-          [Op.or]: [
-            { name: { [Op.iLike]: `%${search}%` } },
-            { itemCode: { [Op.iLike]: `%${search}%` } },
-            { category: { [Op.iLike]: `%${search}%` } }
-          ]
-        }
-      })
-    }];
-
-    const offset = (page - 1) * limit;
-
-    const { count, rows: stockItems } = await Stock.findAndCountAll({
-      where,
-      include,
-      limit: parseInt(limit),
-      offset,
-      order: [['updatedAt', 'DESC']]
+    // Get all stock items with their PPE items
+    const allStock = await Stock.findAll({
+      include: [{
+        model: PPEItem,
+        as: 'ppeItem',
+        where: ppeWhere,
+        required: true
+      }],
+      order: [['ppeItemId', 'ASC'], ['size', 'ASC']]
     });
+
+    // Group by PPE item
+    const groupedStock = {};
+    allStock.forEach(stock => {
+      const ppeId = stock.ppeItemId;
+      if (!groupedStock[ppeId]) {
+        groupedStock[ppeId] = {
+          ppeItemId: ppeId,
+          ppeItem: stock.ppeItem,
+          totalQuantity: 0,
+          minLevel: stock.minLevel,
+          location: stock.location,
+          unitCost: stock.unitCost,
+          unitPriceUSD: stock.unitPriceUSD,
+          stockAccount: stock.stockAccount,
+          sizeVariants: [],
+          lastRestocked: stock.lastRestocked,
+          lastStockTake: stock.lastStockTake
+        };
+      }
+
+      groupedStock[ppeId].totalQuantity += stock.quantity || 0;
+      groupedStock[ppeId].sizeVariants.push({
+        id: stock.id,
+        size: stock.size,
+        color: stock.color,
+        quantity: stock.quantity,
+        binLocation: stock.binLocation,
+        batchNumber: stock.batchNumber,
+        expiryDate: stock.expiryDate,
+        notes: stock.notes
+      });
+
+      // Update latest dates
+      if (stock.lastRestocked && (!groupedStock[ppeId].lastRestocked || stock.lastRestocked > groupedStock[ppeId].lastRestocked)) {
+        groupedStock[ppeId].lastRestocked = stock.lastRestocked;
+      }
+      if (stock.lastStockTake && (!groupedStock[ppeId].lastStockTake || stock.lastStockTake > groupedStock[ppeId].lastStockTake)) {
+        groupedStock[ppeId].lastStockTake = stock.lastStockTake;
+      }
+    });
+
+    // Convert to array and apply pagination
+    let groupedArray = Object.values(groupedStock);
+
+    // Apply low stock filter if needed
+    if (lowStock === 'true') {
+      groupedArray = groupedArray.filter(item => item.totalQuantity <= item.minLevel);
+    }
+
+    const total = groupedArray.length;
+    const offset = (page - 1) * limit;
+    const paginatedItems = groupedArray.slice(offset, offset + parseInt(limit));
 
     res.json({
       success: true,
-      data: stockItems,
+      data: paginatedItems,
       pagination: {
-        total: count,
+        total,
         page: parseInt(page),
         limit: parseInt(limit),
-        pages: Math.ceil(count / limit)
+        pages: Math.ceil(total / limit)
       }
     });
   } catch (error) {

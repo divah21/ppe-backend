@@ -293,4 +293,277 @@ router.delete(
   }
 );
 
+/**
+ * @route   GET /api/v1/failures/analytics/premature-failures
+ * @desc    Get premature failure analytics with predictions
+ * @access  Private (Stores, SHEQ, Admin)
+ */
+router.get('/analytics/premature-failures', authenticate, requireRole('stores', 'sheq', 'admin'), async (req, res, next) => {
+  try {
+    const { fromDate, toDate, departmentId, sectionId } = req.query;
+    const { Sequelize } = require('sequelize');
+
+    // Date range (default: last 12 months)
+    const endDate = toDate ? new Date(toDate) : new Date();
+    const startDate = fromDate ? new Date(fromDate) : new Date(endDate.getTime() - (365 * 24 * 60 * 60 * 1000));
+
+    // Build WHERE clause
+    const where = {
+      reportedDate: {
+        [Sequelize.Op.gte]: startDate,
+        [Sequelize.Op.lte]: endDate
+      }
+    };
+
+    // Fetch all failure reports with related data
+    const failures = await FailureReport.findAll({
+      where,
+      include: [
+        {
+          model: PPEItem,
+          as: 'ppeItem',
+          attributes: ['id', 'name', 'itemCode', 'category', 'replacementFrequency']
+        },
+        {
+          model: Allocation,
+          as: 'allocation',
+          attributes: ['id', 'issueDate', 'expiryDate']
+        },
+        {
+          model: Employee,
+          as: 'employee',
+          attributes: ['id', 'firstName', 'lastName', 'sectionId'],
+          include: [{
+            model: Section,
+            as: 'section',
+            attributes: ['id', 'name', 'departmentId'],
+            include: [{ model: Department, as: 'department', attributes: ['id', 'name'] }]
+          }]
+        }
+      ]
+    });
+
+    // Filter by department/section if provided
+    const filteredFailures = failures.filter(f => {
+      if (departmentId && f.employee?.section?.departmentId !== departmentId) return false;
+      if (sectionId && f.employee?.sectionId !== sectionId) return false;
+      return true;
+    });
+
+    // Analytics by PPE Item
+    const itemAnalytics = {};
+    const prematureThreshold = 0.7; // Items failing before 70% of expected lifetime
+
+    for (const failure of filteredFailures) {
+      const itemId = failure.ppeItemId;
+      const itemName = failure.ppeItem?.name || 'Unknown';
+      const category = failure.ppeItem?.category || 'Unknown';
+      const expectedLifeMonths = failure.ppeItem?.replacementFrequency || 12;
+
+      if (!itemAnalytics[itemId]) {
+        itemAnalytics[itemId] = {
+          ppeItemId: itemId,
+          ppeItemName: itemName,
+          ppeItemCode: failure.ppeItem?.itemCode,
+          category,
+          expectedLifeMonths,
+          totalFailures: 0,
+          prematureFailures: 0,
+          damageCount: 0,
+          defectCount: 0,
+          lostCount: 0,
+          wearCount: 0,
+          severityCritical: 0,
+          severityHigh: 0,
+          severityMedium: 0,
+          severityLow: 0,
+          avgDaysToFailure: 0,
+          totalDaysUsed: 0,
+          failuresByMonth: {},
+          prematureRate: 0,
+          failureRate: 0,
+          predictedFailures: 0
+        };
+      }
+
+      const item = itemAnalytics[itemId];
+      item.totalFailures++;
+
+      // Failure type counts
+      if (failure.failureType === 'damage') item.damageCount++;
+      if (failure.failureType === 'defect') item.defectCount++;
+      if (failure.failureType === 'lost') item.lostCount++;
+      if (failure.failureType === 'wear') item.wearCount++;
+
+      // Severity counts
+      if (failure.severity === 'critical') item.severityCritical++;
+      if (failure.severity === 'high') item.severityHigh++;
+      if (failure.severity === 'medium') item.severityMedium++;
+      if (failure.severity === 'low') item.severityLow++;
+
+      // Calculate if premature
+      if (failure.allocation?.issueDate && failure.failureDate) {
+        const issueDate = new Date(failure.allocation.issueDate);
+        const failDate = new Date(failure.failureDate);
+        const daysUsed = Math.floor((failDate - issueDate) / (1000 * 60 * 60 * 24));
+        const expectedDays = expectedLifeMonths * 30;
+        
+        item.totalDaysUsed += daysUsed;
+
+        if (daysUsed < (expectedDays * prematureThreshold)) {
+          item.prematureFailures++;
+        }
+      }
+
+      // Monthly trend
+      const month = new Date(failure.reportedDate).toISOString().slice(0, 7); // YYYY-MM
+      item.failuresByMonth[month] = (item.failuresByMonth[month] || 0) + 1;
+    }
+
+    // Calculate rates and predictions
+    const analyticsArray = Object.values(itemAnalytics).map(item => {
+      item.avgDaysToFailure = item.totalFailures > 0 ? Math.round(item.totalDaysUsed / item.totalFailures) : 0;
+      item.prematureRate = item.totalFailures > 0 ? (item.prematureFailures / item.totalFailures * 100) : 0;
+      
+      // Simple linear prediction for next 3 months based on trend
+      const months = Object.keys(item.failuresByMonth).sort();
+      if (months.length >= 3) {
+        const recentMonths = months.slice(-3);
+        const avgRecentFailures = recentMonths.reduce((sum, m) => sum + item.failuresByMonth[m], 0) / 3;
+        item.predictedFailures = Math.round(avgRecentFailures * 3);
+      }
+
+      return item;
+    });
+
+    // Sort by premature failure rate
+    analyticsArray.sort((a, b) => b.prematureRate - a.prematureRate);
+
+    // Overall summary
+    const summary = {
+      totalFailures: filteredFailures.length,
+      totalPrematureFailures: analyticsArray.reduce((sum, item) => sum + item.prematureFailures, 0),
+      avgPrematureRate: analyticsArray.length > 0 
+        ? analyticsArray.reduce((sum, item) => sum + item.prematureRate, 0) / analyticsArray.length 
+        : 0,
+      itemsWithHighFailureRate: analyticsArray.filter(item => item.prematureRate > 50).length,
+      mostProblematicItems: analyticsArray.slice(0, 10),
+      failuresByType: {
+        damage: analyticsArray.reduce((sum, item) => sum + item.damageCount, 0),
+        defect: analyticsArray.reduce((sum, item) => sum + item.defectCount, 0),
+        lost: analyticsArray.reduce((sum, item) => sum + item.lostCount, 0),
+        wear: analyticsArray.reduce((sum, item) => sum + item.wearCount, 0)
+      },
+      failuresBySeverity: {
+        critical: analyticsArray.reduce((sum, item) => sum + item.severityCritical, 0),
+        high: analyticsArray.reduce((sum, item) => sum + item.severityHigh, 0),
+        medium: analyticsArray.reduce((sum, item) => sum + item.severityMedium, 0),
+        low: analyticsArray.reduce((sum, item) => sum + item.severityLow, 0)
+      }
+    };
+
+    res.json({
+      success: true,
+      data: {
+        analytics: analyticsArray,
+        summary,
+        dateRange: { startDate, endDate }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/failures/analytics/failure-trends
+ * @desc    Get failure trends over time with predictions
+ * @access  Private (Stores, SHEQ, Admin)
+ */
+router.get('/analytics/failure-trends', authenticate, requireRole('stores', 'sheq', 'admin'), async (req, res, next) => {
+  try {
+    const { Sequelize } = require('sequelize');
+    const { months = 12 } = req.query;
+
+    const endDate = new Date();
+    const startDate = new Date(endDate.getTime() - (parseInt(months) * 30 * 24 * 60 * 60 * 1000));
+
+    const failures = await FailureReport.findAll({
+      where: {
+        reportedDate: {
+          [Sequelize.Op.gte]: startDate,
+          [Sequelize.Op.lte]: endDate
+        }
+      },
+      include: [
+        { model: PPEItem, as: 'ppeItem', attributes: ['id', 'name', 'category'] }
+      ],
+      order: [['reportedDate', 'ASC']]
+    });
+
+    // Group by month
+    const monthlyTrends = {};
+    for (const failure of failures) {
+      const month = new Date(failure.reportedDate).toISOString().slice(0, 7);
+      
+      if (!monthlyTrends[month]) {
+        monthlyTrends[month] = {
+          month,
+          total: 0,
+          damage: 0,
+          defect: 0,
+          lost: 0,
+          wear: 0,
+          critical: 0,
+          high: 0,
+          medium: 0,
+          low: 0
+        };
+      }
+
+      monthlyTrends[month].total++;
+      monthlyTrends[month][failure.failureType]++;
+      monthlyTrends[month][failure.severity]++;
+    }
+
+    const trendsArray = Object.values(monthlyTrends).sort((a, b) => a.month.localeCompare(b.month));
+
+    // Calculate trend and predict next 3 months
+    const predictions = [];
+    if (trendsArray.length >= 3) {
+      const recentTrends = trendsArray.slice(-3);
+      const avgGrowth = recentTrends.length > 1
+        ? (recentTrends[recentTrends.length - 1].total - recentTrends[0].total) / recentTrends.length
+        : 0;
+
+      for (let i = 1; i <= 3; i++) {
+        const futureMonth = new Date(endDate.getTime() + (i * 30 * 24 * 60 * 60 * 1000));
+        const monthStr = futureMonth.toISOString().slice(0, 7);
+        const lastTotal = trendsArray[trendsArray.length - 1].total;
+        
+        predictions.push({
+          month: monthStr,
+          predictedTotal: Math.max(0, Math.round(lastTotal + (avgGrowth * i))),
+          isPrediction: true
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        trends: trendsArray,
+        predictions,
+        summary: {
+          totalFailures: failures.length,
+          avgMonthly: trendsArray.length > 0 ? Math.round(failures.length / trendsArray.length) : 0
+        }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;
+

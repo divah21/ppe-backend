@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { User, Role, Department } = require('../../models');
+const { User, Role, Department, Section } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
@@ -58,7 +58,8 @@ router.get('/', authenticate, requireRole('admin'), async (req, res, next) => {
       where,
       include: [
         { model: Role, as: 'role' },
-        { model: Department, as: 'department', required: false }
+        { model: Department, as: 'department', required: false },
+        { model: Section, as: 'section', required: false }
       ],
       attributes: { exclude: ['passwordHash'] },
       limit: parseInt(limit),
@@ -163,7 +164,8 @@ router.post(
       const createdUser = await User.findByPk(user.id, {
         include: [
           { model: Role, as: 'role' },
-          { model: Department, as: 'department', required: false }
+          { model: Department, as: 'department', required: false },
+          { model: Section, as: 'section', required: false }
         ],
         attributes: { exclude: ['passwordHash'] }
       });
@@ -189,7 +191,8 @@ router.get('/:id', authenticate, requireRole('admin'), async (req, res, next) =>
     const user = await User.findByPk(req.params.id, {
       include: [
         { model: Role, as: 'role' },
-        { model: Department, as: 'department', required: false }
+        { model: Department, as: 'department', required: false },
+        { model: Section, as: 'section', required: false }
       ],
       attributes: { exclude: ['passwordHash'] }
     });
@@ -226,6 +229,7 @@ router.put(
     body('email').optional().trim().isEmail().withMessage('Invalid email').normalizeEmail(),
     body('roleId').optional().isUUID().withMessage('Invalid role ID'),
     body('departmentId').optional().isUUID().withMessage('Invalid department ID'),
+    body('sectionId').optional().isUUID().withMessage('Invalid section ID'),
     body('isActive').optional().isBoolean().withMessage('isActive must be a boolean')
   ],
   validate,
@@ -274,12 +278,24 @@ router.put(
         }
       }
 
+      // Verify section exists if being changed
+      if (req.body.sectionId) {
+        const section = await Section.findByPk(req.body.sectionId);
+        if (!section) {
+          return res.status(404).json({
+            success: false,
+            message: 'Section not found'
+          });
+        }
+      }
+
       await user.update(req.body);
 
       const updatedUser = await User.findByPk(user.id, {
         include: [
           { model: Role, as: 'role' },
-          { model: Department, as: 'department', required: false }
+          { model: Department, as: 'department', required: false },
+          { model: Section, as: 'section', required: false }
         ],
         attributes: { exclude: ['passwordHash'] }
       });
@@ -363,7 +379,8 @@ router.put(
       const updatedUser = await User.findByPk(user.id, {
         include: [
           { model: Role, as: 'role' },
-          { model: Department, as: 'department', required: false }
+          { model: Department, as: 'department', required: false },
+          { model: Section, as: 'section', required: false }
         ],
         attributes: { exclude: ['passwordHash'] }
       });

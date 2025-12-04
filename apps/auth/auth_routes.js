@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { User, Role } = require('../../models');
+const { User, Role, Department, Section } = require('../../models');
 const { generateAccessToken, generateRefreshToken, verifyToken } = require('../../helpers/jwt_helpers');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { validate } = require('../../middlewares/validation_middleware');
@@ -61,7 +61,11 @@ router.post('/register', registerValidation, validate, async (req, res, next) =>
 
     // Get user with role
     const createdUser = await User.findByPk(user.id, {
-      include: [{ model: Role, as: 'role' }],
+      include: [
+        { model: Role, as: 'role' },
+        { model: Department, as: 'department', required: false },
+        { model: Section, as: 'section', required: false }
+      ],
       attributes: { exclude: ['passwordHash'] }
     });
 
@@ -98,7 +102,11 @@ router.post('/login', loginValidation, validate, async (req, res, next) => {
     // Find user
     const user = await User.findOne({
       where: { username },
-      include: [{ model: Role, as: 'role' }]
+      include: [
+        { model: Role, as: 'role' },
+        { model: Department, as: 'department', required: false },
+        { model: Section, as: 'section', required: false }
+      ]
     });
 
     if (!user) {
@@ -233,7 +241,11 @@ router.post('/refresh', async (req, res, next) => {
 router.get('/profile', authenticate, async (req, res, next) => {
   try {
     const user = await User.findByPk(req.user.id, {
-      include: [{ model: Role, as: 'role' }],
+      include: [
+        { model: Role, as: 'role' },
+        { model: Department, as: 'department', required: false },
+        { model: Section, as: 'section', required: false }
+      ],
       attributes: { exclude: ['passwordHash'] }
     });
 
@@ -280,7 +292,11 @@ router.put('/profile', authenticate, updateProfileValidation, validate, async (r
 
     // Get updated user
     const updatedUser = await User.findByPk(req.user.id, {
-      include: [{ model: Role, as: 'role' }],
+      include: [
+        { model: Role, as: 'role' },
+        { model: Department, as: 'department', required: false },
+        { model: Section, as: 'section', required: false }
+      ],
       attributes: { exclude: ['passwordHash'] }
     });
 

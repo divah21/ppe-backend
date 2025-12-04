@@ -406,9 +406,26 @@ router.get('/low-stock', authenticate, authorize(['admin', 'sheq', 'stores']), a
   try {
     const lowStockItems = await Stock.findAll({
       where: {
-        quantity: {
-          [Sequelize.Op.lte]: Sequelize.col('reorder_point')
-        }
+        [Sequelize.Op.or]: [
+          // Check against reorder_point if it exists
+          {
+            reorderPoint: { [Sequelize.Op.ne]: null },
+            quantity: { [Sequelize.Op.lte]: Sequelize.col('reorder_point') }
+          },
+          // Otherwise check against min_level
+          {
+            [Sequelize.Op.and]: [
+              {
+                [Sequelize.Op.or]: [
+                  { reorderPoint: { [Sequelize.Op.eq]: null } },
+                  { reorderPoint: 0 }
+                ]
+              },
+              { minLevel: { [Sequelize.Op.ne]: null } },
+              { quantity: { [Sequelize.Op.lte]: Sequelize.col('min_level') } }
+            ]
+          }
+        ]
       },
       include: [{
         model: PPEItem,
@@ -423,7 +440,7 @@ router.get('/low-stock', authenticate, authorize(['admin', 'sheq', 'stores']), a
       itemName: stock.ppeItem.name,
       category: stock.ppeItem.category,
       currentQuantity: stock.quantity,
-      reorderPoint: stock.reorderPoint,
+      reorderPoint: stock.reorderPoint || stock.minLevel,
       minLevel: stock.minLevel,
       maxLevel: stock.maxLevel,
       unit: stock.ppeItem.unit,
@@ -432,7 +449,7 @@ router.get('/low-stock', authenticate, authorize(['admin', 'sheq', 'stores']), a
       color: stock.color,
       unitPriceUSD: parseFloat(stock.unitPriceUSD || 0),
       stockAccount: stock.stockAccount,
-      deficit: stock.reorderPoint - stock.quantity
+      deficit: (stock.reorderPoint || stock.minLevel) - stock.quantity
     }));
 
     res.json({
@@ -556,22 +573,36 @@ router.get('/costs', authenticate, authorize(['stores', 'hod-hos', 'admin']), as
 
 /**
  * @route   GET /api/v1/valuation/forecast-90-days
- * @desc    Simple 90-day PPE requirements forecast based on expiries
+ * @desc    Comprehensive PPE requirements forecast with breakdown (supports 30-365 days)
  * @access  Private (Stores, HOD, Admin)
+ * @query   days - forecast period in days (default: 90, max: 365)
  */
 router.get('/forecast-90-days', authenticate, authorize(['stores', 'hod-hos', 'admin']), async (req, res) => {
   try {
-    const { departmentId, sectionId } = req.query;
+    const { departmentId, sectionId, days } = req.query;
 
+    // Support dynamic forecast periods: 30, 60, 90, 180, 365 days
+    const forecastDays = Math.min(parseInt(days) || 90, 365);
+    
     const now = new Date();
-    const future = new Date();
-    future.setDate(future.getDate() + 90);
+    const futureEnd = new Date();
+    futureEnd.setDate(futureEnd.getDate() + forecastDays);
+    const future30 = new Date();
+    future30.setDate(future30.getDate() + 30);
+    const future60 = new Date();
+    future60.setDate(future60.getDate() + 60);
+    const future90 = new Date();
+    future90.setDate(future90.getDate() + 90);
+    const future180 = new Date();
+    future180.setDate(future180.getDate() + 180);
+    const future365 = new Date();
+    future365.setDate(future365.getDate() + 365);
 
     const where = {
       status: 'active',
       expiryDate: {
         [Sequelize.Op.gte]: now,
-        [Sequelize.Op.lte]: future
+        [Sequelize.Op.lte]: futureEnd  // Use dynamic end date
       }
     };
 
@@ -591,21 +622,77 @@ router.get('/forecast-90-days', authenticate, authorize(['stores', 'hod-hos', 'a
       ]
     });
 
+    // Get all stock items
+    const stockItems = await Stock.findAll({
+      include: [{ model: PPEItem, as: 'ppeItem' }]
+    });
+
     const byItem = {};
     for (const alloc of allocations) {
       const key = alloc.ppeItemId;
+      const expiryDate = new Date(alloc.expiryDate);
+      
       if (!byItem[key]) {
         byItem[key] = {
           ppeItemId: alloc.ppeItemId,
-          itemName: alloc.ppeItem ? alloc.ppeItem.name : null,
-          itemCode: alloc.ppeItem ? alloc.ppeItem.itemCode : null,
-          totalQuantity: 0
+          ppeItemName: alloc.ppeItem ? alloc.ppeItem.name : null,
+          ppeItemCode: alloc.ppeItem ? alloc.ppeItem.itemCode : null,
+          category: alloc.ppeItem ? alloc.ppeItem.category : null,
+          departmentId: alloc.employee && alloc.employee.section && alloc.employee.section.department ? alloc.employee.section.department.id : null,
+          departmentName: alloc.employee && alloc.employee.section && alloc.employee.section.department ? alloc.employee.section.department.name : null,
+          sectionId: alloc.employee && alloc.employee.section ? alloc.employee.section.id : null,
+          sectionName: alloc.employee && alloc.employee.section ? alloc.employee.section.name : null,
+          totalRequired: 0,
+          next30Days: 0,
+          next60Days: 0,
+          next90Days: 0,
+          next180Days: 0,
+          next365Days: 0,
+          currentStock: 0,
+          shortage: 0,
+          avgMonthly: 0
         };
       }
-      byItem[key].totalQuantity += alloc.quantity;
+      
+      byItem[key].totalRequired += alloc.quantity;
+      
+      // Dynamic breakdown based on expiry date
+      if (expiryDate <= future30) {
+        byItem[key].next30Days += alloc.quantity;
+      } else if (expiryDate <= future60) {
+        byItem[key].next60Days += alloc.quantity;
+      } else if (expiryDate <= future90) {
+        byItem[key].next90Days += alloc.quantity;
+      } else if (expiryDate <= future180) {
+        byItem[key].next180Days += alloc.quantity;
+      } else if (expiryDate <= future365) {
+        byItem[key].next365Days += alloc.quantity;
+      }
     }
 
-    res.json({ success: true, data: Object.values(byItem) });
+    // Add stock info
+    for (const stock of stockItems) {
+      const key = stock.ppeItemId;
+      if (byItem[key]) {
+        byItem[key].currentStock = stock.quantity || 0;
+        byItem[key].shortage = Math.max(0, byItem[key].totalRequired - byItem[key].currentStock);
+        byItem[key].avgMonthly = Math.round(byItem[key].totalRequired / 3);
+      }
+    }
+
+    const forecast = Object.values(byItem);
+
+    res.json({ 
+      success: true, 
+      data: {
+        forecast,
+        summary: {
+          totalRequired: forecast.reduce((sum, f) => sum + f.totalRequired, 0),
+          totalShortage: forecast.reduce((sum, f) => sum + f.shortage, 0),
+          itemsWithShortage: forecast.filter(f => f.shortage > 0).length
+        }
+      }
+    });
   } catch (error) {
     console.error('Error calculating 90-day forecast:', error);
     res.status(500).json({
@@ -688,12 +775,12 @@ router.get('/stock-vs-forecast', authenticate, authorize(['stores', 'admin']), a
 
 /**
  * @route   GET /api/v1/valuation/issued-value
- * @desc    Total PPE issued value over a period (daily/monthly/annual)
+ * @desc    Total PPE issued value over a period with budget tracking
  * @access  Private (Stores, HOD, Admin)
  */
 router.get('/issued-value', authenticate, authorize(['stores', 'hod-hos', 'admin']), async (req, res) => {
   try {
-    const { fromDate, toDate, groupBy = 'day', departmentId, sectionId, alertThreshold } = req.query;
+    const { fromDate, toDate, groupBy = 'month', departmentId, sectionId, alertThreshold } = req.query;
 
     const where = {};
     if (fromDate) where.issueDate = { [Sequelize.Op.gte]: new Date(fromDate) };
@@ -719,30 +806,48 @@ router.get('/issued-value', authenticate, authorize(['stores', 'hod-hos', 'admin
     };
 
     const buckets = {};
-    let total = 0;
+    let totalIssued = 0;
     for (const alloc of allocations) {
       const key = keyFor(alloc.issueDate);
-      if (!buckets[key]) buckets[key] = { dateKey: key, totalCost: 0, totalQuantity: 0 };
-      buckets[key].totalCost += parseFloat(alloc.totalCost || 0);
-      buckets[key].totalQuantity += alloc.quantity;
-      total += parseFloat(alloc.totalCost || 0);
+      if (!buckets[key]) buckets[key] = { period: key, totalValue: 0, count: 0, avgValue: 0 };
+      buckets[key].totalValue += parseFloat(alloc.totalCost || 0);
+      buckets[key].count += 1;
+      totalIssued += parseFloat(alloc.totalCost || 0);
     }
 
-    const rows = Object.values(buckets).map(b => ({
-      dateKey: b.dateKey,
-      totalCost: parseFloat(b.totalCost.toFixed(2)),
-      totalQuantity: b.totalQuantity
+    const breakdown = Object.values(buckets).map(b => ({
+      period: b.period,
+      totalValue: parseFloat(b.totalValue.toFixed(2)),
+      count: b.count,
+      avgValue: parseFloat((b.totalValue / b.count).toFixed(2))
     }));
+
+    // Get allocated budget (default to $100,000 if not found)
+    const allocatedBudget = 100000;
+    const remainingBudget = allocatedBudget - totalIssued;
+    const utilizationPercent = (totalIssued / allocatedBudget) * 100;
+    const avgPerPeriod = breakdown.length > 0 ? totalIssued / breakdown.length : 0;
 
     const alerts = [];
     if (alertThreshold) {
       const threshold = parseFloat(alertThreshold);
-      if (!Number.isNaN(threshold) && total >= threshold) {
-        alerts.push({ type: 'budget', message: `Issued value ${total.toFixed(2)} exceeds threshold ${threshold.toFixed(2)}` });
+      if (!Number.isNaN(threshold) && totalIssued >= threshold) {
+        alerts.push({ type: 'budget', message: `Issued value ${totalIssued.toFixed(2)} exceeds threshold ${threshold.toFixed(2)}` });
       }
     }
 
-    res.json({ success: true, data: { total: parseFloat(total.toFixed(2)), rows }, alerts });
+    res.json({ 
+      success: true, 
+      data: { 
+        totalIssued: parseFloat(totalIssued.toFixed(2)),
+        allocatedBudget: parseFloat(allocatedBudget.toFixed(2)),
+        remainingBudget: parseFloat(remainingBudget.toFixed(2)),
+        utilizationPercent: parseFloat(utilizationPercent.toFixed(2)),
+        avgPerPeriod: parseFloat(avgPerPeriod.toFixed(2)),
+        breakdown
+      }, 
+      alerts 
+    });
   } catch (error) {
     console.error('Error calculating issued value:', error);
     res.status(500).json({ success: false, message: 'Failed to calculate issued value', error: error.message });
@@ -956,4 +1061,191 @@ router.post('/bulk-import', authenticate, authorize(['admin', 'stores']), auditL
   }
 });
 
+/**
+ * @route   GET /api/v1/valuation/analytics/demand-forecast
+ * @desc    Get comprehensive demand analytics based on allocations, stock, and failures
+ * @access  Private (Stores, Admin)
+ */
+router.get('/analytics/demand-forecast', authenticate, authorize(['stores', 'admin']), async (req, res) => {
+  try {
+    const { departmentId, sectionId, months = 12 } = req.query;
+    
+    const endDate = new Date();
+    const startDate = new Date(endDate.getTime() - (parseInt(months) * 30 * 24 * 60 * 60 * 1000));
+    
+    // Get all allocations in period
+    const allocWhere = {
+      createdAt: {
+        [Sequelize.Op.gte]: startDate,
+        [Sequelize.Op.lte]: endDate
+      },
+      status: { [Sequelize.Op.in]: ['active', 'expired', 'returned'] }
+    };
+
+    const employeeWhere = {};
+    if (departmentId) employeeWhere['$employee.section.department_id$'] = departmentId;
+    if (sectionId) employeeWhere['$employee.section_id$'] = sectionId;
+
+    const allocations = await Allocation.findAll({
+      where: { ...allocWhere, ...employeeWhere },
+      include: [
+        { model: PPEItem, as: 'ppeItem' },
+        {
+          model: Employee,
+          as: 'employee',
+          include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }]
+        }
+      ]
+    });
+
+    // Get failures in same period
+    const { FailureReport } = require('../../models');
+    const failures = await FailureReport.findAll({
+      where: {
+        reportedDate: {
+          [Sequelize.Op.gte]: startDate,
+          [Sequelize.Op.lte]: endDate
+        }
+      },
+      include: [{ model: PPEItem, as: 'ppeItem' }]
+    });
+
+    // Get current stock levels
+    const stockItems = await Stock.findAll({
+      include: [{ model: PPEItem, as: 'ppeItem' }]
+    });
+
+    // Build demand analytics by PPE item
+    const demandByItem = {};
+
+    // Process allocations
+    for (const alloc of allocations) {
+      const itemId = alloc.ppeItemId;
+      if (!demandByItem[itemId]) {
+        demandByItem[itemId] = {
+          ppeItemId: itemId,
+          ppeItemName: alloc.ppeItem?.name || 'Unknown',
+          ppeItemCode: alloc.ppeItem?.itemCode,
+          category: alloc.ppeItem?.category,
+          replacementFrequency: alloc.ppeItem?.replacementFrequency || 12,
+          totalAllocations: 0,
+          activeAllocations: 0,
+          expiredAllocations: 0,
+          totalQuantityIssued: 0,
+          failureCount: 0,
+          currentStock: 0,
+          avgMonthlyDemand: 0,
+          predictedMonthlyDemand: 0,
+          recommendedStockLevel: 0,
+          allocationsByMonth: {},
+          failuresByMonth: {},
+          failureRate: 0
+        };
+      }
+
+      const item = demandByItem[itemId];
+      item.totalAllocations++;
+      item.totalQuantityIssued += alloc.quantity;
+      
+      if (alloc.status === 'active') item.activeAllocations++;
+      if (alloc.status === 'expired') item.expiredAllocations++;
+
+      // Monthly tracking
+      const month = new Date(alloc.createdAt).toISOString().slice(0, 7);
+      item.allocationsByMonth[month] = (item.allocationsByMonth[month] || 0) + alloc.quantity;
+    }
+
+    // Process failures
+    for (const failure of failures) {
+      const itemId = failure.ppeItemId;
+      if (demandByItem[itemId]) {
+        demandByItem[itemId].failureCount++;
+        const month = new Date(failure.reportedDate).toISOString().slice(0, 7);
+        demandByItem[itemId].failuresByMonth[month] = (demandByItem[itemId].failuresByMonth[month] || 0) + 1;
+      }
+    }
+
+    // Process stock levels
+    for (const stock of stockItems) {
+      const itemId = stock.ppeItemId;
+      if (demandByItem[itemId]) {
+        demandByItem[itemId].currentStock += stock.quantity || 0;
+      }
+    }
+
+    // Calculate metrics and predictions
+    const analyticsArray = Object.values(demandByItem).map(item => {
+      // Average monthly demand
+      const monthCount = Math.max(1, parseInt(months));
+      item.avgMonthlyDemand = Math.round(item.totalQuantityIssued / monthCount);
+      
+      // Failure rate
+      item.failureRate = item.totalAllocations > 0 
+        ? ((item.failureCount / item.totalAllocations) * 100).toFixed(2)
+        : 0;
+
+      // Trend-based prediction
+      const monthKeys = Object.keys(item.allocationsByMonth).sort();
+      if (monthKeys.length >= 3) {
+        const recentMonths = monthKeys.slice(-3);
+        const recentDemand = recentMonths.map(m => item.allocationsByMonth[m]);
+        const avgRecent = recentDemand.reduce((a, b) => a + b, 0) / recentDemand.length;
+        
+        // Calculate growth trend
+        const firstRecent = recentDemand[0];
+        const lastRecent = recentDemand[recentDemand.length - 1];
+        const growthRate = firstRecent > 0 ? ((lastRecent - firstRecent) / firstRecent) : 0;
+        
+        item.predictedMonthlyDemand = Math.round(avgRecent * (1 + growthRate));
+      } else {
+        item.predictedMonthlyDemand = item.avgMonthlyDemand;
+      }
+
+      // Recommended stock level: 3 months of predicted demand + safety stock (20%)
+      const replacementCycles = item.replacementFrequency || 12;
+      const safetyMultiplier = 1.2; // 20% safety stock
+      item.recommendedStockLevel = Math.round(item.predictedMonthlyDemand * 3 * safetyMultiplier);
+      
+      // Stock status
+      item.stockStatus = item.currentStock < item.recommendedStockLevel ? 'low' : 'adequate';
+      item.stockShortfall = Math.max(0, item.recommendedStockLevel - item.currentStock);
+
+      return item;
+    });
+
+    // Sort by predicted demand (highest first)
+    analyticsArray.sort((a, b) => b.predictedMonthlyDemand - a.predictedMonthlyDemand);
+
+    // Summary
+    const summary = {
+      totalItemsTracked: analyticsArray.length,
+      totalAllocations: analyticsArray.reduce((sum, i) => sum + i.totalAllocations, 0),
+      totalFailures: analyticsArray.reduce((sum, i) => sum + i.failureCount, 0),
+      itemsWithLowStock: analyticsArray.filter(i => i.stockStatus === 'low').length,
+      totalStockShortfall: analyticsArray.reduce((sum, i) => sum + i.stockShortfall, 0),
+      avgFailureRate: analyticsArray.length > 0
+        ? (analyticsArray.reduce((sum, i) => sum + parseFloat(i.failureRate), 0) / analyticsArray.length).toFixed(2)
+        : 0,
+      topDemandItems: analyticsArray.slice(0, 10)
+    };
+
+    res.json({
+      success: true,
+      data: {
+        analytics: analyticsArray,
+        summary,
+        dateRange: { startDate, endDate, months: parseInt(months) }
+      }
+    });
+  } catch (error) {
+    console.error('Error calculating demand forecast:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to calculate demand forecast',
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;
+
