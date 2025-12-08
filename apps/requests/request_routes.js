@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock, Matrix, JobTitle } = require('../../models');
+const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock, JobTitlePPEMatrix, JobTitle } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { authorize } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
@@ -228,10 +228,9 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
     if (!isEmergencyVisitor && employee) {
       
       // Get employee's PPE matrix (eligibility)
-      const { Matrix } = require('../../models');
-      const eligibility = await Matrix.findAll({
+      const eligibility = await JobTitlePPEMatrix.findAll({
         where: { jobTitleId: employee.jobTitleId },
-        include: [{ model: PPEItem, as: 'ppeItemRef' }]
+        include: [{ model: PPEItem, as: 'ppeItem' }]
       });
 
       const eligibleItemIds = eligibility.map(e => e.ppeItemId);
