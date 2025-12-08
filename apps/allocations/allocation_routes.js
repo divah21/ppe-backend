@@ -394,7 +394,7 @@ router.post(
           issueDate,
           nextRenewalDate,
           status: 'active',
-          totalCost: stock.unitCost * allocItem.quantity
+          totalCost: (parseFloat(stock.unitPriceUSD) || 0) * allocItem.quantity
         }, { transaction });
 
         // Update stock
@@ -588,7 +588,7 @@ router.put(
         issueDate,
         nextRenewalDate,
         status: 'active',
-        totalCost: stock.unitCost * renewalQty
+        totalCost: (parseFloat(stock.unitPriceUSD) || 0) * renewalQty
       }, { transaction });
 
       // Update stock

@@ -97,12 +97,18 @@ router.get('/cost-analysis', authenticate, authorize(['admin', 'hod-hos', 'store
     // Get all active employees with filters
     const employees = await Employee.findAll({
       where: { ...employeeWhere, isActive: true },
-      include: [{
-        model: Section,
-        as: 'section',
-        where: Object.keys(sectionWhere).length > 0 ? sectionWhere : undefined,
-        include: [{ model: Department, as: 'department' }]
-      }]
+      include: [
+        {
+          model: Section,
+          as: 'section',
+          where: Object.keys(sectionWhere).length > 0 ? sectionWhere : undefined,
+          include: [{ model: Department, as: 'department' }]
+        },
+        {
+          model: require('../../models/jobTitle'),
+          as: 'jobTitleRef'
+        }
+      ]
     });
 
     const costDetails = [];
@@ -110,7 +116,7 @@ router.get('/cost-analysis', authenticate, authorize(['admin', 'hod-hos', 'store
     for (const employee of employees) {
       // Get PPE matrix for this employee's job title
       const matrixEntries = await JobTitlePPEMatrix.findAll({
-        where: { jobTitle: employee.jobTitle, isActive: true },
+        where: { jobTitleId: employee.jobTitleId, isActive: true },
         include: [{ model: PPEItem, as: 'ppeItem' }]
       });
 
@@ -131,7 +137,7 @@ router.get('/cost-analysis', authenticate, authorize(['admin', 'hod-hos', 'store
           employeeId: employee.id,
           employeeName: `${employee.firstName} ${employee.lastName}`,
           worksNumber: employee.worksNumber,
-          jobTitle: employee.jobTitle,
+          jobTitle: employee.jobTitleRef ? employee.jobTitleRef.name : (employee.jobTitle || 'N/A'),
           sectionId: employee.section ? employee.section.id : null,
           sectionName: employee.section ? employee.section.name : null,
           departmentId: employee.section && employee.section.department ? employee.section.department.id : null,
