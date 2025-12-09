@@ -118,8 +118,9 @@ const FailureReport = sequelize.define('FailureReport', {
     defaultValue: 'medium'
   },
   status: {
-    type: DataTypes.ENUM('pending', 'investigating', 'resolved', 'replaced'),
-    defaultValue: 'pending'
+    type: DataTypes.ENUM('pending-sheq-review', 'sheq-approved', 'stores-processing', 'resolved', 'replaced'),
+    defaultValue: 'pending-sheq-review',
+    comment: 'Workflow: Section Rep -> SHEQ Review -> Stores Processing -> Resolved/Replaced'
   },
   createdAt: {
     type: DataTypes.DATE,

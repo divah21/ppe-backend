@@ -306,6 +306,72 @@ router.put(
 );
 
 /**
+ * @route   PATCH /api/v1/failures/:id
+ * @desc    Partially update failure report (for SHEQ review, status updates)
+ * @access  Private (Stores, SHEQ, Admin)
+ */
+router.patch(
+  '/:id',
+  authenticate,
+  requireRole('stores', 'sheq', 'admin'),
+  [
+    param('id').isUUID().withMessage('Invalid failure report ID'),
+    body('status').optional().isIn(['pending-sheq-review', 'sheq-approved', 'stores-processing', 'resolved', 'replaced']).withMessage('Invalid status'),
+    body('reviewedBySHEQ').optional().isBoolean(),
+    body('sheqDecision').optional().trim(),
+    body('sheqReviewDate').optional().isISO8601(),
+    body('actionTaken').optional().trim()
+  ],
+  validate,
+  auditLog('UPDATE', 'FailureReport'),
+  async (req, res, next) => {
+    try {
+      const report = await FailureReport.findByPk(req.params.id);
+
+      if (!report) {
+        return res.status(404).json({
+          success: false,
+          message: 'Failure report not found'
+        });
+      }
+
+      await report.update(req.body);
+
+      const updatedReport = await FailureReport.findByPk(report.id, {
+        include: [
+          {
+            model: Employee,
+            as: 'employee',
+            include: [
+              {
+                model: Section,
+                as: 'section',
+                include: [{ model: Department, as: 'department' }]
+              },
+              {
+                model: JobTitle,
+                as: 'jobTitleRef',
+                attributes: ['id', 'name', 'code']
+              }
+            ]
+          },
+          { model: PPEItem, as: 'ppeItem' },
+          { model: Allocation, as: 'allocation' }
+        ]
+      });
+
+      res.json({
+        success: true,
+        message: 'Failure report updated successfully',
+        data: updatedReport
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
  * @route   POST /api/v1/failures/:id/process
  * @desc    Process failure report - deduct stock and prepare for replacement
  * @access  Private (Stores, Admin)
