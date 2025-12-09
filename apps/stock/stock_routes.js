@@ -427,7 +427,7 @@ router.put(
 router.delete(
   '/:id',
   authenticate,
-  requireRole('admin'),
+  requireRole('admin','stores',),
   auditLog('DELETE', 'Stock'),
   async (req, res, next) => {
     try {
@@ -445,6 +445,42 @@ router.delete(
       res.json({
         success: true,
         message: 'Stock item deleted successfully'
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   POST /api/v1/stock/bulk-delete
+ * @desc    Bulk delete stock items (for deleting all variants of an item)
+ * @access  Private (Admin only)
+ */
+router.post(
+  '/bulk-delete',
+  authenticate,
+  requireRole('admin','stores'),
+  [
+    body('ids').isArray({ min: 1 }).withMessage('IDs must be a non-empty array'),
+    body('ids.*').isUUID().withMessage('Each ID must be a valid UUID')
+  ],
+  validate,
+  auditLog('BULK_DELETE', 'Stock'),
+  async (req, res, next) => {
+    try {
+      const { ids } = req.body;
+
+      const deletedCount = await Stock.destroy({
+        where: {
+          id: ids
+        }
+      });
+
+      res.json({
+        success: true,
+        message: `Successfully deleted ${deletedCount} stock item(s)`,
+        data: { deletedCount }
       });
     } catch (error) {
       next(error);
