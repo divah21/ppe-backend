@@ -1,11 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const { FailureReport, Employee, PPEItem, Allocation, Section, Department } = require('../../models');
+const { FailureReport, Employee, PPEItem, Allocation, Section, Department, Stock, JobTitle } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
+const { Op } = require('sequelize');
 
 /**
  * @route   GET /api/v1/failures
@@ -49,12 +50,19 @@ router.get('/', authenticate, requireRole('section-rep', 'hod', 'department-rep'
         {
           model: Employee,
           as: 'employee',
-          attributes: ['id', 'firstName', 'lastName', 'worksNumber', 'jobTitle', 'sectionId'],
-          include: [{
-            model: Section,
-            as: 'section',
-            include: [{ model: Department, as: 'department' }]
-          }]
+          attributes: ['id', 'firstName', 'lastName', 'worksNumber', 'jobTitle', 'sectionId', 'jobTitleId'],
+          include: [
+            {
+              model: Section,
+              as: 'section',
+              include: [{ model: Department, as: 'department' }]
+            },
+            {
+              model: JobTitle,
+              as: 'jobTitleRef',
+              attributes: ['id', 'name', 'code']
+            }
+          ]
         },
         {
           model: PPEItem,
@@ -98,7 +106,19 @@ router.get('/:id', authenticate, async (req, res, next) => {
       include: [
         {
           model: Employee,
-          as: 'employee'
+          as: 'employee',
+          include: [
+            {
+              model: Section,
+              as: 'section',
+              include: [{ model: Department, as: 'department' }]
+            },
+            {
+              model: JobTitle,
+              as: 'jobTitleRef',
+              attributes: ['id', 'name', 'code']
+            }
+          ]
         },
         {
           model: PPEItem,
@@ -141,6 +161,7 @@ router.post(
     body('severity').isIn(['low', 'medium', 'high', 'critical']).withMessage('Invalid severity'),
     body('employeeId').isUUID().withMessage('Invalid employee ID'),
     body('ppeItemId').isUUID().withMessage('Invalid PPE item ID'),
+    body('stockId').optional().isUUID().withMessage('Invalid stock ID'),
     body('allocationId').optional().isUUID().withMessage('Invalid allocation ID'),
     body('observedAt').optional().trim(),
     body('brand').optional().trim(),
@@ -151,7 +172,7 @@ router.post(
   auditLog('CREATE', 'FailureReport'),
   async (req, res, next) => {
     try {
-      const { description, failureType, severity, employeeId, ppeItemId, allocationId, observedAt, brand, failureDate, remarks } = req.body;
+      const { description, failureType, severity, employeeId, ppeItemId, stockId, allocationId, observedAt, brand, failureDate, remarks } = req.body;
 
       // Verify employee exists
       const employee = await Employee.findByPk(employeeId);
@@ -171,12 +192,38 @@ router.post(
         });
       }
 
+      // If stockId is provided, verify it exists
+      let validStockId = stockId;
+      if (stockId) {
+        const stock = await Stock.findByPk(stockId);
+        if (!stock) {
+          // Stock ID provided but doesn't exist, try to find a matching stock
+          validStockId = null;
+        }
+      }
+
+      // If no valid stockId, try to find a matching stock item for this PPE
+      if (!validStockId) {
+        const matchingStock = await Stock.findOne({
+          where: {
+            ppeItemId: ppeItemId,
+            quantity: { [Op.gt]: 0 }
+          },
+          order: [['createdAt', 'DESC']]
+        });
+
+        if (matchingStock) {
+          validStockId = matchingStock.id;
+        }
+      }
+
       const report = await FailureReport.create({
         description,
         failureType,
         severity,
         employeeId,
         ppeItemId,
+        stockId: validStockId,
         allocationId,
         observedAt,
         brand,
@@ -195,7 +242,7 @@ router.post(
 
       res.status(201).json({
         success: true,
-        message: 'Failure report created successfully',
+        message: 'Failure report created successfully. Item will be processed by stores for replacement.',
         data: createdReport
       });
     } catch (error) {
@@ -251,6 +298,104 @@ router.put(
         success: true,
         message: 'Failure report updated successfully',
         data: updatedReport
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   POST /api/v1/failures/:id/process
+ * @desc    Process failure report - deduct stock and prepare for replacement
+ * @access  Private (Stores, Admin)
+ */
+router.post(
+  '/:id/process',
+  authenticate,
+  requireRole('stores', 'admin'),
+  [
+    param('id').isUUID().withMessage('Invalid failure report ID'),
+    body('replacementStockId').optional().isUUID().withMessage('Invalid replacement stock ID'),
+    body('actionTaken').optional().trim()
+  ],
+  validate,
+  auditLog('UPDATE', 'FailureReport'),
+  async (req, res, next) => {
+    try {
+      const { Stock } = require('../../models');
+      const { replacementStockId, actionTaken } = req.body;
+
+      const report = await FailureReport.findByPk(req.params.id, {
+        include: [
+          { model: Employee, as: 'employee' },
+          { model: PPEItem, as: 'ppeItem' },
+          { model: Allocation, as: 'allocation' }
+        ]
+      });
+
+      if (!report) {
+        return res.status(404).json({
+          success: false,
+          message: 'Failure report not found'
+        });
+      }
+
+      if (report.status === 'replaced') {
+        return res.status(400).json({
+          success: false,
+          message: 'This failure has already been processed and replaced'
+        });
+      }
+
+      // Deduct from stock if stockId is provided
+      if (report.stockId) {
+        const stock = await Stock.findByPk(report.stockId);
+        if (stock) {
+          if (stock.quantity > 0) {
+            await stock.update({
+              quantity: stock.quantity - 1
+            });
+            console.log(`Deducted 1 unit from stock ${stock.id}. New quantity: ${stock.quantity - 1}`);
+          }
+        }
+      }
+
+      // Update the allocation status if exists
+      if (report.allocationId) {
+        const allocation = await Allocation.findByPk(report.allocationId);
+        if (allocation) {
+          await allocation.update({
+            status: 'replaced',
+            notes: (allocation.notes || '') + `\nReplaced due to ${report.failureType} (Failure Report #${report.id.substring(0, 8)})`
+          });
+        }
+      }
+
+      // Update failure report
+      const updateData = {
+        status: replacementStockId ? 'replaced' : 'investigating',
+        actionTaken: actionTaken || `Stock deducted. ${replacementStockId ? 'Replacement allocated.' : 'Awaiting replacement allocation.'}`,
+        replacementStockId
+      };
+
+      await report.update(updateData);
+
+      const updatedReport = await FailureReport.findByPk(report.id, {
+        include: [
+          { model: Employee, as: 'employee' },
+          { model: PPEItem, as: 'ppeItem' },
+          { model: Allocation, as: 'allocation' }
+        ]
+      });
+
+      res.json({
+        success: true,
+        message: replacementStockId 
+          ? 'Failure processed, stock deducted, and replacement allocated'
+          : 'Failure processed and stock deducted. Ready for replacement allocation.',
+        data: updatedReport,
+        stockDeducted: !!report.stockId
       });
     } catch (error) {
       next(error);

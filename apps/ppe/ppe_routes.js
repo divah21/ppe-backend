@@ -231,7 +231,7 @@ router.put(
 router.delete(
   '/:id',
   authenticate,
-  requireRole('admin'),
+  requireRole('admin','stores'),
   auditLog('DELETE', 'PPEItem'),
   async (req, res, next) => {
     try {

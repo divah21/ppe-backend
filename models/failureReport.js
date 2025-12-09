@@ -34,6 +34,26 @@ const FailureReport = sequelize.define('FailureReport', {
       key: 'id'
     }
   },
+  stockId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    field: 'stock_id',
+    references: {
+      model: 'stocks',
+      key: 'id'
+    },
+    comment: 'The stock item that failed'
+  },
+  replacementStockId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    field: 'replacement_stock_id',
+    references: {
+      model: 'stocks',
+      key: 'id'
+    },
+    comment: 'The replacement stock item allocated'
+  },
   description: {
     type: DataTypes.TEXT,
     allowNull: false

@@ -55,6 +55,11 @@ const Allocation = sequelize.define('Allocation', {
     type: DataTypes.INTEGER,
     allowNull: true,
     comment: 'Replacement frequency in months'
+  },
+  stockId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'Reference to the specific stock item allocated'
   }
 }, {
   tableName: 'allocations',
