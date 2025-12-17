@@ -75,7 +75,18 @@ router.get('/', authenticate, async (req, res, next) => {
           ]
         },
         { model: PPEItem, as: 'ppeItem' },
-        { model: User, as: 'issuedBy', attributes: ['id', 'username', 'firstName', 'lastName'] }
+        { 
+          model: User, 
+          as: 'issuedBy', 
+          attributes: ['id', 'username'],
+          include: [
+            { 
+              model: Employee, 
+              as: 'employee', 
+              attributes: ['id', 'firstName', 'lastName'] 
+            }
+          ]
+        }
       ],
       limit: parseInt(limit),
       offset,
@@ -120,7 +131,14 @@ router.get('/renewals', authenticate, requireRole('stores', 'admin'), async (req
       include: [
         { model: Employee, as: 'employee' },
         { model: PPEItem, as: 'ppeItem' },
-        { model: User, as: 'issuedBy', attributes: ['id', 'username', 'firstName', 'lastName'] }
+        { 
+          model: User, 
+          as: 'issuedBy', 
+          attributes: ['id', 'username'],
+          include: [
+            { model: Employee, as: 'employee', attributes: ['id', 'firstName', 'lastName'] }
+          ]
+        }
       ],
       order: [['nextRenewalDate', 'ASC']]
     });
@@ -424,7 +442,14 @@ router.post(
         include: [
           { model: Employee, as: 'employee' },
           { model: PPEItem, as: 'ppeItem' },
-          { model: User, as: 'issuedBy', attributes: ['id', 'username', 'firstName', 'lastName'] }
+          { 
+            model: User, 
+            as: 'issuedBy', 
+            attributes: ['id', 'username'],
+            include: [
+              { model: Employee, as: 'employee', attributes: ['id', 'firstName', 'lastName'] }
+            ]
+          }
         ]
       });
 
@@ -501,7 +526,14 @@ router.put(
         include: [
           { model: Employee, as: 'employee' },
           { model: PPEItem, as: 'ppeItem' },
-          { model: User, as: 'issuedBy', attributes: ['id', 'username', 'firstName', 'lastName'] }
+          { 
+            model: User, 
+            as: 'issuedBy', 
+            attributes: ['id', 'username'],
+            include: [
+              { model: Employee, as: 'employee', attributes: ['id', 'firstName', 'lastName'] }
+            ]
+          }
         ]
       });
 
@@ -602,7 +634,14 @@ router.put(
         include: [
           { model: Employee, as: 'employee' },
           { model: PPEItem, as: 'ppeItem' },
-          { model: User, as: 'issuedBy', attributes: ['id', 'username', 'firstName', 'lastName'] }
+          { 
+            model: User, 
+            as: 'issuedBy', 
+            attributes: ['id', 'username'],
+            include: [
+              { model: Employee, as: 'employee', attributes: ['id', 'firstName', 'lastName'] }
+            ]
+          }
         ]
       });
 

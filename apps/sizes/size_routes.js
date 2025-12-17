@@ -269,4 +269,130 @@ router.delete(
   }
 );
 
+/**
+ * @route   POST /api/v1/sizes/bulk-upload
+ * @desc    Bulk upload size scales with their sizes
+ * @access  Private (Admin, Stores)
+ */
+router.post(
+  '/bulk-upload',
+  authenticate,
+  requireRole('admin', 'stores'),
+  [
+    body('scales').isArray({ min: 1 }).withMessage('Scales array is required'),
+    body('scales.*.code').trim().notEmpty().withMessage('Scale code is required'),
+    body('scales.*.name').trim().notEmpty().withMessage('Scale name is required'),
+    body('scales.*.sizes').isArray().withMessage('Sizes array is required for each scale'),
+    body('scales.*.sizes.*.value').trim().notEmpty().withMessage('Size value is required')
+  ],
+  validate,
+  auditLog('BULK_UPLOAD', 'SizeScale'),
+  async (req, res, next) => {
+    try {
+      const { scales, updateExisting = false } = req.body;
+      const results = {
+        created: [],
+        updated: [],
+        skipped: [],
+        errors: []
+      };
+
+      for (const scaleData of scales) {
+        try {
+          const { code, name, categoryGroup, description, sizes } = scaleData;
+
+          // Check if scale exists
+          let scale = await SizeScale.findOne({ where: { code } });
+          
+          if (scale) {
+            if (updateExisting) {
+              await scale.update({ name, categoryGroup, description });
+              results.updated.push({ code, name, sizesCount: sizes?.length || 0 });
+            } else {
+              results.skipped.push({ code, name, reason: 'Scale already exists' });
+              continue;
+            }
+          } else {
+            scale = await SizeScale.create({ code, name, categoryGroup, description });
+            results.created.push({ code, name, sizesCount: sizes?.length || 0 });
+          }
+
+          // Process sizes for this scale
+          if (sizes && sizes.length > 0) {
+            for (let i = 0; i < sizes.length; i++) {
+              const sizeData = sizes[i];
+              const { value, label, euSize, usSize, ukSize, meta } = sizeData;
+
+              // Check if size already exists in this scale
+              const existingSize = await Size.findOne({ 
+                where: { scaleId: scale.id, value } 
+              });
+
+              if (existingSize) {
+                if (updateExisting) {
+                  await existingSize.update({ 
+                    label: label || value, 
+                    sortOrder: i,
+                    euSize,
+                    usSize,
+                    ukSize,
+                    meta
+                  });
+                }
+              } else {
+                await Size.create({
+                  scaleId: scale.id,
+                  value,
+                  label: label || value,
+                  sortOrder: i,
+                  euSize,
+                  usSize,
+                  ukSize,
+                  meta
+                });
+              }
+            }
+          }
+        } catch (err) {
+          results.errors.push({
+            code: scaleData.code,
+            name: scaleData.name,
+            error: err.message
+          });
+        }
+      }
+
+      const totalProcessed = results.created.length + results.updated.length + results.skipped.length;
+      res.json({
+        success: true,
+        message: `Processed ${totalProcessed} scales: ${results.created.length} created, ${results.updated.length} updated, ${results.skipped.length} skipped, ${results.errors.length} errors`,
+        data: results
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * @route   GET /api/v1/sizes/scales/with-sizes
+ * @desc    Get all size scales with their sizes
+ * @access  Private
+ */
+router.get('/scales/with-sizes', authenticate, async (req, res, next) => {
+  try {
+    const scales = await SizeScale.findAll({
+      order: [['name', 'ASC']],
+      include: [{
+        model: Size,
+        as: 'sizes',
+        order: [['sortOrder', 'ASC'], ['value', 'ASC']]
+      }]
+    });
+    res.json({ success: true, data: scales });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

@@ -33,6 +33,11 @@ const createEmployeeValidation = [
     .isUUID()
     .withMessage('Invalid section ID'),
   
+  body('costCenterId')
+    .optional()
+    .isUUID()
+    .withMessage('Invalid cost center ID'),
+  
   body('email')
     .optional()
     .trim()
@@ -46,6 +51,16 @@ const createEmployeeValidation = [
     .matches(/^[0-9+\-\s()]+$/)
     .withMessage('Invalid phone number format'),
   
+  body('gender')
+    .optional()
+    .trim()
+    .isIn(['MALE', 'FEMALE', 'OTHER', 'male', 'female', 'other'])
+    .withMessage('Gender must be MALE, FEMALE, or OTHER'),
+  
+  body('contractType')
+    .optional()
+    .trim(),
+  
   body('dateOfBirth')
     .optional()
     .isISO8601()
@@ -55,6 +70,47 @@ const createEmployeeValidation = [
     .optional()
     .isISO8601()
     .withMessage('Invalid date format')
+];
+
+// Validation for bulk upload from Excel
+const bulkUploadEmployeeValidation = [
+  body('employees')
+    .isArray({ min: 1 })
+    .withMessage('Employees array is required and must not be empty'),
+  
+  body('employees.*.worksNumber')
+    .trim()
+    .notEmpty()
+    .withMessage('Works number is required for each employee'),
+  
+  body('employees.*.firstName')
+    .trim()
+    .notEmpty()
+    .withMessage('First name is required for each employee'),
+  
+  body('employees.*.lastName')
+    .trim()
+    .notEmpty()
+    .withMessage('Last name is required for each employee'),
+  
+  body('employees.*.sectionId')
+    .optional()
+    .isUUID()
+    .withMessage('Invalid section ID format'),
+  
+  body('employees.*.gender')
+    .optional()
+    .trim()
+    .isIn(['MALE', 'FEMALE', 'OTHER', 'male', 'female', 'other'])
+    .withMessage('Gender must be MALE, FEMALE, or OTHER'),
+  
+  body('employees.*.contractType')
+    .optional()
+    .trim(),
+  
+  body('employees.*.jobType')
+    .optional()
+    .trim()
 ];
 
 const updateEmployeeValidation = [
@@ -96,12 +152,27 @@ const updateEmployeeValidation = [
     .isUUID()
     .withMessage('Invalid section ID'),
   
+  body('costCenterId')
+    .optional()
+    .isUUID()
+    .withMessage('Invalid cost center ID'),
+  
   body('email')
     .optional()
     .trim()
     .isEmail()
     .withMessage('Invalid email address')
     .normalizeEmail(),
+  
+  body('gender')
+    .optional()
+    .trim()
+    .isIn(['MALE', 'FEMALE', 'OTHER', 'male', 'female', 'other'])
+    .withMessage('Gender must be MALE, FEMALE, or OTHER'),
+  
+  body('contractType')
+    .optional()
+    .trim(),
   
   body('isActive')
     .optional()
@@ -111,5 +182,6 @@ const updateEmployeeValidation = [
 
 module.exports = {
   createEmployeeValidation,
-  updateEmployeeValidation
+  updateEmployeeValidation,
+  bulkUploadEmployeeValidation
 };

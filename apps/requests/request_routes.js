@@ -7,6 +7,14 @@ const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../database/db');
 
+// Helper function to include User with Employee name data
+const userInclude = (alias) => ({
+  model: User,
+  as: alias,
+  attributes: ['id', 'username'],
+  include: [{ model: Employee, as: 'employee', attributes: ['firstName', 'lastName'] }]
+});
+
 /**
  * PPE REQUEST WORKFLOW:
  * 1. Section Rep creates request (status: 'pending')
@@ -59,12 +67,42 @@ router.get('/', authenticate, async (req, res) => {
           include: [{ model: Department, as: 'department' }]
         }]
       },
-      { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
-      { model: User, as: 'sectionRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-      { model: User, as: 'deptRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-      { model: User, as: 'hodApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-      { model: User, as: 'storesApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-      { model: User, as: 'fulfilledBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
+      { 
+        model: User, 
+        as: 'createdBy', 
+        attributes: ['id', 'username'],
+        include: [{ model: Employee, as: 'employee', attributes: ['firstName', 'lastName'] }]
+      },
+      { 
+        model: User, 
+        as: 'sectionRepApprover', 
+        attributes: ['id', 'username'],
+        include: [{ model: Employee, as: 'employee', attributes: ['firstName', 'lastName'] }]
+      },
+      { 
+        model: User, 
+        as: 'deptRepApprover', 
+        attributes: ['id', 'username'],
+        include: [{ model: Employee, as: 'employee', attributes: ['firstName', 'lastName'] }]
+      },
+      { 
+        model: User, 
+        as: 'hodApprover', 
+        attributes: ['id', 'username'],
+        include: [{ model: Employee, as: 'employee', attributes: ['firstName', 'lastName'] }]
+      },
+      { 
+        model: User, 
+        as: 'storesApprover', 
+        attributes: ['id', 'username'],
+        include: [{ model: Employee, as: 'employee', attributes: ['firstName', 'lastName'] }]
+      },
+      { 
+        model: User, 
+        as: 'fulfilledBy', 
+        attributes: ['id', 'username'],
+        include: [{ model: Employee, as: 'employee', attributes: ['firstName', 'lastName'] }]
+      },
       {
         model: RequestItem,
         as: 'items',
@@ -145,12 +183,12 @@ router.get('/:id', authenticate, async (req, res) => {
             include: [{ model: Department, as: 'department' }]
           }]
         },
-        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'sectionRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'deptRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'hodApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'storesApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'fulfilledBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        userInclude('createdBy'),
+        userInclude('sectionRepApprover'),
+        userInclude('deptRepApprover'),
+        userInclude('hodApprover'),
+        userInclude('storesApprover'),
+        userInclude('fulfilledBy'),
         {
           model: RequestItem,
           as: 'items',
@@ -347,7 +385,7 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
             include: [{ model: Department, as: 'department' }]
           }]
         },
-        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        userInclude('createdBy'),
         {
           model: RequestItem,
           as: 'items',
@@ -447,8 +485,8 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
     const updatedRequest = await Request.findByPk(request.id, {
       include: [
         { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }] },
-        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'sectionRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        userInclude('createdBy'),
+        userInclude('sectionRepApprover'),
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ]
     });
@@ -505,9 +543,9 @@ router.put('/:id/dept-rep-approve', authenticate, authorize(['department-rep', '
     const updatedRequest = await Request.findByPk(request.id, {
       include: [
         { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }] },
-        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'sectionRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'deptRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        userInclude('createdBy'),
+        userInclude('sectionRepApprover'),
+        userInclude('deptRepApprover'),
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ]
     });
@@ -562,10 +600,10 @@ router.put('/:id/hod-approve', authenticate, authorize(['hod-hos', 'admin']), au
     const updatedRequest = await Request.findByPk(request.id, {
       include: [
         { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }] },
-        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'sectionRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'deptRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'hodApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        userInclude('createdBy'),
+        userInclude('sectionRepApprover'),
+        userInclude('deptRepApprover'),
+        userInclude('hodApprover'),
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ]
     });
@@ -621,9 +659,9 @@ router.put('/:id/sheq-approve', authenticate, authorize(['sheq', 'admin']), audi
     const updatedRequest = await Request.findByPk(request.id, {
       include: [
         { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }] },
-        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'sectionRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'sheqApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        userInclude('createdBy'),
+        userInclude('sectionRepApprover'),
+        userInclude('sheqApprover'),
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ]
     });
@@ -678,11 +716,11 @@ router.put('/:id/stores-approve', authenticate, authorize(['stores', 'admin']), 
     const updatedRequest = await Request.findByPk(request.id, {
       include: [
         { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }] },
-        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'sectionRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'deptRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'hodApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'storesApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        userInclude('createdBy'),
+        userInclude('sectionRepApprover'),
+        userInclude('deptRepApprover'),
+        userInclude('hodApprover'),
+        userInclude('storesApprover'),
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ]
     });
@@ -744,8 +782,8 @@ router.put('/:id/reject', authenticate, auditLog('UPDATE', 'Request'), async (re
     const updatedRequest = await Request.findByPk(request.id, {
       include: [
         { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }] },
-        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'rejectedBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        userInclude('createdBy'),
+        userInclude('rejectedBy'),
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ]
     });
@@ -860,12 +898,12 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
     const updatedRequest = await Request.findByPk(request.id, {
       include: [
         { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }] },
-        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'sectionRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'deptRepApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'hodApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'storesApprover', attributes: ['id', 'username', 'firstName', 'lastName'] },
-        { model: User, as: 'fulfilledBy', attributes: ['id', 'username', 'firstName', 'lastName'] },
+        userInclude('createdBy'),
+        userInclude('sectionRepApprover'),
+        userInclude('deptRepApprover'),
+        userInclude('hodApprover'),
+        userInclude('storesApprover'),
+        userInclude('fulfilledBy'),
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ]
     });
@@ -928,7 +966,7 @@ router.put('/:id/cancel', authenticate, authorize(['section-rep', 'admin']), aud
     const updatedRequest = await Request.findByPk(request.id, {
       include: [
         { model: Employee, as: 'targetEmployee' },
-        { model: User, as: 'createdBy', attributes: ['id', 'username', 'firstName', 'lastName'] }
+        userInclude('createdBy')
       ]
     });
 

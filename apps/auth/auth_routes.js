@@ -1,94 +1,29 @@
 const express = require('express');
 const router = express.Router();
-const { User, Role, Department, Section } = require('../../models');
+const { User, Role, Employee, Section, Department, JobTitle, CostCenter } = require('../../models');
 const { generateAccessToken, generateRefreshToken, verifyToken } = require('../../helpers/jwt_helpers');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { validate } = require('../../middlewares/validation_middleware');
 const { createAuditLog } = require('../../middlewares/audit_middleware');
 const {
-  registerValidation,
   loginValidation,
-  updateProfileValidation,
   changePasswordValidation
 } = require('../../validations/auth_validation');
 
-/**
- * @route   POST /api/v1/auth/register
- * @desc    Register new user
- * @access  Public (but typically admin-only in production)
- */
-router.post('/register', registerValidation, validate, async (req, res, next) => {
-  try {
-    const { username, email, password, firstName, lastName, roleId, departmentId } = req.body;
-
-    // Check if username exists
-    const existingUsername = await User.findOne({ where: { username } });
-    if (existingUsername) {
-      return res.status(409).json({
-        success: false,
-        message: 'Username already exists'
-      });
-    }
-
-    // Check if email exists
-    const existingEmail = await User.findOne({ where: { email } });
-    if (existingEmail) {
-      return res.status(409).json({
-        success: false,
-        message: 'Email already exists'
-      });
-    }
-
-    // Verify role exists
-    const role = await Role.findByPk(roleId);
-    if (!role) {
-      return res.status(404).json({
-        success: false,
-        message: 'Role not found'
-      });
-    }
-
-    // Create user
-    const user = await User.create({
-      username,
-      email,
-      passwordHash: password, // Will be hashed by model hook
-      firstName,
-      lastName,
-      roleId,
-      departmentId
-    });
-
-    // Get user with role
-    const createdUser = await User.findByPk(user.id, {
-      include: [
-        { model: Role, as: 'role' },
-        { model: Department, as: 'department', required: false },
-        { model: Section, as: 'section', required: false }
-      ],
-      attributes: { exclude: ['passwordHash'] }
-    });
-
-    // Create audit log
-    await createAuditLog(
-      user.id,
-      'CREATE',
-      'User',
-      user.id,
-      { username, email, roleId },
-      { action: 'user_registration' },
-      req
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'User registered successfully',
-      data: createdUser
-    });
-  } catch (error) {
-    next(error);
-  }
-});
+// Helper to include employee with full details
+const employeeInclude = {
+  model: Employee,
+  as: 'employee',
+  include: [
+    {
+      model: Section,
+      as: 'section',
+      include: [{ model: Department, as: 'department' }]
+    },
+    { model: JobTitle, as: 'jobTitleRef', required: false },
+    { model: CostCenter, as: 'costCenter', required: false }
+  ]
+};
 
 /**
  * @route   POST /api/v1/auth/login
@@ -99,13 +34,12 @@ router.post('/login', loginValidation, validate, async (req, res, next) => {
   try {
     const { username, password } = req.body;
 
-    // Find user
+    // Find user with employee data
     const user = await User.findOne({
       where: { username },
       include: [
         { model: Role, as: 'role' },
-        { model: Department, as: 'department', required: false },
-        { model: Section, as: 'section', required: false }
+        employeeInclude
       ]
     });
 
@@ -133,12 +67,15 @@ router.post('/login', loginValidation, validate, async (req, res, next) => {
       });
     }
 
-    // Generate tokens
+    // Build payload with employee data for convenience
     const payload = {
       userId: user.id,
       username: user.username,
       roleId: user.roleId,
-      roleName: user.role.name
+      roleName: user.role.name,
+      employeeId: user.employeeId,
+      sectionId: user.employee?.sectionId,
+      departmentId: user.employee?.section?.departmentId
     };
 
     const accessToken = generateAccessToken(payload);
@@ -201,9 +138,12 @@ router.post('/refresh', async (req, res, next) => {
       });
     }
 
-    // Get user
+    // Get user with employee data
     const user = await User.findByPk(decoded.userId, {
-      include: [{ model: Role, as: 'role' }]
+      include: [
+        { model: Role, as: 'role' },
+        employeeInclude
+      ]
     });
 
     if (!user || !user.isActive) {
@@ -213,12 +153,15 @@ router.post('/refresh', async (req, res, next) => {
       });
     }
 
-    // Generate new access token
+    // Generate new access token with employee data
     const payload = {
       userId: user.id,
       username: user.username,
       roleId: user.roleId,
-      roleName: user.role.name
+      roleName: user.role.name,
+      employeeId: user.employeeId,
+      sectionId: user.employee?.sectionId,
+      departmentId: user.employee?.section?.departmentId
     };
 
     const accessToken = generateAccessToken(payload);
@@ -235,7 +178,7 @@ router.post('/refresh', async (req, res, next) => {
 
 /**
  * @route   GET /api/v1/auth/profile
- * @desc    Get current user profile
+ * @desc    Get current user profile with linked employee data
  * @access  Private
  */
 router.get('/profile', authenticate, async (req, res, next) => {
@@ -243,8 +186,7 @@ router.get('/profile', authenticate, async (req, res, next) => {
     const user = await User.findByPk(req.user.id, {
       include: [
         { model: Role, as: 'role' },
-        { model: Department, as: 'department', required: false },
-        { model: Section, as: 'section', required: false }
+        employeeInclude
       ],
       attributes: { exclude: ['passwordHash'] }
     });
@@ -252,69 +194,6 @@ router.get('/profile', authenticate, async (req, res, next) => {
     res.json({
       success: true,
       data: user
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-/**
- * @route   PUT /api/v1/auth/profile
- * @desc    Update current user profile
- * @access  Private
- */
-router.put('/profile', authenticate, updateProfileValidation, validate, async (req, res, next) => {
-  try {
-    const { firstName, lastName, email, phoneNumber } = req.body;
-
-    // Check if email is taken by another user
-    if (email && email !== req.user.email) {
-      const existingEmail = await User.findOne({
-        where: { email },
-        attributes: ['id']
-      });
-
-      if (existingEmail && existingEmail.id !== req.user.id) {
-        return res.status(409).json({
-          success: false,
-          message: 'Email already in use'
-        });
-      }
-    }
-
-    // Update user
-    await req.user.update({
-      firstName: firstName || req.user.firstName,
-      lastName: lastName || req.user.lastName,
-      email: email || req.user.email,
-      phoneNumber: phoneNumber !== undefined ? phoneNumber : req.user.phoneNumber
-    });
-
-    // Get updated user
-    const updatedUser = await User.findByPk(req.user.id, {
-      include: [
-        { model: Role, as: 'role' },
-        { model: Department, as: 'department', required: false },
-        { model: Section, as: 'section', required: false }
-      ],
-      attributes: { exclude: ['passwordHash'] }
-    });
-
-    // Create audit log
-    await createAuditLog(
-      req.user.id,
-      'UPDATE',
-      'User',
-      req.user.id,
-      { firstName, lastName, email, phoneNumber },
-      { action: 'profile_update' },
-      req
-    );
-
-    res.json({
-      success: true,
-      message: 'Profile updated successfully',
-      data: updatedUser
     });
   } catch (error) {
     next(error);

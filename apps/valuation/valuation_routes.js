@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Stock, PPEItem, Allocation, Employee, Section, Department, Budget, JobTitlePPEMatrix } = require('../../models');
+const { Stock, PPEItem, Allocation, Employee, Section, Department, Budget, JobTitlePPEMatrix, CompanyBudget } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { authorize } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
@@ -266,6 +266,248 @@ router.get('/cost-analysis', authenticate, authorize(['admin', 'hod-hos', 'store
     res.status(500).json({
       success: false,
       message: 'Failed to calculate cost analysis',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   GET /api/v1/valuation/actual-spending
+ * @desc    Actual PPE spending from fulfilled allocations (not matrix projections)
+ * @access  Private (Admin, HOD, Stores)
+ */
+router.get('/actual-spending', authenticate, authorize(['admin', 'hod-hos', 'stores']), async (req, res) => {
+  try {
+    const { departmentId, sectionId, employeeId, groupBy = 'employee', fromDate, toDate } = req.query;
+
+    // Build allocation filter
+    const allocationWhere = {};
+    if (fromDate) allocationWhere.issueDate = { [Sequelize.Op.gte]: new Date(fromDate) };
+    if (toDate) {
+      allocationWhere.issueDate = { 
+        ...allocationWhere.issueDate, 
+        [Sequelize.Op.lte]: new Date(toDate) 
+      };
+    }
+
+    // Build employee filter
+    const employeeWhere = {};
+    if (employeeId) employeeWhere.id = employeeId;
+    if (sectionId) employeeWhere.sectionId = sectionId;
+
+    const sectionWhere = {};
+    if (departmentId) sectionWhere.departmentId = departmentId;
+
+    // Get all allocations with related data
+    const allocations = await Allocation.findAll({
+      where: allocationWhere,
+      include: [
+        {
+          model: Employee,
+          as: 'employee',
+          where: Object.keys(employeeWhere).length > 0 ? employeeWhere : undefined,
+          include: [
+            {
+              model: Section,
+              as: 'section',
+              where: Object.keys(sectionWhere).length > 0 ? sectionWhere : undefined,
+              include: [{ model: Department, as: 'department' }]
+            },
+            {
+              model: require('../../models/jobTitle'),
+              as: 'jobTitleRef'
+            }
+          ]
+        },
+        {
+          model: PPEItem,
+          as: 'ppeItem'
+        }
+      ],
+      order: [['issueDate', 'DESC']]
+    });
+
+    const spendingDetails = [];
+
+    for (const alloc of allocations) {
+      if (!alloc.employee) continue;
+      
+      spendingDetails.push({
+        allocationId: alloc.id,
+        issueDate: alloc.issueDate,
+        employeeId: alloc.employee.id,
+        employeeName: `${alloc.employee.firstName} ${alloc.employee.lastName}`,
+        worksNumber: alloc.employee.worksNumber,
+        jobTitle: alloc.employee.jobTitleRef ? alloc.employee.jobTitleRef.name : (alloc.employee.jobTitle || 'N/A'),
+        sectionId: alloc.employee.section ? alloc.employee.section.id : null,
+        sectionName: alloc.employee.section ? alloc.employee.section.name : null,
+        departmentId: alloc.employee.section && alloc.employee.section.department ? alloc.employee.section.department.id : null,
+        departmentName: alloc.employee.section && alloc.employee.section.department ? alloc.employee.section.department.name : null,
+        ppeItemId: alloc.ppeItem ? alloc.ppeItem.id : null,
+        ppeItemName: alloc.ppeItem ? alloc.ppeItem.name : 'N/A',
+        ppeItemCode: alloc.ppeItem ? alloc.ppeItem.itemCode : null,
+        category: alloc.ppeItem ? alloc.ppeItem.category : null,
+        quantity: alloc.quantity,
+        unitCost: parseFloat(alloc.unitCost || 0),
+        totalCost: parseFloat(alloc.totalCost || 0),
+        size: alloc.size,
+        status: alloc.status
+      });
+    }
+
+    // Group results based on groupBy parameter
+    let groupedData = [];
+
+    if (groupBy === 'employee') {
+      const byEmployee = {};
+      for (const row of spendingDetails) {
+        const key = row.employeeId;
+        if (!byEmployee[key]) {
+          byEmployee[key] = {
+            employeeId: row.employeeId,
+            employeeName: row.employeeName,
+            worksNumber: row.worksNumber,
+            jobTitle: row.jobTitle,
+            sectionName: row.sectionName,
+            departmentName: row.departmentName,
+            items: [],
+            totalSpent: 0,
+            allocationCount: 0
+          };
+        }
+        byEmployee[key].items.push({
+          ppeItemName: row.ppeItemName,
+          ppeItemCode: row.ppeItemCode,
+          category: row.category,
+          quantity: row.quantity,
+          unitCost: row.unitCost,
+          totalCost: row.totalCost,
+          issueDate: row.issueDate
+        });
+        byEmployee[key].totalSpent += row.totalCost;
+        byEmployee[key].allocationCount += 1;
+      }
+      groupedData = Object.values(byEmployee).map(e => ({
+        ...e,
+        totalSpent: parseFloat(e.totalSpent.toFixed(2))
+      }));
+    } else if (groupBy === 'section') {
+      const bySection = {};
+      for (const row of spendingDetails) {
+        const key = row.sectionId || 'NO_SECTION';
+        if (!bySection[key]) {
+          bySection[key] = {
+            sectionId: row.sectionId,
+            sectionName: row.sectionName || 'No Section',
+            departmentName: row.departmentName,
+            employeeCount: new Set(),
+            totalSpent: 0,
+            allocationCount: 0
+          };
+        }
+        bySection[key].employeeCount.add(row.employeeId);
+        bySection[key].totalSpent += row.totalCost;
+        bySection[key].allocationCount += 1;
+      }
+      groupedData = Object.values(bySection).map(s => ({
+        ...s,
+        employeeCount: s.employeeCount.size,
+        totalSpent: parseFloat(s.totalSpent.toFixed(2))
+      }));
+    } else if (groupBy === 'department') {
+      const byDept = {};
+      for (const row of spendingDetails) {
+        const key = row.departmentId || 'NO_DEPT';
+        if (!byDept[key]) {
+          byDept[key] = {
+            departmentId: row.departmentId,
+            departmentName: row.departmentName || 'No Department',
+            employeeCount: new Set(),
+            totalSpent: 0,
+            allocationCount: 0
+          };
+        }
+        byDept[key].employeeCount.add(row.employeeId);
+        byDept[key].totalSpent += row.totalCost;
+        byDept[key].allocationCount += 1;
+      }
+      groupedData = Object.values(byDept).map(d => ({
+        ...d,
+        employeeCount: d.employeeCount.size,
+        totalSpent: parseFloat(d.totalSpent.toFixed(2))
+      }));
+    } else if (groupBy === 'item') {
+      const byItem = {};
+      for (const row of spendingDetails) {
+        const key = row.ppeItemId || 'UNKNOWN';
+        if (!byItem[key]) {
+          byItem[key] = {
+            ppeItemId: row.ppeItemId,
+            ppeItemName: row.ppeItemName,
+            ppeItemCode: row.ppeItemCode,
+            category: row.category,
+            totalQuantity: 0,
+            totalSpent: 0,
+            allocationCount: 0
+          };
+        }
+        byItem[key].totalQuantity += row.quantity;
+        byItem[key].totalSpent += row.totalCost;
+        byItem[key].allocationCount += 1;
+      }
+      groupedData = Object.values(byItem).map(i => ({
+        ...i,
+        totalSpent: parseFloat(i.totalSpent.toFixed(2))
+      }));
+    } else if (groupBy === 'month') {
+      const byMonth = {};
+      for (const row of spendingDetails) {
+        const dt = new Date(row.issueDate);
+        const key = `${dt.getFullYear()}-${(dt.getMonth()+1).toString().padStart(2,'0')}`;
+        if (!byMonth[key]) {
+          byMonth[key] = {
+            period: key,
+            totalSpent: 0,
+            allocationCount: 0,
+            employeeCount: new Set()
+          };
+        }
+        byMonth[key].totalSpent += row.totalCost;
+        byMonth[key].allocationCount += 1;
+        byMonth[key].employeeCount.add(row.employeeId);
+      }
+      groupedData = Object.values(byMonth).map(m => ({
+        period: m.period,
+        totalSpent: parseFloat(m.totalSpent.toFixed(2)),
+        allocationCount: m.allocationCount,
+        employeeCount: m.employeeCount.size
+      })).sort((a, b) => a.period.localeCompare(b.period));
+    }
+
+    const grandTotal = spendingDetails.reduce((sum, row) => sum + row.totalCost, 0);
+    const totalAllocations = spendingDetails.length;
+    const uniqueEmployees = new Set(spendingDetails.map(d => d.employeeId)).size;
+
+    res.json({
+      success: true,
+      data: {
+        groupBy,
+        groupedData,
+        summary: {
+          grandTotal: parseFloat(grandTotal.toFixed(2)),
+          totalAllocations,
+          uniqueEmployees,
+          avgPerEmployee: uniqueEmployees > 0 ? parseFloat((grandTotal / uniqueEmployees).toFixed(2)) : 0,
+          avgPerAllocation: totalAllocations > 0 ? parseFloat((grandTotal / totalAllocations).toFixed(2)) : 0
+        },
+        rawData: spendingDetails
+      }
+    });
+  } catch (error) {
+    console.error('Error calculating actual spending:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to calculate actual spending',
       error: error.message
     });
   }
@@ -781,7 +1023,7 @@ router.get('/stock-vs-forecast', authenticate, authorize(['stores', 'admin']), a
 
 /**
  * @route   GET /api/v1/valuation/issued-value
- * @desc    Total PPE issued value over a period with budget tracking
+ * @desc    Total PPE issued value over a period with budget tracking using real budget data
  * @access  Private (Stores, HOD, Admin)
  */
 router.get('/issued-value', authenticate, authorize(['stores', 'hod-hos', 'admin']), async (req, res) => {
@@ -828,10 +1070,47 @@ router.get('/issued-value', authenticate, authorize(['stores', 'hod-hos', 'admin
       avgValue: parseFloat((b.totalValue / b.count).toFixed(2))
     }));
 
-    // Get allocated budget (default to $100,000 if not found)
-    const allocatedBudget = 100000;
-    const remainingBudget = allocatedBudget - totalIssued;
-    const utilizationPercent = (totalIssued / allocatedBudget) * 100;
+    // Get the real company budget for the current fiscal year
+    const currentYear = new Date().getFullYear();
+    let companyBudget = await CompanyBudget.findOne({ 
+      where: { 
+        fiscalYear: currentYear,
+        status: 'active'
+      } 
+    });
+
+    // If no active budget for current year, try to find any active budget
+    if (!companyBudget) {
+      companyBudget = await CompanyBudget.findOne({ 
+        where: { status: 'active' },
+        order: [['fiscalYear', 'DESC']]
+      });
+    }
+
+    // Get department-level budget if departmentId is specified
+    let allocatedBudget = 0;
+    let budgetSource = 'none';
+
+    if (departmentId) {
+      // Get department-specific budget
+      const deptBudget = await Budget.findOne({ 
+        where: { 
+          departmentId,
+          companyBudgetId: companyBudget ? companyBudget.id : null
+        }
+      });
+      if (deptBudget) {
+        allocatedBudget = parseFloat(deptBudget.allocatedAmount || deptBudget.totalBudget || 0);
+        budgetSource = 'department';
+      }
+    } else if (companyBudget) {
+      // Use company-wide budget
+      allocatedBudget = parseFloat(companyBudget.totalBudget || 0);
+      budgetSource = 'company';
+    }
+
+    const remainingBudget = allocatedBudget > 0 ? allocatedBudget - totalIssued : 0;
+    const utilizationPercent = allocatedBudget > 0 ? (totalIssued / allocatedBudget) * 100 : 0;
     const avgPerPeriod = breakdown.length > 0 ? totalIssued / breakdown.length : 0;
 
     const alerts = [];
@@ -842,6 +1121,11 @@ router.get('/issued-value', authenticate, authorize(['stores', 'hod-hos', 'admin
       }
     }
 
+    // Alert if utilization is high
+    if (utilizationPercent >= 90) {
+      alerts.push({ type: 'budget_warning', message: `Budget utilization is at ${utilizationPercent.toFixed(1)}%` });
+    }
+
     res.json({ 
       success: true, 
       data: { 
@@ -850,6 +1134,9 @@ router.get('/issued-value', authenticate, authorize(['stores', 'hod-hos', 'admin
         remainingBudget: parseFloat(remainingBudget.toFixed(2)),
         utilizationPercent: parseFloat(utilizationPercent.toFixed(2)),
         avgPerPeriod: parseFloat(avgPerPeriod.toFixed(2)),
+        budgetSource,
+        fiscalYear: companyBudget ? companyBudget.fiscalYear : null,
+        hasBudget: allocatedBudget > 0,
         breakdown
       }, 
       alerts 

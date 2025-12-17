@@ -265,4 +265,124 @@ router.delete(
   }
 );
 
+/**
+ * @route   POST /api/v1/ppe/bulk-upload
+ * @desc    Bulk upload PPE items from Excel data
+ * @access  Private (Admin, Stores)
+ */
+router.post(
+  '/bulk-upload',
+  authenticate,
+  requireRole('admin', 'stores'),
+  [
+    body('items').isArray({ min: 1 }).withMessage('Items array is required'),
+    body('items.*.name').trim().notEmpty().withMessage('PPE name is required'),
+    body('items.*.itemCode').trim().notEmpty().withMessage('Item code is required'),
+    body('items.*.category').trim().notEmpty().withMessage('Category is required'),
+  ],
+  validate,
+  auditLog('BULK_CREATE', 'PPEItem'),
+  async (req, res, next) => {
+    try {
+      const { items, updateExisting = false } = req.body;
+
+      const results = {
+        created: [],
+        updated: [],
+        skipped: [],
+        errors: []
+      };
+
+      for (const item of items) {
+        try {
+          // Check if item code already exists
+          const existing = await PPEItem.findOne({ where: { itemCode: item.itemCode } });
+
+          if (existing) {
+            if (updateExisting) {
+              // Update existing item
+              await existing.update({
+                name: item.name || existing.name,
+                category: item.category || existing.category,
+                replacementFrequency: item.replacementFrequency || existing.replacementFrequency,
+                heavyUseFrequency: item.heavyUseFrequency || existing.heavyUseFrequency,
+                isMandatory: item.isMandatory !== undefined ? item.isMandatory : existing.isMandatory,
+                description: item.description || existing.description,
+                hasSizeVariants: item.hasSizeVariants !== undefined ? item.hasSizeVariants : existing.hasSizeVariants,
+                hasColorVariants: item.hasColorVariants !== undefined ? item.hasColorVariants : existing.hasColorVariants,
+                sizeScale: item.sizeScale || existing.sizeScale,
+                availableSizes: item.availableSizes || existing.availableSizes,
+                unit: item.unit || existing.unit
+              });
+              results.updated.push({ itemCode: item.itemCode, name: item.name });
+            } else {
+              results.skipped.push({ itemCode: item.itemCode, name: item.name, reason: 'Item code already exists' });
+            }
+          } else {
+            // Create new item
+            const newItem = await PPEItem.create({
+              name: item.name,
+              itemCode: item.itemCode,
+              category: item.category,
+              replacementFrequency: item.replacementFrequency || 12, // Default 12 months
+              heavyUseFrequency: item.heavyUseFrequency || null,
+              isMandatory: item.isMandatory !== undefined ? item.isMandatory : true,
+              description: item.description || null,
+              hasSizeVariants: item.hasSizeVariants || false,
+              hasColorVariants: item.hasColorVariants || false,
+              sizeScale: item.sizeScale || null,
+              availableSizes: item.availableSizes || null,
+              unit: item.unit || 'EA',
+              isActive: true
+            });
+            results.created.push({ id: newItem.id, itemCode: newItem.itemCode, name: newItem.name });
+          }
+        } catch (err) {
+          results.errors.push({ 
+            itemCode: item.itemCode, 
+            name: item.name, 
+            error: err.message 
+          });
+        }
+      }
+
+      res.status(201).json({
+        success: true,
+        message: `Bulk upload completed: ${results.created.length} created, ${results.updated.length} updated, ${results.skipped.length} skipped, ${results.errors.length} errors`,
+        data: results
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   GET /api/v1/ppe/categories/list
+ * @desc    Get all PPE categories with item counts
+ * @access  Private
+ */
+router.get('/categories/list', authenticate, async (req, res, next) => {
+  try {
+    const categories = await PPEItem.findAll({
+      attributes: [
+        'category',
+        [require('sequelize').fn('COUNT', require('sequelize').col('id')), 'count']
+      ],
+      group: ['category'],
+      order: [['category', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: categories.map(c => ({
+        name: c.category,
+        count: parseInt(c.get('count'))
+      }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;

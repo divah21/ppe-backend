@@ -313,11 +313,11 @@ router.delete('/:id', authenticate, adminOrStoresMiddleware, async (req, res, ne
 });
 
 // @route   POST /api/v1/job-titles/bulk
-// @desc    Bulk create job titles
+// @desc    Bulk create job titles from Excel upload
 // @access  Private (Admin only)
 router.post('/bulk', authenticate, adminOrStoresMiddleware, async (req, res, next) => {
   try {
-    const { jobTitles } = req.body;
+    const { jobTitles, skipDuplicates = true } = req.body;
 
     if (!Array.isArray(jobTitles) || jobTitles.length === 0) {
       return res.status(400).json({
@@ -326,15 +326,119 @@ router.post('/bulk', authenticate, adminOrStoresMiddleware, async (req, res, nex
       });
     }
 
-    const created = await JobTitle.bulkCreate(jobTitles, {
-      validate: true,
-      ignoreDuplicates: true
+    // Get all sections for name matching
+    const allSections = await Section.findAll({
+      include: [{ model: Department, as: 'department' }]
     });
+
+    const results = {
+      created: [],
+      skipped: [],
+      errors: []
+    };
+
+    for (const item of jobTitles) {
+      try {
+        const name = (item.name || item.Name || item['Job Title'] || '').toString().trim();
+        const code = (item.code || item.Code || '').toString().trim();
+        const description = (item.description || item.Description || '').toString().trim();
+        const sectionName = (item.section || item.Section || item.SECTION || '').toString().trim();
+        const departmentName = (item.department || item.Department || item['Cost centre'] || '').toString().trim();
+
+        if (!name) {
+          results.errors.push({
+            data: item,
+            error: 'Job title name is required'
+          });
+          continue;
+        }
+
+        if (!sectionName) {
+          results.errors.push({
+            data: item,
+            error: 'Section name is required'
+          });
+          continue;
+        }
+
+        // Find section by name (and optionally by department)
+        let section = null;
+        if (departmentName) {
+          // Try to match by both section name and department name
+          section = allSections.find(s => 
+            s.name.toLowerCase() === sectionName.toLowerCase() &&
+            s.department?.name.toLowerCase() === departmentName.toLowerCase()
+          );
+        }
+        
+        // If not found with department, try just section name
+        if (!section) {
+          section = allSections.find(s => 
+            s.name.toLowerCase() === sectionName.toLowerCase()
+          );
+        }
+
+        if (!section) {
+          results.errors.push({
+            data: item,
+            error: `Section "${sectionName}" not found${departmentName ? ` in department "${departmentName}"` : ''}`
+          });
+          continue;
+        }
+
+        // Check for existing job title with same name in same section
+        const existing = await JobTitle.findOne({
+          where: {
+            name: { [Op.iLike]: name },
+            sectionId: section.id
+          }
+        });
+
+        if (existing) {
+          if (skipDuplicates) {
+            results.skipped.push({
+              data: item,
+              reason: `Job title "${name}" already exists in section "${section.name}"`
+            });
+            continue;
+          } else {
+            results.errors.push({
+              data: item,
+              error: `Job title "${name}" already exists in section "${section.name}"`
+            });
+            continue;
+          }
+        }
+
+        // Create the job title
+        const jobTitle = await JobTitle.create({
+          name,
+          code: code || null,
+          description: description || null,
+          sectionId: section.id,
+          isActive: true
+        });
+
+        results.created.push({
+          id: jobTitle.id,
+          name: jobTitle.name,
+          code: jobTitle.code,
+          section: section.name,
+          department: section.department?.name
+        });
+
+      } catch (itemError) {
+        results.errors.push({
+          data: item,
+          error: itemError.message
+        });
+      }
+    }
 
     res.status(201).json({
       success: true,
-      message: `${created.length} job titles created successfully`,
-      data: created
+      message: `Bulk upload completed: ${results.created.length} created, ${results.skipped.length} skipped, ${results.errors.length} errors`,
+      data: results
     });
   } catch (error) {
     next(error);

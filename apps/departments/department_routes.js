@@ -7,6 +7,7 @@ const { auditLog } = require('../../middlewares/audit_middleware');
 const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
+const { sequelize } = require('../../database/db');
 
 /**
  * @route   GET /api/v1/departments
@@ -222,6 +223,133 @@ router.delete(
         message: 'Department deleted successfully'
       });
     } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   POST /api/v1/departments/bulk-upload
+ * @desc    Bulk upload departments from Excel data
+ * @access  Private (Admin only)
+ * 
+ * Expected Excel columns:
+ * - name or Department Name -> name
+ * - code or Department Code -> code
+ * - description or Description -> description (optional)
+ */
+router.post(
+  '/bulk-upload',
+  authenticate,
+  requireRole('admin'),
+  auditLog('BULK_CREATE', 'Department'),
+  async (req, res, next) => {
+    const transaction = await sequelize.transaction();
+    
+    try {
+      const { departments, skipDuplicates = true } = req.body;
+
+      if (!Array.isArray(departments) || departments.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Departments array is required and must not be empty'
+        });
+      }
+
+      const results = {
+        created: [],
+        skipped: [],
+        errors: []
+      };
+
+      for (let i = 0; i < departments.length; i++) {
+        const row = departments[i];
+        const rowNum = i + 2; // Excel row (1-indexed + header)
+
+        try {
+          // Map Excel columns to model fields
+          const name = row.name || row['Department Name'] || row['Department'] || row['NAME'];
+          const code = row.code || row['Department Code'] || row['Code'] || row['CODE'];
+          const description = row.description || row['Description'] || row['DESCRIPTION'];
+
+          // Validate required fields
+          if (!name) {
+            results.errors.push({ row: rowNum, error: 'Department name is required' });
+            continue;
+          }
+          if (!code) {
+            results.errors.push({ row: rowNum, name, error: 'Department code is required' });
+            continue;
+          }
+
+          // Check for duplicate code
+          const existingByCode = await Department.findOne({ 
+            where: { code: code.toUpperCase() },
+            transaction 
+          });
+          
+          if (existingByCode) {
+            if (skipDuplicates) {
+              results.skipped.push({ row: rowNum, code, name, reason: 'Code already exists' });
+              continue;
+            } else {
+              results.errors.push({ row: rowNum, code, error: 'Department code already exists' });
+              continue;
+            }
+          }
+
+          // Check for duplicate name
+          const existingByName = await Department.findOne({ 
+            where: { name: { [Op.iLike]: name } },
+            transaction 
+          });
+          
+          if (existingByName) {
+            if (skipDuplicates) {
+              results.skipped.push({ row: rowNum, code, name, reason: 'Name already exists' });
+              continue;
+            } else {
+              results.errors.push({ row: rowNum, name, error: 'Department name already exists' });
+              continue;
+            }
+          }
+
+          // Create department
+          const department = await Department.create({
+            name: name.trim(),
+            code: code.toUpperCase().trim(),
+            description: description ? description.trim() : null
+          }, { transaction });
+
+          results.created.push({
+            row: rowNum,
+            id: department.id,
+            name: department.name,
+            code: department.code
+          });
+
+        } catch (err) {
+          results.errors.push({ 
+            row: rowNum, 
+            error: err.message || 'Unknown error'
+          });
+        }
+      }
+
+      // Commit transaction if we created any records
+      if (results.created.length > 0) {
+        await transaction.commit();
+      } else {
+        await transaction.rollback();
+      }
+
+      res.status(results.created.length > 0 ? 201 : 400).json({
+        success: results.created.length > 0,
+        message: `Created ${results.created.length} departments, skipped ${results.skipped.length}, ${results.errors.length} errors`,
+        data: results
+      });
+    } catch (error) {
+      await transaction.rollback();
       next(error);
     }
   }

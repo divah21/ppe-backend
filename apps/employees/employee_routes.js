@@ -1,12 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const { Employee, Section, Department, Allocation, PPEItem, Request, JobTitlePPEMatrix, Stock, JobTitle } = require('../../models');
+const { Employee, Section, Department, Allocation, PPEItem, Request, JobTitlePPEMatrix, Stock, JobTitle, CostCenter, User } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { validate } = require('../../middlewares/validation_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
-const { createEmployeeValidation, updateEmployeeValidation } = require('../../validations/employee_validation');
+const { createEmployeeValidation, updateEmployeeValidation, bulkUploadEmployeeValidation } = require('../../validations/employee_validation');
 const { Op } = require('sequelize');
+const { sequelize } = require('../../database/db');
 
 /**
  * @route   GET /api/v1/employees
@@ -549,6 +550,247 @@ router.put(
         success: true,
         message: 'Employee activated successfully',
         data: employee
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   POST /api/v1/employees/bulk-upload
+ * @desc    Bulk upload employees from Excel data
+ * @access  Private (Admin only)
+ * 
+ * Expected Excel columns mapping:
+ * - Code -> worksNumber
+ * - FirstName -> firstName
+ * - Surname -> lastName
+ * - Job Title -> jobTitle (legacy) or matched to jobTitleId
+ * - Nec/Salaried -> jobType
+ * - Cost centre -> costCenterId (matched by name)
+ * - SECTION -> sectionId (matched by name)
+ * - Gender -> gender
+ * - Contract -> contractType
+ */
+router.post(
+  '/bulk-upload',
+  authenticate,
+  requireRole('admin'),
+  auditLog('BULK_CREATE', 'Employee'),
+  async (req, res, next) => {
+    const transaction = await sequelize.transaction();
+    
+    try {
+      const { employees, skipDuplicates = true } = req.body;
+
+      if (!Array.isArray(employees) || employees.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Employees array is required and must not be empty'
+        });
+      }
+
+      // Pre-fetch sections and cost centers for name-to-ID mapping
+      const sections = await Section.findAll({
+        include: [{ model: Department, as: 'department' }]
+      });
+      const costCenters = await CostCenter.findAll();
+      const jobTitles = await JobTitle.findAll();
+
+      // Build lookup maps - trim names to handle whitespace in Excel data
+      const sectionMap = {};
+      sections.forEach(s => {
+        sectionMap[s.name.trim().toUpperCase()] = s.id;
+        // Also map by section code if available
+        if (s.code) sectionMap[s.code.trim().toUpperCase()] = s.id;
+      });
+
+      const costCenterMap = {};
+      costCenters.forEach(cc => {
+        costCenterMap[cc.name.trim().toUpperCase()] = cc.id;
+        if (cc.code) costCenterMap[cc.code.trim().toUpperCase()] = cc.id;
+      });
+
+      const jobTitleMap = {};
+      jobTitles.forEach(jt => {
+        jobTitleMap[jt.name.trim().toUpperCase()] = jt.id;
+      });
+
+      const results = {
+        created: [],
+        skipped: [],
+        errors: []
+      };
+
+      for (let i = 0; i < employees.length; i++) {
+        const row = employees[i];
+        const rowNum = i + 2; // Excel row (1-indexed + header)
+
+        try {
+          // Map Excel columns to model fields
+          const worksNumber = row.Code || row.worksNumber || row.code;
+          const firstName = row.FirstName || row.firstName || row.first_name;
+          const lastName = row.Surname || row.lastName || row.last_name || row.surname;
+          const jobTitleName = row['Job Title'] || row.jobTitle || row.job_title;
+          const jobType = row['Nec/ Salaried'] || row['Nec/Salaried'] || row.jobType || row.job_type;
+          const sectionName = row.SECTION || row.Section || row.section || row.sectionName;
+          const costCenterName = row['Cost centre'] || row['Cost Center'] || row.costCenter || row.cost_center;
+          const gender = row.Gender || row.gender;
+          const contractType = row.Contract || row.contractType || row.contract_type;
+
+          // Validate required fields
+          if (!worksNumber) {
+            results.errors.push({ row: rowNum, error: 'Works number (Code) is required' });
+            continue;
+          }
+          if (!firstName) {
+            results.errors.push({ row: rowNum, worksNumber, error: 'First name is required' });
+            continue;
+          }
+          if (!lastName) {
+            results.errors.push({ row: rowNum, worksNumber, error: 'Last name is required' });
+            continue;
+          }
+
+          // Check for duplicate works number
+          const existing = await Employee.findOne({ 
+            where: { worksNumber },
+            transaction 
+          });
+          
+          if (existing) {
+            if (skipDuplicates) {
+              results.skipped.push({ row: rowNum, worksNumber, reason: 'Already exists' });
+              continue;
+            } else {
+              results.errors.push({ row: rowNum, worksNumber, error: 'Works number already exists' });
+              continue;
+            }
+          }
+
+          // Resolve section ID - trim whitespace for matching
+          let sectionId = row.sectionId;
+          if (!sectionId && sectionName) {
+            const trimmedSectionName = sectionName.toString().trim().toUpperCase();
+            sectionId = sectionMap[trimmedSectionName];
+            if (!sectionId) {
+              results.errors.push({ 
+                row: rowNum, 
+                worksNumber, 
+                error: `Section not found: "${sectionName}"` 
+              });
+              continue;
+            }
+          }
+          if (!sectionId) {
+            results.errors.push({ row: rowNum, worksNumber, error: 'Section is required' });
+            continue;
+          }
+
+          // Resolve cost center ID (optional) - trim whitespace for matching
+          let costCenterId = row.costCenterId;
+          if (!costCenterId && costCenterName) {
+            const trimmedCostCenterName = costCenterName.toString().trim().toUpperCase();
+            costCenterId = costCenterMap[trimmedCostCenterName];
+          }
+
+          // Resolve job title ID (optional) - trim whitespace for matching
+          let jobTitleId = row.jobTitleId;
+          if (!jobTitleId && jobTitleName) {
+            const trimmedJobTitleName = jobTitleName.toString().trim().toUpperCase();
+            jobTitleId = jobTitleMap[trimmedJobTitleName];
+          }
+
+          // Create employee
+          const employee = await Employee.create({
+            worksNumber,
+            firstName,
+            lastName,
+            jobTitle: jobTitleName, // Legacy field
+            jobTitleId,
+            jobType: jobType?.toUpperCase(),
+            sectionId,
+            costCenterId,
+            gender: gender?.toUpperCase(),
+            contractType: contractType?.toUpperCase(),
+            isActive: contractType?.toUpperCase() !== 'TERMINATED'
+          }, { transaction });
+
+          results.created.push({
+            row: rowNum,
+            id: employee.id,
+            worksNumber,
+            name: `${firstName} ${lastName}`
+          });
+
+        } catch (rowError) {
+          results.errors.push({
+            row: rowNum,
+            worksNumber: row.Code || row.worksNumber,
+            error: rowError.message
+          });
+        }
+      }
+
+      // Only commit if we have successful creates
+      if (results.created.length > 0) {
+        await transaction.commit();
+      } else {
+        await transaction.rollback();
+      }
+
+      res.status(results.created.length > 0 ? 201 : 400).json({
+        success: results.created.length > 0,
+        message: `Bulk upload complete: ${results.created.length} created, ${results.skipped.length} skipped, ${results.errors.length} errors`,
+        data: results
+      });
+
+    } catch (error) {
+      await transaction.rollback();
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   GET /api/v1/employees/:id/user-account
+ * @desc    Check if employee has a user account
+ * @access  Private (Admin only)
+ */
+router.get(
+  '/:id/user-account',
+  authenticate,
+  requireRole('admin'),
+  async (req, res, next) => {
+    try {
+      const employee = await Employee.findByPk(req.params.id, {
+        include: [{
+          model: User,
+          as: 'userAccount',
+          attributes: ['id', 'username', 'isActive', 'lastLogin'],
+          include: [{ model: require('../../models/role'), as: 'role' }]
+        }]
+      });
+
+      if (!employee) {
+        return res.status(404).json({
+          success: false,
+          message: 'Employee not found'
+        });
+      }
+
+      res.json({
+        success: true,
+        data: {
+          employee: {
+            id: employee.id,
+            worksNumber: employee.worksNumber,
+            name: `${employee.firstName} ${employee.lastName}`
+          },
+          hasUserAccount: !!employee.userAccount,
+          userAccount: employee.userAccount || null
+        }
       });
     } catch (error) {
       next(error);

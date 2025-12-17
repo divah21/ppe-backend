@@ -1,8 +1,9 @@
 const { verifyToken } = require('../helpers/jwt_helpers');
-const { User, Role } = require('../models');
+const { User, Role, Employee, Section, Department, JobTitle, CostCenter } = require('../models');
 
 /**
  * Middleware to verify JWT token and attach user to request
+ * User data now comes from linked Employee record
  */
 const authenticate = async (req, res, next) => {
   try {
@@ -28,7 +29,7 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    // Get user from database
+    // Get user with linked employee data
     const user = await User.findByPk(decoded.userId, {
       include: [
         {
@@ -37,14 +38,22 @@ const authenticate = async (req, res, next) => {
           attributes: ['id', 'name', 'description', 'permissions']
         },
         {
-          model: require('../models/department'),
-          as: 'department',
-          attributes: ['id', 'name']
-        },
-        {
-          model: require('../models/section'),
-          as: 'section',
-          attributes: ['id', 'name', 'departmentId']
+          model: Employee,
+          as: 'employee',
+          include: [
+            {
+              model: Section,
+              as: 'section',
+              attributes: ['id', 'name', 'departmentId'],
+              include: [{
+                model: Department,
+                as: 'department',
+                attributes: ['id', 'name']
+              }]
+            },
+            { model: JobTitle, as: 'jobTitleRef', required: false },
+            { model: CostCenter, as: 'costCenter', required: false }
+          ]
         }
       ],
       attributes: { exclude: ['passwordHash'] }
@@ -68,6 +77,13 @@ const authenticate = async (req, res, next) => {
     req.user = user;
     req.userId = user.id;
     req.userRole = user.role.name;
+    
+    // Convenience properties from employee (for role-based filtering)
+    if (user.employee) {
+      req.user.sectionId = user.employee.sectionId;
+      req.user.departmentId = user.employee.section?.departmentId;
+      req.user.employeeId = user.employeeId;
+    }
 
     next();
   } catch (error) {

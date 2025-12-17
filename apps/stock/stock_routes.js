@@ -488,4 +488,438 @@ router.post(
   }
 );
 
+/**
+ * @route   POST /api/v1/stock/bulk-upload
+ * @desc    Bulk upload inventory stock from Excel data
+ * @access  Private (Stores, Admin)
+ * 
+ * Expected Excel columns:
+ * - ITMREF_0: Item Reference Code (matches ppeItem.itemRefCode)
+ * - ITMDES1_0: Full description with size/color variant info
+ * - Product Name: Generic product name
+ * - Category: Unit of measure (EA, KG, M, UN)
+ * - Acc Code: Account code (PPEQ, PSS05, etc.)
+ * - DES_0: Account description
+ * - Quantity: Stock quantity (optional, default 0)
+ * - Unit Price: Unit price in USD (optional)
+ * - Min Level: Minimum stock level (optional, default 10)
+ * - Location: Storage location (optional, default 'Main Store')
+ * - Expiry Date: Expiry/replacement date (optional)
+ */
+router.post(
+  '/bulk-upload',
+  authenticate,
+  requireRole('stores', 'admin'),
+  [
+    body('items').isArray({ min: 1 }).withMessage('Items array is required'),
+    body('items.*.itemRefCode').trim().notEmpty().withMessage('Item reference code (ITMREF_0) is required'),
+    body('updateExisting').optional().isBoolean().withMessage('updateExisting must be a boolean'),
+  ],
+  validate,
+  auditLog('BULK_UPLOAD', 'Stock'),
+  async (req, res, next) => {
+    try {
+      const { items, updateExisting = false } = req.body;
+
+      const results = {
+        created: [],
+        updated: [],
+        skipped: [],
+        errors: []
+      };
+
+      // Size patterns to extract from descriptions
+      const sizePatterns = [
+        // Numeric sizes like "SIZE 38", "SIZE 40", etc.
+        /SIZE\s*(\d+)/i,
+        // Alpha sizes like "SIZE MEDIUM", "SIZE LARGE", etc.
+        /SIZE\s*(SMALL|S|MEDIUM|M|LARGE|L|XL|XXL|XXXL|XXXXL|X-LARGE|XX-LARGE)/i,
+        // Foot sizes at the end like "SIZE 6", "SIZE 7", etc.
+        /SIZE\s*(\d+)$/i,
+        // Sizes in parentheses like "(medium)", "(large)", "(X-large)"
+        /\((SMALL|MEDIUM|LARGE|X-LARGE|XL|XXL|XXXL|S|M|L)\)/i,
+      ];
+
+      // Color patterns
+      const colorKeywords = [
+        'NAVY', 'BLUE', 'GREEN', 'WHITE', 'RED', 'YELLOW', 'ORANGE', 'BLACK', 
+        'GRAY', 'GREY', 'LIME', 'PINK', 'BROWN', 'CLEAR', 'DARK'
+      ];
+
+      // Helper function to extract size from description
+      const extractSize = (description) => {
+        if (!description) return null;
+        const upperDesc = description.toUpperCase();
+        
+        for (const pattern of sizePatterns) {
+          const match = upperDesc.match(pattern);
+          if (match) {
+            return match[1].toUpperCase();
+          }
+        }
+        return null;
+      };
+
+      // Helper function to extract color from description
+      const extractColor = (description) => {
+        if (!description) return null;
+        const upperDesc = description.toUpperCase();
+        
+        for (const color of colorKeywords) {
+          if (upperDesc.includes(color)) {
+            return color.charAt(0) + color.slice(1).toLowerCase();
+          }
+        }
+        return null;
+      };
+
+      // Normalize size value for consistency
+      const normalizeSize = (size) => {
+        if (!size) return null;
+        const upper = size.toUpperCase().trim();
+        
+        // Map text sizes to standard codes
+        const sizeMap = {
+          'SMALL': 'S',
+          'MEDIUM': 'M',
+          'LARGE': 'L',
+          'X-LARGE': 'XL',
+          'XX-LARGE': 'XXL',
+          'XXX-LARGE': 'XXXL',
+          'XXXX-LARGE': 'XXXXL',
+        };
+        
+        return sizeMap[upper] || upper;
+      };
+
+      for (const item of items) {
+        try {
+          const { 
+            itemRefCode, 
+            fullDescription,  // ITMDES1_0
+            productName,      // Product Name
+            unit,             // Category (actually unit of measure)
+            accountCode,      // Acc Code
+            accountDescription, // DES_0
+            quantity = 0,
+            unitPrice,
+            minLevel = 10,
+            location = 'Main Store',
+            expiryDate,
+            batchNumber
+          } = item;
+
+          // Find the PPE item using multiple matching strategies
+          let ppeItem = null;
+          let matchedBy = '';
+
+          // Strategy 1: Try exact match by itemRefCode
+          if (itemRefCode) {
+            ppeItem = await PPEItem.findOne({ where: { itemRefCode } });
+            if (ppeItem) matchedBy = 'itemRefCode';
+          }
+
+          // Strategy 2: Try exact match by itemCode
+          if (!ppeItem && itemRefCode) {
+            ppeItem = await PPEItem.findOne({ where: { itemCode: itemRefCode } });
+            if (ppeItem) matchedBy = 'itemCode';
+          }
+
+          // Strategy 3: Try matching by product name (exact match, case insensitive)
+          if (!ppeItem && productName) {
+            const cleanProductName = productName.trim().toUpperCase();
+            ppeItem = await PPEItem.findOne({ 
+              where: sequelize.where(
+                sequelize.fn('UPPER', sequelize.col('name')), 
+                cleanProductName
+              )
+            });
+            if (ppeItem) matchedBy = 'exactName';
+          }
+
+          // Strategy 4: Try partial match on product name (contains)
+          if (!ppeItem && productName) {
+            // Remove size info from product name for better matching
+            const baseProductName = productName
+              .replace(/SIZE\s*\d+/gi, '')
+              .replace(/SIZE\s*(S|M|L|XL|XXL|XXXL|SMALL|MEDIUM|LARGE)/gi, '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toUpperCase();
+            
+            if (baseProductName.length > 3) {
+              ppeItem = await PPEItem.findOne({ 
+                where: sequelize.where(
+                  sequelize.fn('UPPER', sequelize.col('name')), 
+                  { [Op.like]: `%${baseProductName}%` }
+                )
+              });
+              if (ppeItem) matchedBy = 'partialName';
+            }
+          }
+
+          // Strategy 5: Try matching by description keywords
+          if (!ppeItem && fullDescription) {
+            // Extract key product words from description
+            const descWords = fullDescription
+              .toUpperCase()
+              .replace(/[,()]/g, ' ')
+              .split(/\s+/)
+              .filter(w => w.length > 3)
+              .slice(0, 3)  // Take first 3 significant words
+              .join('%');
+            
+            if (descWords.length > 3) {
+              ppeItem = await PPEItem.findOne({ 
+                where: sequelize.where(
+                  sequelize.fn('UPPER', sequelize.col('name')), 
+                  { [Op.like]: `%${descWords}%` }
+                )
+              });
+              if (ppeItem) matchedBy = 'description';
+            }
+          }
+
+          if (!ppeItem) {
+            results.errors.push({
+              itemRefCode,
+              fullDescription,
+              productName,
+              error: `PPE catalog item not found. Tried matching: itemRefCode="${itemRefCode}", productName="${productName}". Please ensure the item exists in PPE Catalog first.`
+            });
+            continue;
+          }
+
+          // Extract size and color from full description
+          const extractedSize = normalizeSize(extractSize(fullDescription)) || item.size || null;
+          const extractedColor = extractColor(fullDescription) || item.color || null;
+
+          // Check if stock entry already exists for this variant
+          const existingStock = await Stock.findOne({
+            where: {
+              ppeItemId: ppeItem.id,
+              size: extractedSize,
+              color: extractedColor,
+              location: location || 'Main Store'
+            }
+          });
+
+          if (existingStock) {
+            if (updateExisting) {
+              // Update existing stock
+              await existingStock.update({
+                quantity: parseInt(quantity) || existingStock.quantity,
+                unitPriceUSD: unitPrice ? parseFloat(unitPrice) : existingStock.unitPriceUSD,
+                unitCost: unitPrice ? parseFloat(unitPrice) : existingStock.unitCost,
+                minLevel: parseInt(minLevel) || existingStock.minLevel,
+                stockAccount: accountCode || existingStock.stockAccount,
+                expiryDate: expiryDate ? new Date(expiryDate) : existingStock.expiryDate,
+                batchNumber: batchNumber || existingStock.batchNumber,
+                lastRestocked: new Date()
+              });
+              results.updated.push({
+                itemRefCode,
+                ppeItemName: ppeItem.name,
+                matchedBy,
+                size: extractedSize,
+                color: extractedColor,
+                quantity: parseInt(quantity) || existingStock.quantity
+              });
+            } else {
+              results.skipped.push({
+                itemRefCode,
+                ppeItemName: ppeItem.name,
+                matchedBy,
+                size: extractedSize,
+                color: extractedColor,
+                reason: 'Stock entry already exists for this variant. Enable "Update Existing" to modify.'
+              });
+            }
+          } else {
+            // Create new stock entry
+            const newStock = await Stock.create({
+              ppeItemId: ppeItem.id,
+              quantity: parseInt(quantity) || 0,
+              minLevel: parseInt(minLevel) || 10,
+              unitCost: unitPrice ? parseFloat(unitPrice) : null,
+              unitPriceUSD: unitPrice ? parseFloat(unitPrice) : 0,
+              size: extractedSize,
+              color: extractedColor,
+              location: location || 'Main Store',
+              stockAccount: accountCode || null,
+              expiryDate: expiryDate ? new Date(expiryDate) : null,
+              batchNumber: batchNumber || null,
+              notes: fullDescription || null,
+              lastRestocked: quantity > 0 ? new Date() : null
+            });
+
+            results.created.push({
+              id: newStock.id,
+              itemRefCode,
+              ppeItemName: ppeItem.name,
+              matchedBy,
+              size: extractedSize,
+              color: extractedColor,
+              quantity: parseInt(quantity) || 0
+            });
+          }
+        } catch (err) {
+          results.errors.push({
+            itemRefCode: item.itemRefCode,
+            fullDescription: item.fullDescription,
+            error: err.message
+          });
+        }
+      }
+
+      res.status(201).json({
+        success: true,
+        message: `Bulk upload completed: ${results.created.length} created, ${results.updated.length} updated, ${results.skipped.length} skipped, ${results.errors.length} errors`,
+        data: results,
+        summary: {
+          total: items.length,
+          created: results.created.length,
+          updated: results.updated.length,
+          skipped: results.skipped.length,
+          errors: results.errors.length
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   POST /api/v1/stock/bulk-topup
+ * @desc    Bulk top-up existing stock items (for restocking from new orders)
+ * @access  Private (Stores, Admin)
+ * 
+ * Expected columns:
+ * - Stock ID: UUID of the stock variant to top up
+ * - Item Name: For reference (not used for matching if stockId provided)
+ * - Size: Size variant (used if stockId not provided)
+ * - Color: Color variant (used if stockId not provided)
+ * - Top Up Qty: Quantity to add
+ * - Reason: Reason for top-up
+ */
+router.post(
+  '/bulk-topup',
+  authenticate,
+  requireRole('stores', 'admin'),
+  [
+    body('items').isArray({ min: 1 }).withMessage('Items array is required'),
+    body('items.*.quantity').isInt({ min: 1 }).withMessage('Quantity must be a positive integer'),
+  ],
+  validate,
+  auditLog('BULK_TOPUP', 'Stock'),
+  async (req, res, next) => {
+    try {
+      const { items } = req.body;
+
+      const results = {
+        success: [],
+        notFound: [],
+        errors: []
+      };
+
+      for (const item of items) {
+        try {
+          const { stockId, itemName, size, color, quantity, reason = 'Bulk top-up' } = item;
+
+          let stock = null;
+
+          // Strategy 1: Find by stockId (most accurate)
+          if (stockId) {
+            stock = await Stock.findByPk(stockId, {
+              include: [{ model: PPEItem, as: 'ppeItem' }]
+            });
+          }
+
+          // Strategy 2: Find by itemName + size + color
+          if (!stock && itemName) {
+            // First find the PPE item
+            const ppeItem = await PPEItem.findOne({
+              where: sequelize.where(
+                sequelize.fn('UPPER', sequelize.col('name')),
+                { [Op.like]: `%${itemName.toUpperCase()}%` }
+              )
+            });
+
+            if (ppeItem) {
+              const whereClause = {
+                ppeItemId: ppeItem.id,
+              };
+              
+              if (size) whereClause.size = size;
+              if (color) whereClause.color = color;
+
+              stock = await Stock.findOne({
+                where: whereClause,
+                include: [{ model: PPEItem, as: 'ppeItem' }]
+              });
+            }
+          }
+
+          if (!stock) {
+            results.notFound.push({
+              stockId,
+              itemName,
+              size,
+              color,
+              quantity,
+              error: 'Stock item not found'
+            });
+            continue;
+          }
+
+          // Update stock quantity
+          const previousQty = stock.quantity || 0;
+          const newQuantity = previousQty + parseInt(quantity);
+
+          await stock.update({
+            quantity: newQuantity,
+            lastRestocked: new Date(),
+            notes: stock.notes 
+              ? `${stock.notes}\n[${new Date().toISOString().split('T')[0]}] ${reason}: +${quantity}`
+              : `[${new Date().toISOString().split('T')[0]}] ${reason}: +${quantity}`
+          });
+
+          results.success.push({
+            stockId: stock.id,
+            itemName: stock.ppeItem?.name || itemName,
+            size: stock.size,
+            color: stock.color,
+            previousQty,
+            addedQty: parseInt(quantity),
+            newQuantity,
+            reason
+          });
+
+        } catch (err) {
+          results.errors.push({
+            stockId: item.stockId,
+            itemName: item.itemName,
+            error: err.message
+          });
+        }
+      }
+
+      res.status(200).json({
+        success: true,
+        message: `Bulk top-up completed: ${results.success.length} topped up, ${results.notFound.length} not found, ${results.errors.length} errors`,
+        data: results,
+        summary: {
+          total: items.length,
+          success: results.success.length,
+          notFound: results.notFound.length,
+          errors: results.errors.length
+        }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
 module.exports = router;

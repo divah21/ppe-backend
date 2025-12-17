@@ -14,6 +14,7 @@ const Stock = require('./stock');
 const Request = require('./request');
 const RequestItem = require('./requestItem');
 const Allocation = require('./allocation');
+const CompanyBudget = require('./companyBudget');
 const Budget = require('./budget');
 const FailureReport = require('./failureReport');
 const AuditLog = require('./auditLog');
@@ -28,13 +29,17 @@ const Forecast = require('./forecast');
 User.belongsTo(Role, { foreignKey: 'roleId', as: 'role' });
 Role.hasMany(User, { foreignKey: 'roleId', as: 'users' });
 
-// User <-> Department (optional, for role-based filtering)
-User.belongsTo(Department, { foreignKey: 'departmentId', as: 'department', allowNull: true });
-Department.hasMany(User, { foreignKey: 'departmentId', as: 'users' });
+// User <-> Employee (One-to-One: User is a promoted Employee)
+User.belongsTo(Employee, { foreignKey: 'employeeId', as: 'employee' });
+Employee.hasOne(User, { foreignKey: 'employeeId', as: 'userAccount' });
 
-// User <-> Section (optional, for role-based filtering)
-User.belongsTo(Section, { foreignKey: 'sectionId', as: 'section', allowNull: true });
-Section.hasMany(User, { foreignKey: 'sectionId', as: 'users' });
+// User <-> Department (For HOD/Department Rep - manages specific department)
+User.belongsTo(Department, { foreignKey: 'departmentId', as: 'managedDepartment' });
+Department.hasMany(User, { foreignKey: 'departmentId', as: 'managers' });
+
+// User <-> Section (For Section Rep - manages specific section)
+User.belongsTo(Section, { foreignKey: 'sectionId', as: 'managedSection' });
+Section.hasMany(User, { foreignKey: 'sectionId', as: 'sectionReps' });
 
 // Department <-> Section
 Department.hasMany(Section, { foreignKey: 'departmentId', as: 'sections' });
@@ -132,6 +137,14 @@ Department.hasMany(Budget, { foreignKey: 'departmentId', as: 'budgets' });
 Budget.belongsTo(Section, { foreignKey: 'sectionId', as: 'section', allowNull: true });
 Section.hasMany(Budget, { foreignKey: 'sectionId', as: 'budgets' });
 
+// CompanyBudget <-> Budget (company budget allocates to department budgets)
+Budget.belongsTo(CompanyBudget, { foreignKey: 'companyBudgetId', as: 'companyBudget', allowNull: true });
+CompanyBudget.hasMany(Budget, { foreignKey: 'companyBudgetId', as: 'departmentBudgets' });
+
+// CompanyBudget <-> User (created by)
+CompanyBudget.belongsTo(User, { foreignKey: 'createdById', as: 'createdBy', allowNull: true });
+User.hasMany(CompanyBudget, { foreignKey: 'createdById', as: 'createdBudgets' });
+
 // FailureReport <-> Employee
 FailureReport.belongsTo(Employee, { foreignKey: 'employeeId', as: 'employee' });
 Employee.hasMany(FailureReport, { foreignKey: 'employeeId', as: 'failureReports', onDelete: 'CASCADE' });
@@ -181,6 +194,7 @@ module.exports = {
   Request,
   RequestItem,
   Allocation,
+  CompanyBudget,
   Budget,
   FailureReport,
   AuditLog,

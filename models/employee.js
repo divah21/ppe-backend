@@ -56,7 +56,20 @@ const Employee = sequelize.define('Employee', {
   },
   jobType: {
     type: DataTypes.STRING(100),
-    allowNull: true
+    allowNull: true,
+    comment: 'NEC or Salaried'
+  },
+  gender: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+    validate: {
+      isIn: [['MALE', 'FEMALE', 'OTHER']]
+    }
+  },
+  contractType: {
+    type: DataTypes.STRING(50),
+    allowNull: true,
+    comment: 'e.g., PERMANENT, TERMINATED, CONTRACT'
   },
   dateOfBirth: {
     type: DataTypes.DATE,
@@ -73,7 +86,7 @@ const Employee = sequelize.define('Employee', {
 }, {
   tableName: 'employees',
   timestamps: true,
-  underscored: false // Use camelCase for column names
+  underscored: false
 });
 
 // Virtual field for full name
