@@ -12,10 +12,9 @@ const DEFAULT_ROLES = [
   { name: 'sheq', description: 'SHEQ Officer - Safety compliance and audits' },
 ];
 
-// Default admin user configuration
 const DEFAULT_ADMIN = {
   username: 'sysadmin',
-  password: 'Admin@123', // Should be changed on first login
+  password: 'Admin@123', 
   roleName: 'admin',
 };
 
@@ -69,7 +68,7 @@ const seedAdminUser = async () => {
     username: DEFAULT_ADMIN.username,
     passwordHash: hashedPassword,
     roleId: adminRole.id,
-    employeeId: null, // System admin without employee record
+    employeeId: null,
     isActive: true,
   }, {
     hooks: false, 

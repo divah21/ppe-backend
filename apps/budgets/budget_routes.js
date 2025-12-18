@@ -372,26 +372,39 @@ router.get('/', authenticate, async (req, res) => {
       const yearStart = new Date(budget.fiscalYear, 0, 1);
       const yearEnd = new Date(budget.fiscalYear, 11, 31, 23, 59, 59);
 
-      const spending = await Allocation.findAll({
-        where: {
-          issueDate: { [Op.between]: [yearStart, yearEnd] }
-        },
+      // Build section filter condition
+      const sectionFilter = budget.sectionId 
+        ? { id: budget.sectionId }
+        : { departmentId: budget.departmentId };
+
+      // First, get employee IDs that belong to the target department/section
+      const employees = await Employee.findAll({
         include: [{
-          model: Employee,
-          as: 'employee',
+          model: Section,
+          as: 'section',
+          where: sectionFilter,
           required: true,
-          include: [{
-            model: Section,
-            as: 'section',
-            where: budget.sectionId ? { id: budget.sectionId } : { departmentId: budget.departmentId },
-            required: true
-          }]
+          attributes: []
         }],
-        attributes: [[Sequelize.fn('SUM', Sequelize.col('total_cost')), 'totalSpent']],
+        attributes: ['id'],
         raw: true
       });
 
-      const totalSpent = parseFloat(spending[0]?.totalSpent || 0);
+      const employeeIds = employees.map(e => e.id);
+
+      // Then calculate spending for those employees
+      let totalSpent = 0;
+      if (employeeIds.length > 0) {
+        const spending = await Allocation.findAll({
+          where: {
+            issueDate: { [Op.between]: [yearStart, yearEnd] },
+            employeeId: { [Op.in]: employeeIds }
+          },
+          attributes: [[Sequelize.fn('SUM', Sequelize.col('total_cost')), 'totalSpent']],
+          raw: true
+        });
+        totalSpent = parseFloat(spending[0]?.totalSpent || 0);
+      }
       const allocatedAmount = parseFloat(budgetData.allocatedAmount || budgetData.totalBudget || 0);
 
       return {

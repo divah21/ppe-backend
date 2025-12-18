@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Employee, Section, Department, Allocation, PPEItem, Request, JobTitlePPEMatrix, Stock, JobTitle, CostCenter, User } = require('../../models');
+const { Employee, Section, Department, Allocation, PPEItem, Request, JobTitlePPEMatrix, SectionPPEMatrix, Stock, JobTitle, CostCenter, User } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { validate } = require('../../middlewares/validation_middleware');
@@ -16,7 +16,7 @@ const { sequelize } = require('../../database/db');
  */
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    const { page = 1, limit = 50, search, sectionId, departmentId, isActive, jobType } = req.query;
+    const { page = 1, limit = 500, search, sectionId, departmentId, isActive, jobType } = req.query;
 
     const where = {};
     
@@ -202,6 +202,7 @@ router.get('/:id/requests', authenticate, async (req, res, next) => {
 /**
  * @route   GET /api/v1/employees/:id/ppe-eligibility
  * @desc    Get employee details plus PPE eligibility and sizing table
+ *          Combines BOTH Job Title PPE Matrix AND Section PPE Matrix
  * @access  Private
  */
 router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
@@ -226,21 +227,72 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
       });
     }
 
-    // Get PPE matrix for employee job title
-    // Support both new jobTitleId approach and legacy jobTitle string
-    const matrixWhere = { isActive: true };
+    // ==========================================
+    // 1. Get PPE from Job Title Matrix
+    // ==========================================
+    const jobTitleMatrixWhere = { isActive: true };
     if (employee.jobTitleId) {
-      matrixWhere.jobTitleId = employee.jobTitleId;
+      jobTitleMatrixWhere.jobTitleId = employee.jobTitleId;
     } else if (employee.jobTitle) {
-      matrixWhere.jobTitle = employee.jobTitle;
+      jobTitleMatrixWhere.jobTitle = employee.jobTitle;
     }
 
-    const matrixEntries = await JobTitlePPEMatrix.findAll({
-      where: matrixWhere,
+    const jobTitleMatrixEntries = await JobTitlePPEMatrix.findAll({
+      where: jobTitleMatrixWhere,
       include: [{ model: PPEItem, as: 'ppeItem' }]
     });
 
-    // Latest allocations per PPE item for this employee
+    // ==========================================
+    // 2. Get PPE from Section Matrix
+    // ==========================================
+    let sectionMatrixEntries = [];
+    if (employee.sectionId) {
+      sectionMatrixEntries = await SectionPPEMatrix.findAll({
+        where: { 
+          sectionId: employee.sectionId,
+          isActive: true 
+        },
+        include: [{ model: PPEItem, as: 'ppeItem' }]
+      });
+    }
+
+    // ==========================================
+    // 3. Merge both matrices (Job Title overrides Section)
+    // ==========================================
+    // Create a map to track PPE items - Job Title takes priority
+    const ppeItemMap = new Map();
+    
+    // First, add all Section Matrix items (baseline)
+    for (const entry of sectionMatrixEntries) {
+      if (entry.ppeItem) {
+        ppeItemMap.set(entry.ppeItem.id, {
+          source: 'section',
+          entry: entry,
+          ppeItem: entry.ppeItem,
+          quantityRequired: entry.quantityRequired,
+          replacementFrequency: entry.replacementFrequency,
+          isMandatory: entry.isMandatory
+        });
+      }
+    }
+
+    // Then, add/override with Job Title Matrix items (takes priority)
+    for (const entry of jobTitleMatrixEntries) {
+      if (entry.ppeItem) {
+        ppeItemMap.set(entry.ppeItem.id, {
+          source: 'jobTitle',
+          entry: entry,
+          ppeItem: entry.ppeItem,
+          quantityRequired: entry.quantityRequired,
+          replacementFrequency: entry.replacementFrequency,
+          isMandatory: entry.isMandatory !== undefined ? entry.isMandatory : true
+        });
+      }
+    }
+
+    // ==========================================
+    // 4. Get latest allocations per PPE item
+    // ==========================================
     const allocations = await Allocation.findAll({
       where: { employeeId: employee.id },
       include: [{ model: PPEItem, as: 'ppeItem' }],
@@ -255,11 +307,13 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
     }
 
     const now = new Date();
-
     const eligibility = [];
 
-    for (const entry of matrixEntries) {
-      const ppeItem = entry.ppeItem;
+    // ==========================================
+    // 5. Build eligibility list from merged map
+    // ==========================================
+    for (const [ppeItemId, data] of ppeItemMap) {
+      const ppeItem = data.ppeItem;
 
       // Determine available sizes either from PPE item metadata or stock variants
       let sizes = Array.isArray(ppeItem.availableSizes) ? ppeItem.availableSizes : null;
@@ -282,7 +336,7 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
 
       if (latestAlloc) {
         lastIssueDate = latestAlloc.issueDate;
-        const months = latestAlloc.replacementFrequency || entry.replacementFrequency || ppeItem.replacementFrequency || 12;
+        const months = latestAlloc.replacementFrequency || data.replacementFrequency || ppeItem.replacementFrequency || 12;
         const due = new Date(lastIssueDate);
         due.setMonth(due.getMonth() + months);
         nextDueDate = due;
@@ -294,13 +348,15 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
         itemName: ppeItem.name,
         itemCode: ppeItem.itemCode,
         category: ppeItem.category,
-        quantityRequired: entry.quantityRequired,
-        replacementFrequency: entry.replacementFrequency || ppeItem.replacementFrequency || null,
+        quantityRequired: data.quantityRequired,
+        replacementFrequency: data.replacementFrequency || ppeItem.replacementFrequency || null,
         sizes,
         hasSizeVariants: ppeItem.hasSizeVariants,
         lastIssueDate,
         nextDueDate,
-        eligibleNowForAnnual
+        eligibleNowForAnnual,
+        source: data.source, // 'jobTitle' or 'section' - indicates where this requirement came from
+        isMandatory: data.isMandatory
       });
     }
 
@@ -317,7 +373,12 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
       success: true,
       data: {
         employee: responseEmployee,
-        eligibility
+        eligibility,
+        summary: {
+          fromJobTitle: eligibility.filter(e => e.source === 'jobTitle').length,
+          fromSection: eligibility.filter(e => e.source === 'section').length,
+          total: eligibility.length
+        }
       }
     });
   } catch (error) {

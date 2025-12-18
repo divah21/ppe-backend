@@ -18,6 +18,7 @@ const costCenterRoutes = require('./apps/cost-centers/cost_center_routes');
 const employeeRoutes = require('./apps/employees/employee_routes');
 const ppeRoutes = require('./apps/ppe/ppe_routes');
 const matrixRoutes = require('./apps/matrix/matrix_routes');
+const sectionMatrixRoutes = require('./apps/matrix/section_matrix_routes');
 const stockRoutes = require('./apps/stock/stock_routes');
 const requestRoutes = require('./apps/requests/request_routes');
 const allocationRoutes = require('./apps/allocations/allocation_routes');
@@ -25,9 +26,19 @@ const budgetRoutes = require('./apps/budgets/budget_routes');
 const valuationRoutes = require('./apps/valuation/valuation_routes');
 const sizesRoutes = require('./apps/sizes/size_routes');
 const failureRoutes = require('./apps/failures/failure_routes');
+const auditRoutes = require('./apps/audit-logs/audit_routes');
+const settingsRoutes = require('./apps/settings/settings_routes');
+const backupRoutes = require('./apps/backup/backup_routes');
+const consumableRoutes = require('./apps/consumables/consumable_routes');
+
+// Import backup helper for scheduled backups
+const backupHelper = require('./helpers/backup_helper');
 
 // Import error handlers
 const { errorHandler, notFound } = require('./middlewares/error_handler');
+
+// Import audit middleware
+const { accessLogger, autoAuditLog } = require('./middlewares/audit_middleware');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -53,6 +64,16 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 if (process.env.NODE_ENV !== 'production') {
   app.use(morgan('dev'));
 }
+
+// ============================================================
+// AUDIT LOGGING MIDDLEWARE (must be after body parsing)
+// ============================================================
+
+// Log GET requests to file (for access logs)
+app.use(accessLogger());
+
+// Auto-log POST, PUT, PATCH, DELETE to database
+app.use(autoAuditLog());
 
 // ============================================================
 // ROUTES
@@ -96,6 +117,7 @@ app.use(`${API_PREFIX}/cost-centers`, costCenterRoutes);
 app.use(`${API_PREFIX}/employees`, employeeRoutes);
 app.use(`${API_PREFIX}/ppe`, ppeRoutes);
 app.use(`${API_PREFIX}/matrix`, matrixRoutes);
+app.use(`${API_PREFIX}/section-matrix`, sectionMatrixRoutes);
 app.use(`${API_PREFIX}/stock`, stockRoutes);
 app.use(`${API_PREFIX}/requests`, requestRoutes);
 app.use(`${API_PREFIX}/allocations`, allocationRoutes);
@@ -103,6 +125,10 @@ app.use(`${API_PREFIX}/budgets`, budgetRoutes);
 app.use(`${API_PREFIX}/valuation`, valuationRoutes);
 app.use(`${API_PREFIX}/sizes`, sizesRoutes);
 app.use(`${API_PREFIX}/failures`, failureRoutes);
+app.use(`${API_PREFIX}/audit-logs`, auditRoutes);
+app.use(`${API_PREFIX}/settings`, settingsRoutes);
+app.use(`${API_PREFIX}/backup`, backupRoutes);
+app.use(`${API_PREFIX}/consumables`, consumableRoutes);
 
 // 404 Handler
 app.use(notFound);
@@ -118,6 +144,31 @@ const startServer = async () => {
   try {
     // Test database connection
     await testConnection();
+    
+    // Initialize scheduled backup at 6:00 PM
+    try {
+      const { Setting } = require('./models');
+      const [autoBackupSetting, backupTimeSetting, backupPathSetting, retentionSetting] = await Promise.all([
+        Setting.findOne({ where: { category: 'database', key: 'autoBackup' } }),
+        Setting.findOne({ where: { category: 'database', key: 'backupTime' } }),
+        Setting.findOne({ where: { category: 'database', key: 'backupPath' } }),
+        Setting.findOne({ where: { category: 'database', key: 'backupRetention' } })
+      ]);
+
+      const autoBackup = autoBackupSetting?.value !== 'false';
+      const backupTime = backupTimeSetting?.value || '18:00';
+      const backupPath = backupPathSetting?.value || './backups';
+      const retentionDays = parseInt(retentionSetting?.value || '30');
+
+      if (autoBackup) {
+        backupHelper.scheduleBackup(backupTime, { backupPath, retentionDays });
+        console.log(`📅 Automatic backup scheduled for ${backupTime} daily`);
+      } else {
+        console.log('⚠️  Automatic backup is disabled');
+      }
+    } catch (backupError) {
+      console.warn('⚠️  Could not initialize backup scheduler:', backupError.message);
+    }
     
     // Start server
     app.listen(PORT, () => {

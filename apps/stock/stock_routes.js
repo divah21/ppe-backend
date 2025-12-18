@@ -223,17 +223,26 @@ router.post(
     body('ppeItemId').isUUID().withMessage('Invalid PPE item ID'),
     body('quantity').isInt({ min: 0 }).withMessage('Quantity must be a positive integer'),
     body('minLevel').isInt({ min: 0 }).withMessage('Min level must be a positive integer'),
-    body('maxLevel').optional().isInt({ min: 0 }).withMessage('Max level must be a positive integer'),
-    body('reorderPoint').optional().isInt({ min: 0 }).withMessage('Reorder point must be a positive integer'),
-    body('unitCost').optional().isDecimal({ decimal_digits: '0,2' }).withMessage('Unit cost must be a valid decimal'),
+    body('maxLevel').optional({ nullable: true }).isInt({ min: 0 }).withMessage('Max level must be a positive integer'),
+    body('reorderPoint').optional({ nullable: true }).isInt({ min: 0 }).withMessage('Reorder point must be a positive integer'),
+    body('unitCost').optional({ nullable: true }).custom((value) => {
+      if (value === null || value === undefined || value === '') return true;
+      return !isNaN(parseFloat(value));
+    }).withMessage('Unit cost must be a valid decimal'),
     body('unitPriceUSD').isDecimal({ decimal_digits: '0,2' }).withMessage('Unit price USD must be a valid decimal'),
-    body('size').optional().isString().withMessage('Size must be a string'),
-    body('color').optional().isString().withMessage('Color must be a string'),
-    body('location').optional().isString().withMessage('Location must be a string'),
-    body('binLocation').optional({nullable: true}).isString().withMessage('Bin location must be a string'),
-    body('supplier').optional().trim().notEmpty().withMessage('Supplier cannot be empty'),
+    body('size').optional({ nullable: true }).isString().withMessage('Size must be a string'),
+    body('color').optional({ nullable: true }).custom((value) => {
+      if (value === null || value === undefined || value === '') return true;
+      return typeof value === 'string';
+    }).withMessage('Color must be a string'),
+    body('location').optional({ nullable: true }).isString().withMessage('Location must be a string'),
+    body('binLocation').optional({ nullable: true }).isString().withMessage('Bin location must be a string'),
+    body('supplier').optional({ nullable: true }).trim(),
     body('batchNumber').optional({ nullable: true }).trim(),
-    body('expiryDate').optional().isISO8601().withMessage('Expiry date must be a valid date'),
+    body('expiryDate').optional({ nullable: true }).custom((value) => {
+      if (value === null || value === undefined || value === '') return true;
+      return !isNaN(Date.parse(value));
+    }).withMessage('Expiry date must be a valid date'),
     body('stockAccount').optional().isString().withMessage('Stock account must be a string'),
     body('notes').optional({ nullable: true }).isString().withMessage('Notes must be a string'),
     body('eligibleDepartments').optional().isArray().withMessage('Eligible departments must be an array'),
@@ -270,42 +279,88 @@ router.post(
 
       // Check if stock entry already exists for this variant
       const existing = await Stock.findOne({ where: { ppeItemId, size: size || null, color: color || null, location: location || 'Main Store' } });
+      
+      let stock;
+      let isUpdate = false;
+      
       if (existing) {
-        return res.status(409).json({
-          success: false,
-          message: 'Stock entry already exists for this PPE item/variant. Use update endpoint to modify.'
+        // Add quantity to existing stock entry
+        // If new price differs from existing, update to new price (FIFO or weighted average can be implemented later)
+        const updatedData = {
+          quantity: existing.quantity + quantity,
+          minLevel: minLevel || existing.minLevel,
+          maxLevel: maxLevel || existing.maxLevel,
+          reorderPoint: reorderPoint || existing.reorderPoint,
+        };
+        
+        // Update price if provided (use latest price)
+        if (unitPriceUSD) {
+          updatedData.unitPriceUSD = unitPriceUSD;
+        }
+        if (unitCost) {
+          updatedData.unitCost = unitCost;
+        }
+        if (supplier) {
+          updatedData.supplier = supplier;
+        }
+        if (batchNumber) {
+          updatedData.batchNumber = batchNumber;
+        }
+        if (expiryDate) {
+          updatedData.expiryDate = expiryDate;
+        }
+        if (binLocation) {
+          updatedData.binLocation = binLocation;
+        }
+        if (stockAccount) {
+          updatedData.stockAccount = stockAccount;
+        }
+        if (notes) {
+          updatedData.notes = notes;
+        }
+        if (eligibleDepartments) {
+          updatedData.eligibleDepartments = eligibleDepartments;
+        }
+        if (eligibleSections) {
+          updatedData.eligibleSections = eligibleSections;
+        }
+        
+        await existing.update(updatedData);
+        stock = existing;
+        isUpdate = true;
+      } else {
+        // Create new stock entry
+        stock = await Stock.create({
+          ppeItemId,
+          quantity,
+          minLevel,
+          maxLevel: maxLevel || null,
+          reorderPoint: reorderPoint || null,
+          unitCost: unitCost || null,
+          unitPriceUSD,
+          supplier: supplier || null,
+          batchNumber: batchNumber || null,
+          size: size || null,
+          color: color || null,
+          location: location || 'Main Store',
+          binLocation: binLocation || null,
+          expiryDate: expiryDate || null,
+          stockAccount: stockAccount || null,
+          notes: notes || null,
+          eligibleDepartments: eligibleDepartments || null,
+          eligibleSections: eligibleSections || null
         });
       }
-
-      const stock = await Stock.create({
-        ppeItemId,
-        quantity,
-        minLevel,
-        maxLevel: maxLevel || null,
-        reorderPoint: reorderPoint || null,
-        unitCost: unitCost || null,
-        unitPriceUSD,
-        supplier: supplier || null,
-        batchNumber: batchNumber || null,
-        size: size || null,
-        color: color || null,
-        location: location || 'Main Store',
-        binLocation: binLocation || null,
-        expiryDate: expiryDate || null,
-        stockAccount: stockAccount || null,
-        notes: notes || null,
-        eligibleDepartments: eligibleDepartments || null,
-        eligibleSections: eligibleSections || null
-      });
 
       const createdStock = await Stock.findByPk(stock.id, {
         include: [{ model: PPEItem, as: 'ppeItem' }]
       });
 
-      res.status(201).json({
+      res.status(isUpdate ? 200 : 201).json({
         success: true,
-        message: 'Stock item created successfully',
-        data: createdStock
+        message: isUpdate ? 'Stock quantity added to existing entry' : 'Stock item created successfully',
+        data: createdStock,
+        wasUpdate: isUpdate
       });
     } catch (error) {
       next(error);
@@ -606,7 +661,9 @@ router.post(
             minLevel = 10,
             location = 'Main Store',
             expiryDate,
-            batchNumber
+            batchNumber,
+            size: itemSize,    // Size from Excel
+            color: itemColor   // Color from Excel
           } = item;
 
           // Find the PPE item using multiple matching strategies
@@ -690,9 +747,29 @@ router.post(
             continue;
           }
 
-          // Extract size and color from full description
-          const extractedSize = normalizeSize(extractSize(fullDescription)) || item.size || null;
-          const extractedColor = extractColor(fullDescription) || item.color || null;
+          // Extract size and color - prefer Excel values over extracted from description
+          const extractedSize = normalizeSize(itemSize) || normalizeSize(extractSize(fullDescription)) || null;
+          const extractedColor = itemColor || extractColor(fullDescription) || null;
+          
+          // Parse expiry date properly (handles Excel date formats)
+          let parsedExpiryDate = null;
+          if (expiryDate) {
+            // Handle various date formats from Excel
+            if (typeof expiryDate === 'number') {
+              // Excel serial date number
+              const date = new Date((expiryDate - 25569) * 86400 * 1000);
+              if (!isNaN(date.getTime())) {
+                parsedExpiryDate = date;
+              }
+            } else if (typeof expiryDate === 'string' && expiryDate.trim()) {
+              const date = new Date(expiryDate);
+              if (!isNaN(date.getTime())) {
+                parsedExpiryDate = date;
+              }
+            } else if (expiryDate instanceof Date) {
+              parsedExpiryDate = expiryDate;
+            }
+          }
 
           // Check if stock entry already exists for this variant
           const existingStock = await Stock.findOne({
@@ -713,7 +790,7 @@ router.post(
                 unitCost: unitPrice ? parseFloat(unitPrice) : existingStock.unitCost,
                 minLevel: parseInt(minLevel) || existingStock.minLevel,
                 stockAccount: accountCode || existingStock.stockAccount,
-                expiryDate: expiryDate ? new Date(expiryDate) : existingStock.expiryDate,
+                expiryDate: parsedExpiryDate || existingStock.expiryDate,
                 batchNumber: batchNumber || existingStock.batchNumber,
                 lastRestocked: new Date()
               });
@@ -747,7 +824,7 @@ router.post(
               color: extractedColor,
               location: location || 'Main Store',
               stockAccount: accountCode || null,
-              expiryDate: expiryDate ? new Date(expiryDate) : null,
+              expiryDate: parsedExpiryDate,
               batchNumber: batchNumber || null,
               notes: fullDescription || null,
               lastRestocked: quantity > 0 ? new Date() : null

@@ -10,6 +10,7 @@ const PPEItem = require('./ppeItem');
 const SizeScale = require('./sizeScale');
 const Size = require('./size');
 const JobTitlePPEMatrix = require('./jobTitlePPEMatrix');
+const SectionPPEMatrix = require('./sectionPPEMatrix');
 const Stock = require('./stock');
 const Request = require('./request');
 const RequestItem = require('./requestItem');
@@ -20,6 +21,14 @@ const FailureReport = require('./failureReport');
 const AuditLog = require('./auditLog');
 const Document = require('./document');
 const Forecast = require('./forecast');
+const Setting = require('./setting');
+
+// Consumables models
+const ConsumableItem = require('./consumableItem');
+const ConsumableStock = require('./consumableStock');
+const ConsumableRequest = require('./consumableRequest');
+const ConsumableRequestItem = require('./consumableRequestItem');
+const ConsumableAllocation = require('./consumableAllocation');
 
 // ============================================================
 // ASSOCIATIONS
@@ -80,6 +89,14 @@ JobTitle.hasMany(JobTitlePPEMatrix, { foreignKey: 'jobTitleId', as: 'ppeRequirem
 // JobTitlePPEMatrix <-> PPEItem
 JobTitlePPEMatrix.belongsTo(PPEItem, { foreignKey: 'ppeItemId', as: 'ppeItem' });
 PPEItem.hasMany(JobTitlePPEMatrix, { foreignKey: 'ppeItemId', as: 'jobTitleRequirements' });
+
+// SectionPPEMatrix <-> Section
+SectionPPEMatrix.belongsTo(Section, { foreignKey: 'sectionId', as: 'section' });
+Section.hasMany(SectionPPEMatrix, { foreignKey: 'sectionId', as: 'ppeRequirements' });
+
+// SectionPPEMatrix <-> PPEItem
+SectionPPEMatrix.belongsTo(PPEItem, { foreignKey: 'ppeItemId', as: 'ppeItem' });
+PPEItem.hasMany(SectionPPEMatrix, { foreignKey: 'ppeItemId', as: 'sectionRequirements' });
 
 // Request <-> User (created by)
 Request.belongsTo(User, { foreignKey: 'requestedById', as: 'createdBy' });
@@ -157,6 +174,17 @@ PPEItem.hasMany(FailureReport, { foreignKey: 'ppeItemId', as: 'failureReports' }
 FailureReport.belongsTo(Allocation, { foreignKey: 'allocationId', as: 'allocation', allowNull: true });
 Allocation.hasMany(FailureReport, { foreignKey: 'allocationId', as: 'failureReports' });
 
+// FailureReport <-> Stock (the stock item that failed)
+FailureReport.belongsTo(Stock, { foreignKey: 'stockId', as: 'stock', allowNull: true });
+Stock.hasMany(FailureReport, { foreignKey: 'stockId', as: 'failureReports' });
+
+// FailureReport <-> Stock (replacement stock)
+FailureReport.belongsTo(Stock, { foreignKey: 'replacementStockId', as: 'replacementStock', allowNull: true });
+
+// Allocation <-> Stock
+Allocation.belongsTo(Stock, { foreignKey: 'stockId', as: 'stock', allowNull: true });
+Stock.hasMany(Allocation, { foreignKey: 'stockId', as: 'allocations' });
+
 // AuditLog <-> User
 AuditLog.belongsTo(User, { foreignKey: 'userId', as: 'user', allowNull: true });
 User.hasMany(AuditLog, { foreignKey: 'userId', as: 'auditLogs' });
@@ -177,6 +205,63 @@ Department.hasMany(Forecast, { foreignKey: 'departmentId', as: 'forecasts' });
 Forecast.belongsTo(PPEItem, { foreignKey: 'ppeItemId', as: 'ppeItem' });
 PPEItem.hasMany(Forecast, { foreignKey: 'ppeItemId', as: 'forecasts' });
 
+// ============================================================
+// CONSUMABLES ASSOCIATIONS
+// ============================================================
+
+// ConsumableStock <-> ConsumableItem
+ConsumableStock.belongsTo(ConsumableItem, { foreignKey: 'consumableItemId', as: 'consumableItem' });
+ConsumableItem.hasMany(ConsumableStock, { foreignKey: 'consumableItemId', as: 'stocks' });
+
+// ConsumableRequest <-> Section
+ConsumableRequest.belongsTo(Section, { foreignKey: 'sectionId', as: 'section' });
+Section.hasMany(ConsumableRequest, { foreignKey: 'sectionId', as: 'consumableRequests' });
+
+// ConsumableRequest <-> Department
+ConsumableRequest.belongsTo(Department, { foreignKey: 'departmentId', as: 'department' });
+Department.hasMany(ConsumableRequest, { foreignKey: 'departmentId', as: 'consumableRequests' });
+
+// ConsumableRequest <-> User (created by)
+ConsumableRequest.belongsTo(User, { foreignKey: 'requestedById', as: 'requestedBy' });
+User.hasMany(ConsumableRequest, { foreignKey: 'requestedById', as: 'consumableRequests' });
+
+// ConsumableRequest <-> User (HOD approver)
+ConsumableRequest.belongsTo(User, { foreignKey: 'hodApproverId', as: 'hodApprover' });
+
+// ConsumableRequest <-> User (Stores approver)
+ConsumableRequest.belongsTo(User, { foreignKey: 'storesApproverId', as: 'storesApprover' });
+
+// ConsumableRequestItem <-> ConsumableRequest
+ConsumableRequestItem.belongsTo(ConsumableRequest, { foreignKey: 'consumableRequestId', as: 'request' });
+ConsumableRequest.hasMany(ConsumableRequestItem, { foreignKey: 'consumableRequestId', as: 'items' });
+
+// ConsumableRequestItem <-> ConsumableItem
+ConsumableRequestItem.belongsTo(ConsumableItem, { foreignKey: 'consumableItemId', as: 'consumableItem' });
+ConsumableItem.hasMany(ConsumableRequestItem, { foreignKey: 'consumableItemId', as: 'requestItems' });
+
+// ConsumableAllocation <-> ConsumableItem
+ConsumableAllocation.belongsTo(ConsumableItem, { foreignKey: 'consumableItemId', as: 'consumableItem' });
+ConsumableItem.hasMany(ConsumableAllocation, { foreignKey: 'consumableItemId', as: 'allocations' });
+
+// ConsumableAllocation <-> Section
+ConsumableAllocation.belongsTo(Section, { foreignKey: 'sectionId', as: 'section' });
+Section.hasMany(ConsumableAllocation, { foreignKey: 'sectionId', as: 'consumableAllocations' });
+
+// ConsumableAllocation <-> Department
+ConsumableAllocation.belongsTo(Department, { foreignKey: 'departmentId', as: 'department' });
+Department.hasMany(ConsumableAllocation, { foreignKey: 'departmentId', as: 'consumableAllocations' });
+
+// ConsumableAllocation <-> ConsumableRequest
+ConsumableAllocation.belongsTo(ConsumableRequest, { foreignKey: 'consumableRequestId', as: 'request' });
+ConsumableRequest.hasMany(ConsumableAllocation, { foreignKey: 'consumableRequestId', as: 'allocations' });
+
+// ConsumableAllocation <-> User (issued by)
+ConsumableAllocation.belongsTo(User, { foreignKey: 'issuedById', as: 'issuedBy' });
+User.hasMany(ConsumableAllocation, { foreignKey: 'issuedById', as: 'consumableAllocationsIssued' });
+
+// ConsumableAllocation <-> User (received by)
+ConsumableAllocation.belongsTo(User, { foreignKey: 'receivedById', as: 'receivedBy' });
+
 // Export all models
 module.exports = {
   Role,
@@ -190,6 +275,7 @@ module.exports = {
   SizeScale,
   Size,
   JobTitlePPEMatrix,
+  SectionPPEMatrix,
   Stock,
   Request,
   RequestItem,
@@ -199,5 +285,12 @@ module.exports = {
   FailureReport,
   AuditLog,
   Document,
-  Forecast
+  Forecast,
+  Setting,
+  // Consumables
+  ConsumableItem,
+  ConsumableStock,
+  ConsumableRequest,
+  ConsumableRequestItem,
+  ConsumableAllocation
 };

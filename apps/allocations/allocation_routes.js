@@ -1,11 +1,81 @@
 const express = require('express');
 const router = express.Router();
-const { Allocation, Employee, PPEItem, User, Request, RequestItem, Stock, Section } = require('../../models');
+const { Allocation, Employee, PPEItem, User, Request, RequestItem, Stock, Section, Department } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
-const { Op } = require('sequelize');
+const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../database/db');
+
+/**
+ * @route   GET /api/v1/allocations/summaries
+ * @desc    Get allocation summaries for multiple employees (batch operation to avoid N+1)
+ * @access  Private
+ */
+router.get('/summaries', authenticate, async (req, res, next) => {
+  try {
+    const { employeeIds } = req.query;
+    
+    if (!employeeIds) {
+      return res.status(400).json({
+        success: false,
+        message: 'employeeIds query parameter is required (comma-separated UUIDs)'
+      });
+    }
+
+    const ids = employeeIds.split(',').map(id => id.trim()).filter(id => id);
+
+    // Single query to get all allocations for these employees
+    const allocations = await Allocation.findAll({
+      where: {
+        employeeId: {
+          [Op.in]: ids
+        }
+      },
+      attributes: ['id', 'employeeId', 'status', 'nextRenewalDate', 'issueDate'],
+      order: [['issueDate', 'DESC']]
+    });
+
+    // Group by employee and calculate summaries
+    const summaries = {};
+    for (const id of ids) {
+      summaries[id] = {
+        active: 0,
+        total: 0,
+        nextRenewal: null,
+        daysUntilRenewal: null
+      };
+    }
+
+    const now = new Date();
+    
+    for (const alloc of allocations) {
+      const empId = alloc.employeeId;
+      if (!summaries[empId]) continue;
+      
+      summaries[empId].total++;
+      if (alloc.status === 'active') {
+        summaries[empId].active++;
+        
+        // Track earliest renewal date
+        if (alloc.nextRenewalDate) {
+          const renewalDate = new Date(alloc.nextRenewalDate);
+          if (!summaries[empId].nextRenewal || renewalDate < summaries[empId].nextRenewal) {
+            summaries[empId].nextRenewal = renewalDate;
+            summaries[empId].daysUntilRenewal = Math.ceil((renewalDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+          }
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      data: summaries
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 /**
  * @route   GET /api/v1/allocations
@@ -28,7 +98,8 @@ router.get('/', authenticate, async (req, res, next) => {
     } = req.query;
 
     const where = {};
-    const employeeWhere = {};
+    const includeEmployeeWhere = {};
+    const includeSectionWhere = {};
     
     if (employeeId) where.employeeId = employeeId;
     if (ppeItemId) where.ppeItemId = ppeItemId;
@@ -41,12 +112,15 @@ router.get('/', authenticate, async (req, res, next) => {
       };
     }
 
-    // Filter by department or section via employee
-    if (departmentId) {
-      employeeWhere['$employee.section.department_id$'] = departmentId;
-    }
+    // Filter by section via employee - apply on the included Employee model
     if (sectionId) {
-      employeeWhere['$employee.section_id$'] = sectionId;
+      includeEmployeeWhere.sectionId = sectionId;
+    }
+
+    // Filter by department via employee's section
+    // Put the filter directly on the Section include
+    if (departmentId) {
+      includeSectionWhere.departmentId = departmentId;
     }
 
     // Filter by renewal due date
@@ -64,14 +138,26 @@ router.get('/', authenticate, async (req, res, next) => {
 
     const offset = (page - 1) * limit;
 
+    // Determine if we need to filter by employee/section
+    const hasEmployeeFilter = Object.keys(includeEmployeeWhere).length > 0;
+    const hasSectionFilter = Object.keys(includeSectionWhere).length > 0;
+    const needsEmployeeFilter = hasEmployeeFilter || hasSectionFilter;
+
     const { count, rows: allocations } = await Allocation.findAndCountAll({
-      where: { ...where, ...employeeWhere },
+      where,
       include: [
         { 
           model: Employee, 
           as: 'employee',
+          where: hasEmployeeFilter ? includeEmployeeWhere : undefined,
+          required: needsEmployeeFilter,
           include: [
-            { model: Section, as: 'section' }
+            { 
+              model: Section, 
+              as: 'section',
+              where: hasSectionFilter ? includeSectionWhere : undefined,
+              required: hasSectionFilter
+            }
           ]
         },
         { model: PPEItem, as: 'ppeItem' },
@@ -90,7 +176,8 @@ router.get('/', authenticate, async (req, res, next) => {
       ],
       limit: parseInt(limit),
       offset,
-      order: [['issueDate', 'DESC']]
+      order: [['issueDate', 'DESC']],
+      subQuery: false
     });
 
     res.json({
@@ -380,12 +467,23 @@ router.post(
         // Only add size constraint if the item has size variants and a size is specified
         if (requestItem.ppeItem.hasSizeVariants && requestedSize) {
           stockWhere.size = requestedSize;
-        } else if (!requestItem.ppeItem.hasSizeVariants) {
-          // For non-sized items, ensure we get stock with no size specified
-          stockWhere.size = null;
         }
+        // For non-sized items, we don't filter by size at all - find any stock for this PPE item
+        // This allows stock with size=null OR any other size value
         
-        const stock = await Stock.findOne({ where: stockWhere });
+        // Find stock, prioritizing exact size match, then any available stock
+        let stock = await Stock.findOne({ 
+          where: stockWhere,
+          order: [['quantity', 'DESC']] // Get the stock with most quantity first
+        });
+        
+        // If no stock found and we're looking for a specific size, try without size filter
+        if (!stock && !requestItem.ppeItem.hasSizeVariants) {
+          stock = await Stock.findOne({ 
+            where: { ppeItemId: requestItem.ppeItemId },
+            order: [['quantity', 'DESC']]
+          });
+        }
 
         if (!stock || stock.quantity < allocItem.quantity) {
           await transaction.rollback();
@@ -428,10 +526,11 @@ router.post(
         createdAllocations.push(allocation);
       }
 
-      // Mark request as completed
+      // Mark request as fulfilled
       await request.update({
-        status: 'completed',
-        completedDate: new Date()
+        status: 'fulfilled',
+        fulfilledDate: new Date(),
+        fulfilledByUserId: req.user.id
       }, { transaction });
 
       await transaction.commit();

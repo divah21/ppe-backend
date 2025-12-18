@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock, JobTitlePPEMatrix, JobTitle } = require('../../models');
+const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock, JobTitlePPEMatrix, SectionPPEMatrix, JobTitle } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { authorize } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
@@ -110,18 +110,24 @@ router.get('/', authenticate, async (req, res) => {
       }
     ];
 
-    // Filter by role
+    // Filter by role (only apply default role filters if no specific status filter is provided)
     if (userRole === 'section-rep') {
       where.requestedById = req.user.id;
     } else if (userRole === 'department-rep' && req.user.departmentId) {
       // Dept Rep sees requests from their department that need their approval
-      where.status = { [Op.in]: ['dept-rep-review', 'hod-review', 'stores-review', 'approved', 'fulfilled'] };
-    } else if (userRole === 'hod-hos' && req.user.departmentId) {
+      if (!status) {
+        where.status = { [Op.in]: ['dept-rep-review', 'hod-review', 'stores-review', 'approved', 'fulfilled'] };
+      }
+    } else if (userRole === 'hod' && req.user.departmentId) {
       // HOD sees requests from their department that need their approval
-      where.status = { [Op.in]: ['hod-review', 'stores-review', 'approved', 'fulfilled'] };
+      if (!status) {
+        where.status = { [Op.in]: ['hod-review', 'stores-review', 'approved', 'fulfilled'] };
+      }
     } else if (userRole === 'stores') {
       // Stores sees all requests that reached stores stage
-      where.status = { [Op.in]: ['stores-review', 'approved', 'fulfilled'] };
+      if (!status) {
+        where.status = { [Op.in]: ['stores-review', 'approved', 'fulfilled'] };
+      }
     }
 
     // PPE Item filter (requires filtering through RequestItems)
@@ -265,13 +271,36 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
     // ELIGIBILITY VALIDATION based on request type
     if (!isEmergencyVisitor && employee) {
       
-      // Get employee's PPE matrix (eligibility)
-      const eligibility = await JobTitlePPEMatrix.findAll({
-        where: { jobTitleId: employee.jobTitleId },
+      // ==========================================
+      // Get employee's PPE matrix from BOTH sources
+      // ==========================================
+      
+      // 1. Job Title Matrix
+      const jobTitleEligibility = await JobTitlePPEMatrix.findAll({
+        where: { jobTitleId: employee.jobTitleId, isActive: true },
         include: [{ model: PPEItem, as: 'ppeItem' }]
       });
 
-      const eligibleItemIds = eligibility.map(e => e.ppeItemId);
+      // 2. Section Matrix
+      const sectionEligibility = await SectionPPEMatrix.findAll({
+        where: { sectionId: employee.sectionId, isActive: true },
+        include: [{ model: PPEItem, as: 'ppeItem' }]
+      });
+
+      // Merge both - Job Title takes priority for duplicates
+      const eligibilityMap = new Map();
+      
+      // Add section items first (baseline)
+      for (const entry of sectionEligibility) {
+        eligibilityMap.set(entry.ppeItemId, entry);
+      }
+      
+      // Add job title items (override)
+      for (const entry of jobTitleEligibility) {
+        eligibilityMap.set(entry.ppeItemId, entry);
+      }
+
+      const eligibleItemIds = Array.from(eligibilityMap.keys());
 
       // Get employee's current allocations
       const currentAllocations = await Allocation.findAll({
@@ -286,25 +315,25 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
         case 'annual':
           // Annual: Can only request when due based on last issue date
           for (const item of items) {
-            // Check if item is in employee's matrix
+            // Check if item is in employee's matrix (job title OR section)
             if (!eligibleItemIds.includes(item.ppeItemId)) {
               await transaction.rollback();
               return res.status(400).json({
                 success: false,
-                message: `Item is not in employee's PPE matrix for annual issue`
+                message: `Item is not in employee's PPE matrix (job title or section) for annual issue`
               });
             }
 
             // Check if item is due
             const allocation = currentAllocations.find(a => a.ppeItemId === item.ppeItemId);
-            const matrixItem = eligibility.find(e => e.ppeItemId === item.ppeItemId);
+            const matrixItem = eligibilityMap.get(item.ppeItemId);
             
             if (allocation) {
               const nextDueDate = new Date(allocation.nextRenewalDate);
               const today = new Date();
               
               if (today < nextDueDate) {
-                const itemName = matrixItem?.ppeItemRef?.name || 'Unknown item';
+                const itemName = matrixItem?.ppeItem?.name || 'Unknown item';
                 await transaction.rollback();
                 return res.status(400).json({
                   success: false,
@@ -321,13 +350,13 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
           break;
 
         case 'replacement':
-          // Replacement: Can request before due date, but only items in matrix
+          // Replacement: Can request before due date, but only items in matrix (job title OR section)
           for (const item of items) {
             if (!eligibleItemIds.includes(item.ppeItemId)) {
               await transaction.rollback();
               return res.status(400).json({
                 success: false,
-                message: 'Replacement items must be within employee\'s PPE matrix'
+                message: 'Replacement items must be within employee\'s PPE matrix (job title or section)'
               });
             }
           }
@@ -570,7 +599,7 @@ router.put('/:id/dept-rep-approve', authenticate, authorize(['department-rep', '
  * @desc    HOD approves request
  * @access  Private (HOD only)
  */
-router.put('/:id/hod-approve', authenticate, authorize(['hod-hos', 'admin']), auditLog('UPDATE', 'Request'), async (req, res) => {
+router.put('/:id/hod-approve', authenticate, authorize(['hod', 'admin']), auditLog('UPDATE', 'Request'), async (req, res) => {
   try {
     const { comment } = req.body;
     

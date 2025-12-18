@@ -1,0 +1,5 @@
+# Backup files are stored here
+# This directory is automatically managed by the backup system
+
+*.sql
+!.gitkeep
