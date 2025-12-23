@@ -32,17 +32,17 @@ const Stock = sequelize.define('Stock', {
     comment: 'Reorder point to trigger purchase requests'
   },
   unitCost: {
-    type: DataTypes.DECIMAL(12, 2),
+    type: DataTypes.DECIMAL(12, 6),
     allowNull: true,
     comment: 'Unit cost in local currency'
   },
   unitPriceUSD: {
-    type: DataTypes.DECIMAL(12, 2),
+    type: DataTypes.DECIMAL(12, 6),
     allowNull: true,
     comment: 'Unit price in USD'
   },
   totalValueUSD: {
-    type: DataTypes.DECIMAL(15, 2),
+    type: DataTypes.DECIMAL(15, 6),
     allowNull: true,
     comment: 'Total stock value (quantity × unit price) in USD'
   },
@@ -112,14 +112,17 @@ const Stock = sequelize.define('Stock', {
   indexes: [
     {
       unique: true,
-      fields: ['ppe_item_id', 'size', 'color', 'location'],
-      name: 'unique_stock_variant'
+      fields: ['ppe_item_id', 'size', 'color', 'location', 'batch_number'],
+      name: 'unique_stock_variant_batch'
     },
     {
       fields: ['ppe_item_id']
     },
     {
       fields: ['location']
+    },
+    {
+      fields: ['batch_number']
     }
   ]
 });

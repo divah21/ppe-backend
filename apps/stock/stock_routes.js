@@ -580,7 +580,8 @@ router.post(
         created: [],
         updated: [],
         skipped: [],
-        errors: []
+        errors: [],
+        catalogCreated: []  // Track auto-created PPE catalogue items
       };
 
       // Size patterns to extract from descriptions
@@ -737,14 +738,93 @@ router.post(
             }
           }
 
+          // If PPE item not found, auto-create it in the catalogue
           if (!ppeItem) {
-            results.errors.push({
-              itemRefCode,
-              fullDescription,
-              productName,
-              error: `PPE catalog item not found. Tried matching: itemRefCode="${itemRefCode}", productName="${productName}". Please ensure the item exists in PPE Catalog first.`
-            });
-            continue;
+            try {
+              // Determine category from common PPE types based on product name
+              const determinePPECategory = (name, description) => {
+                const text = `${name || ''} ${description || ''}`.toUpperCase();
+                
+                if (text.includes('GLOVE') || text.includes('MITTEN')) return 'HANDS';
+                if (text.includes('SHOE') || text.includes('BOOT') || text.includes('GUMBOOT') || text.includes('GUM SHOE') || text.includes('SPAT')) return 'FEET';
+                if (text.includes('HELMET') || text.includes('HARD HAT') || text.includes('CAP') || text.includes('VISOR') || text.includes('LINER')) return 'HEAD';
+                if (text.includes('GLASS') || text.includes('GOGGLE') || text.includes('SHIELD') || text.includes('FACE')) return 'EYES/FACE';
+                if (text.includes('EAR') || text.includes('MUFF') || text.includes('PLUG')) return 'EARS';
+                if (text.includes('MASK') || text.includes('RESPIRATOR') || text.includes('FILTER')) return 'RESPIRATORY';
+                if (text.includes('WORKSUIT') || text.includes('OVERALL') || text.includes('JACKET') || text.includes('TROUSER') || text.includes('SHIRT') || text.includes('APRON') || text.includes('SUIT')) return 'BODY/TORSO';
+                if (text.includes('BELT') || text.includes('KIDNEY')) return 'BODY/TORSO';
+                if (text.includes('LIFE JACKET') || text.includes('THERMAL')) return 'FULL BODY';
+                return 'GENERAL';
+              };
+
+              // Determine if item has size variants based on product type
+              const determineHasSizes = (name, description) => {
+                const text = `${name || ''} ${description || ''}`.toUpperCase();
+                
+                // Items that typically have sizes
+                if (text.includes('WORKSUIT') || text.includes('OVERALL') || text.includes('JACKET') || 
+                    text.includes('TROUSER') || text.includes('SHIRT') || text.includes('SHOE') || 
+                    text.includes('BOOT') || text.includes('GLOVE') || text.includes('SUIT')) {
+                  return true;
+                }
+                return false;
+              };
+
+              // Generate a unique item code if not provided
+              const generateItemCode = async (baseName) => {
+                const prefix = baseName.substring(0, 3).toUpperCase().replace(/[^A-Z]/g, '');
+                const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+                const code = `${prefix}-${randomSuffix}`;
+                
+                // Check if code exists
+                const existing = await PPEItem.findOne({ where: { itemCode: code } });
+                if (existing) {
+                  // Retry with different suffix
+                  const newSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+                  return `${prefix}-${newSuffix}`;
+                }
+                return code;
+              };
+
+              const category = determinePPECategory(productName, fullDescription);
+              const hasSizeVariants = determineHasSizes(productName, fullDescription);
+              const itemCode = await generateItemCode(productName || 'PPE');
+
+              // Create the PPE catalogue item
+              ppeItem = await PPEItem.create({
+                itemCode,
+                itemRefCode: itemRefCode || null,
+                name: productName || fullDescription?.substring(0, 100) || 'Unknown Item',
+                productName: fullDescription?.substring(0, 255) || productName,
+                itemType: 'PPE',
+                category,
+                description: fullDescription,
+                unit: unit || 'EA',
+                accountCode: accountCode || 'PPEQ',
+                accountDescription: accountDescription || 'Personal Protective Equipment',
+                hasSizeVariants,
+                hasColorVariants: false,
+                isActive: true
+              });
+
+              matchedBy = 'auto-created';
+              results.catalogCreated.push({
+                id: ppeItem.id,
+                itemCode: ppeItem.itemCode,
+                itemRefCode: ppeItem.itemRefCode,
+                name: ppeItem.name,
+                category: ppeItem.category,
+                hasSizeVariants: ppeItem.hasSizeVariants
+              });
+            } catch (createError) {
+              results.errors.push({
+                itemRefCode,
+                fullDescription,
+                productName,
+                error: `Failed to auto-create PPE catalogue item: ${createError.message}`
+              });
+              continue;
+            }
           }
 
           // Extract size and color - prefer Excel values over extracted from description
@@ -772,12 +852,16 @@ router.post(
           }
 
           // Check if stock entry already exists for this variant
+          // Use itemRefCode as batchNumber for uniqueness - each Excel row with unique ITMREF_0 gets its own stock entry
+          const stockBatchNumber = itemRefCode || batchNumber || null;
+          
           const existingStock = await Stock.findOne({
             where: {
               ppeItemId: ppeItem.id,
               size: extractedSize,
               color: extractedColor,
-              location: location || 'Main Store'
+              location: location || 'Main Store',
+              batchNumber: stockBatchNumber
             }
           });
 
@@ -814,6 +898,7 @@ router.post(
             }
           } else {
             // Create new stock entry
+            // Use itemRefCode as batchNumber to ensure each unique ITMREF_0 creates a separate stock entry
             const newStock = await Stock.create({
               ppeItemId: ppeItem.id,
               quantity: parseInt(quantity) || 0,
@@ -825,7 +910,7 @@ router.post(
               location: location || 'Main Store',
               stockAccount: accountCode || null,
               expiryDate: parsedExpiryDate,
-              batchNumber: batchNumber || null,
+              batchNumber: stockBatchNumber,
               notes: fullDescription || null,
               lastRestocked: quantity > 0 ? new Date() : null
             });
@@ -837,7 +922,8 @@ router.post(
               matchedBy,
               size: extractedSize,
               color: extractedColor,
-              quantity: parseInt(quantity) || 0
+              quantity: parseInt(quantity) || 0,
+              unitPrice: unitPrice ? parseFloat(unitPrice) : 0
             });
           }
         } catch (err) {
@@ -851,13 +937,14 @@ router.post(
 
       res.status(201).json({
         success: true,
-        message: `Bulk upload completed: ${results.created.length} created, ${results.updated.length} updated, ${results.skipped.length} skipped, ${results.errors.length} errors`,
+        message: `Bulk upload completed: ${results.created.length} stock created, ${results.updated.length} updated, ${results.skipped.length} skipped, ${results.catalogCreated.length} PPE items auto-created, ${results.errors.length} errors`,
         data: results,
         summary: {
           total: items.length,
           created: results.created.length,
           updated: results.updated.length,
           skipped: results.skipped.length,
+          catalogCreated: results.catalogCreated.length,
           errors: results.errors.length
         }
       });
