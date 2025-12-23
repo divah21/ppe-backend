@@ -1,11 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const { Allocation, Employee, PPEItem, User, Request, RequestItem, Stock, Section, Department } = require('../../models');
+const { Allocation, Employee, PPEItem, User, Request, RequestItem, Stock, Section, Department, Budget, Role } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../database/db');
+const { sendBudgetThresholdWarning, sendLowStockAlert } = require('../../helpers/email_helper');
 
 /**
  * @route   GET /api/v1/allocations/summaries
@@ -447,6 +448,7 @@ router.post(
       }
 
       const createdAllocations = [];
+      const lowStockItems = []; // Track items that fall below reorder level
 
       // Process each allocation
       for (const allocItem of allocationData) {
@@ -524,6 +526,22 @@ router.post(
         }, { transaction });
 
         createdAllocations.push(allocation);
+
+        // Check low stock after deduction and queue alert if needed
+        const updatedStock = await Stock.findOne({ 
+          where: { ppeItemId: requestItem.ppeItemId },
+          transaction 
+        });
+        
+        if (updatedStock && updatedStock.quantity <= (updatedStock.reorderLevel || 10)) {
+          // Queue low stock alert (will be sent after transaction commits)
+          lowStockItems.push({
+            itemName: requestItem.ppeItem.name,
+            currentStock: updatedStock.quantity,
+            reorderLevel: updatedStock.reorderLevel || 10,
+            size: updatedStock.size || null
+          });
+        }
       }
 
       // Mark request as fulfilled
@@ -534,6 +552,94 @@ router.post(
       }, { transaction });
 
       await transaction.commit();
+
+      // Post-commit: Send low stock alerts to Stores users
+      if (lowStockItems.length > 0) {
+        try {
+          const storesRole = await Role.findOne({ where: { name: 'stores' } });
+          if (storesRole) {
+            const storesUsers = await User.findAll({
+              where: { roleId: storesRole.id, isActive: true },
+              include: [{ model: Employee, as: 'employee' }]
+            });
+
+            for (const item of lowStockItems) {
+              for (const storesUser of storesUsers) {
+                const email = storesUser.employee?.email || storesUser.email;
+                if (email) {
+                  await sendLowStockAlert({
+                    storesPersonName: storesUser.employee?.fullName || storesUser.username,
+                    storesPersonEmail: email,
+                    itemName: item.itemName,
+                    currentStock: item.currentStock,
+                    reorderLevel: item.reorderLevel,
+                    size: item.size
+                  });
+                }
+              }
+            }
+          }
+        } catch (emailError) {
+          console.error('Error sending low stock alerts:', emailError);
+        }
+      }
+
+      // Post-commit: Check department budget threshold and send warning
+      try {
+        const employee = request.targetEmployee;
+        if (employee?.section?.departmentId) {
+          const departmentId = employee.section.departmentId;
+          const fiscalYear = new Date().getFullYear();
+          
+          const budget = await Budget.findOne({
+            where: { departmentId, fiscalYear },
+            include: [{ model: Department, as: 'department' }]
+          });
+
+          if (budget) {
+            // Calculate total allocation cost for this request
+            const totalRequestCost = createdAllocations.reduce((sum, alloc) => sum + parseFloat(alloc.totalCost || 0), 0);
+            
+            // Update budget spent amount
+            const newSpent = parseFloat(budget.totalSpent || 0) + totalRequestCost;
+            await budget.update({ 
+              totalSpent: newSpent,
+              remainingBudget: parseFloat(budget.allocatedAmount || 0) - newSpent
+            });
+
+            // Check if budget exceeds threshold (80%)
+            const utilizationPercent = (newSpent / parseFloat(budget.allocatedAmount || 1)) * 100;
+            if (utilizationPercent >= 80) {
+              const hodRole = await Role.findOne({ where: { name: 'hod' } });
+              if (hodRole) {
+                const hodUsers = await User.findAll({
+                  where: { roleId: hodRole.id, departmentId, isActive: true },
+                  include: [{ model: Employee, as: 'employee' }]
+                });
+
+                for (const hodUser of hodUsers) {
+                  const hodEmail = hodUser.employee?.email || hodUser.email;
+                  if (hodEmail) {
+                    await sendBudgetThresholdWarning({
+                      hodName: hodUser.employee?.fullName || hodUser.username,
+                      hodEmail,
+                      departmentName: budget.department?.name || 'Your Department',
+                      budget: {
+                        fiscalYear,
+                        allocatedAmount: budget.allocatedAmount,
+                        spentAmount: newSpent,
+                        utilizationPercent: utilizationPercent.toFixed(1)
+                      }
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch (budgetError) {
+        console.error('Error checking budget threshold:', budgetError);
+      }
 
       // Get allocations with relations
       const fullAllocations = await Allocation.findAll({

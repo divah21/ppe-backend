@@ -56,7 +56,25 @@ const Budget = sequelize.define('Budget', {
     validate: {
       min: 0
     },
-    comment: 'Amount allocated from company budget to this dept/section'
+    comment: 'Total amount allocated (suggestedAmount + additionalAmount)'
+  },
+  suggestedAmount: {
+    type: DataTypes.DECIMAL(14, 2),
+    allowNull: true,
+    defaultValue: 0,
+    validate: {
+      min: 0
+    },
+    comment: 'System-calculated amount based on PPE Matrix (read-only)'
+  },
+  additionalAmount: {
+    type: DataTypes.DECIMAL(14, 2),
+    allowNull: true,
+    defaultValue: 0,
+    validate: {
+      min: 0
+    },
+    comment: 'Additional allocation beyond suggested amount'
   },
   totalSpent: {
     type: DataTypes.DECIMAL(14, 2),

@@ -8,6 +8,7 @@ const { auditLog } = require('../../middlewares/audit_middleware');
 const { createEmployeeValidation, updateEmployeeValidation, bulkUploadEmployeeValidation } = require('../../validations/employee_validation');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../database/db');
+const { sendEmployeeOnboardedEmail } = require('../../helpers/email_helper');
 
 /**
  * @route   GET /api/v1/employees
@@ -472,6 +473,24 @@ router.post(
         ]
       });
 
+      // Send onboarding email if employee has email
+      if (createdEmployee.email) {
+        try {
+          await sendEmployeeOnboardedEmail({
+            firstName: createdEmployee.firstName,
+            lastName: createdEmployee.lastName,
+            email: createdEmployee.email,
+            worksNumber: createdEmployee.worksNumber,
+            department: createdEmployee.section?.department?.name,
+            section: createdEmployee.section?.name,
+            jobTitle: createdEmployee.jobTitleRef?.name || createdEmployee.jobType
+          });
+        } catch (emailError) {
+          console.error('Failed to send onboarding email:', emailError.message);
+          // Don't fail the request if email fails
+        }
+      }
+
       res.status(201).json({
         success: true,
         message: 'Employee created successfully',
@@ -643,7 +662,7 @@ router.post(
     const transaction = await sequelize.transaction();
     
     try {
-      const { employees, skipDuplicates = true } = req.body;
+      const { employees, skipDuplicates = true, sendOnboardingEmails = false } = req.body;
 
       if (!Array.isArray(employees) || employees.length === 0) {
         return res.status(400).json({
@@ -797,13 +816,66 @@ router.post(
       // Only commit if we have successful creates
       if (results.created.length > 0) {
         await transaction.commit();
+
+        // Send onboarding emails if requested (after commit)
+        if (sendOnboardingEmails) {
+          let emailsSent = 0;
+          let emailsFailed = 0;
+
+          for (const created of results.created) {
+            try {
+              // Fetch the full employee record with relations
+              const employee = await Employee.findByPk(created.id, {
+                include: [
+                  {
+                    model: Section,
+                    as: 'section',
+                    include: [{ model: Department, as: 'department' }]
+                  },
+                  {
+                    model: JobTitle,
+                    as: 'jobTitleRef',
+                    required: false
+                  }
+                ]
+              });
+
+              if (employee?.email) {
+                await sendEmployeeOnboardedEmail({
+                  firstName: employee.firstName,
+                  lastName: employee.lastName,
+                  email: employee.email,
+                  worksNumber: employee.worksNumber,
+                  department: employee.section?.department?.name,
+                  section: employee.section?.name,
+                  jobTitle: employee.jobTitleRef?.name || employee.jobType
+                });
+                emailsSent++;
+              }
+            } catch (emailError) {
+              console.error(`Failed to send onboarding email for ${created.worksNumber}:`, emailError.message);
+              emailsFailed++;
+            }
+          }
+
+          // Add email stats to response
+          results.emailStats = {
+            sent: emailsSent,
+            failed: emailsFailed,
+            skipped: results.created.length - emailsSent - emailsFailed // No email address
+          };
+        }
       } else {
         await transaction.rollback();
       }
 
+      const emailInfo = sendOnboardingEmails && results.emailStats 
+        ? `, ${results.emailStats.sent} emails sent` 
+        : '';
+
       res.status(results.created.length > 0 ? 201 : 400).json({
         success: results.created.length > 0,
-        message: `Bulk upload complete: ${results.created.length} created, ${results.skipped.length} skipped, ${results.errors.length} errors`,
+        message: `Bulk upload complete: ${results.created.length} created, ${results.skipped.length} skipped, ${results.errors.length} errors${emailInfo}`,
         data: results
       });
 

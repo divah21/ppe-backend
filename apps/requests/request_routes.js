@@ -1,11 +1,17 @@
 const express = require('express');
 const router = express.Router();
-const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock, JobTitlePPEMatrix, SectionPPEMatrix, JobTitle } = require('../../models');
+const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock, JobTitlePPEMatrix, SectionPPEMatrix, JobTitle, Role } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { authorize } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../database/db');
+const { 
+  sendRequestSubmittedToHOD, 
+  sendRequestApprovedToStores, 
+  sendPPEReadyForCollection,
+  sendRequestRejectedEmail 
+} = require('../../helpers/email_helper');
 
 // Helper function to include User with Employee name data
 const userInclude = (alias) => ({
@@ -520,6 +526,47 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
       ]
     });
 
+    // Send email notification to HOD if request is forwarded to HOD review
+    if (nextStatus === 'hod-review') {
+      try {
+        const section = updatedRequest.targetEmployee?.section;
+        const departmentId = section?.departmentId;
+        
+        if (departmentId) {
+          const hodRole = await Role.findOne({ where: { name: 'hod' } });
+          if (hodRole) {
+            const hodUsers = await User.findAll({
+              where: { roleId: hodRole.id, departmentId, isActive: true },
+              include: [{ model: Employee, as: 'employee' }]
+            });
+
+            const ppeItems = updatedRequest.items?.map(item => ({
+              name: item.ppeItem?.name || 'Unknown Item',
+              quantity: item.quantity
+            })) || [];
+
+            for (const hodUser of hodUsers) {
+              const hodEmail = hodUser.employee?.email || hodUser.email;
+              if (hodEmail) {
+                await sendRequestSubmittedToHOD({
+                  hodName: hodUser.employee?.fullName || hodUser.username,
+                  hodEmail,
+                  employeeName: updatedRequest.targetEmployee?.fullName || 'Unknown Employee',
+                  sectionName: section?.name || 'Unknown Section',
+                  departmentName: section?.department?.name || 'Unknown Department',
+                  requestType: request.requestType,
+                  ppeItems,
+                  requestId: request.id
+                });
+              }
+            }
+          }
+        }
+      } catch (emailError) {
+        console.error('Error sending notification to HOD:', emailError);
+      }
+    }
+
     res.json({
       success: true,
       message: successMessage,
@@ -636,6 +683,51 @@ router.put('/:id/hod-approve', authenticate, authorize(['hod', 'admin']), auditL
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ]
     });
+
+    // Send email notification to Stores
+    try {
+      const storesRole = await Role.findOne({ where: { name: 'stores' } });
+      if (storesRole) {
+        const storesUsers = await User.findAll({
+          where: { roleId: storesRole.id, isActive: true },
+          include: [{ model: Employee, as: 'employee', attributes: ['email'] }]
+        });
+        const storesEmails = storesUsers
+          .map(u => u.employee?.email)
+          .filter(email => email);
+        
+        if (storesEmails.length > 0) {
+          const employee = updatedRequest.targetEmployee;
+          const items = updatedRequest.items?.map(item => ({
+            name: item.ppeItem?.name || item.ppeItemId,
+            quantity: item.quantity,
+            size: item.size
+          }));
+          
+          await sendRequestApprovedToStores(
+            { 
+              id: updatedRequest.id, 
+              requestNumber: updatedRequest.requestNumber,
+              items 
+            },
+            {
+              firstName: employee.firstName,
+              lastName: employee.lastName,
+              worksNumber: employee.worksNumber,
+              department: employee.section?.department?.name,
+              section: employee.section?.name
+            },
+            { 
+              firstName: req.user.employee?.firstName || 'HOD',
+              lastName: req.user.employee?.lastName || ''
+            },
+            storesEmails
+          );
+        }
+      }
+    } catch (emailError) {
+      console.error('Failed to send stores notification email:', emailError.message);
+    }
 
     res.json({
       success: true,
@@ -817,6 +909,21 @@ router.put('/:id/reject', authenticate, auditLog('UPDATE', 'Request'), async (re
       ]
     });
 
+    // Send rejection email to employee
+    try {
+      const employee = updatedRequest.targetEmployee;
+      if (employee?.email) {
+        await sendRequestRejectedEmail(
+          { id: updatedRequest.id, requestNumber: updatedRequest.requestNumber || updatedRequest.id.slice(0, 8) },
+          { firstName: employee.firstName, lastName: employee.lastName, email: employee.email },
+          { firstName: req.user.employee?.firstName || 'Approver', lastName: req.user.employee?.lastName || '' },
+          rejectionReason
+        );
+      }
+    } catch (emailError) {
+      console.error('Failed to send rejection notification:', emailError.message);
+    }
+
     res.json({
       success: true,
       message: 'Request rejected',
@@ -936,6 +1043,26 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ]
     });
+
+    // Send email notification to employee about PPE ready for collection
+    try {
+      const employee = updatedRequest.targetEmployee;
+      if (employee?.email) {
+        const allocatedItems = updatedRequest.items?.map(item => ({
+          name: item.ppeItem?.name || 'PPE Item',
+          quantity: item.quantity,
+          size: item.size || 'Standard'
+        }));
+
+        await sendPPEReadyForCollection(
+          { id: updatedRequest.id, requestNumber: updatedRequest.requestNumber || updatedRequest.id.slice(0, 8) },
+          { firstName: employee.firstName, lastName: employee.lastName, email: employee.email },
+          allocatedItems
+        );
+      }
+    } catch (emailError) {
+      console.error('Failed to send PPE collection notification:', emailError.message);
+    }
 
     res.json({
       success: true,

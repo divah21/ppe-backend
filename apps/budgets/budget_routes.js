@@ -1,10 +1,437 @@
 const express = require('express');
 const router = express.Router();
-const { CompanyBudget, Budget, Department, Section, Allocation, Employee } = require('../../models');
+const { CompanyBudget, Budget, Department, Section, Allocation, Employee, JobTitle, JobTitlePPEMatrix, SectionPPEMatrix, PPEItem, Stock, User, Role } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op, Sequelize } = require('sequelize');
+const { sendBudgetAllocatedEmail, sendBudgetThresholdWarning } = require('../../helpers/email_helper');
+
+// ============================================================
+// SUGGESTED BUDGET ROUTES (Based on PPE Matrix)
+// ============================================================
+
+/**
+ * @route   GET /api/v1/budgets/suggested
+ * @desc    Get suggested budget for all departments based on PPE Matrix
+ * @access  Private (Admin, Stores, HOD)
+ */
+router.get('/suggested', authenticate, async (req, res) => {
+  try {
+    const { fiscalYear = new Date().getFullYear(), departmentId } = req.query;
+
+    // Get all departments or specific one
+    const departmentWhere = departmentId ? { id: departmentId } : {};
+    const departments = await Department.findAll({
+      where: departmentWhere,
+      include: [{
+        model: Section,
+        as: 'sections',
+        include: [{
+          model: Employee,
+          as: 'employees',
+          where: { isActive: true },
+          required: false,
+          include: [{
+            model: JobTitle,
+            as: 'jobTitleRef',
+            required: false
+          }]
+        }]
+      }],
+      order: [['name', 'ASC']]
+    });
+
+    // Get all PPE items with their current stock prices
+    const ppeItems = await PPEItem.findAll({
+      where: { isActive: true },
+      include: [{
+        model: Stock,
+        as: 'stocks',
+        attributes: ['unitPriceUSD'],
+        limit: 1
+      }]
+    });
+
+    // Create a price map for PPE items
+    const ppeItemPrices = {};
+    ppeItems.forEach(item => {
+      // Use stock price if available, otherwise default to 0
+      const stockPrice = item.stocks && item.stocks[0] ? parseFloat(item.stocks[0].unitPriceUSD || 0) : 0;
+      ppeItemPrices[item.id] = stockPrice;
+    });
+
+    // Get all job title matrix entries
+    const jobTitleMatrix = await JobTitlePPEMatrix.findAll({
+      where: { isActive: true },
+      include: [{
+        model: PPEItem,
+        as: 'ppeItem',
+        attributes: ['id', 'name', 'itemCode']
+      }]
+    });
+
+    // Get all section matrix entries
+    const sectionMatrix = await SectionPPEMatrix.findAll({
+      where: { isActive: true },
+      include: [{
+        model: PPEItem,
+        as: 'ppeItem',
+        attributes: ['id', 'name', 'itemCode']
+      }]
+    });
+
+    // Create maps for quick lookup
+    const jobTitleMatrixMap = {}; // jobTitleId -> PPE requirements
+    jobTitleMatrix.forEach(entry => {
+      const key = entry.jobTitleId || entry.jobTitle;
+      if (!key) return;
+      if (!jobTitleMatrixMap[key]) {
+        jobTitleMatrixMap[key] = [];
+      }
+      jobTitleMatrixMap[key].push(entry);
+    });
+
+    const sectionMatrixMap = {}; // sectionId -> PPE requirements
+    sectionMatrix.forEach(entry => {
+      if (!sectionMatrixMap[entry.sectionId]) {
+        sectionMatrixMap[entry.sectionId] = [];
+      }
+      sectionMatrixMap[entry.sectionId].push(entry);
+    });
+
+    // Calculate suggested budget for each department
+    const departmentSuggestedBudgets = [];
+    let overallSuggestedBudget = 0;
+
+    for (const department of departments) {
+      let departmentTotal = 0;
+      const sectionBreakdowns = [];
+      let totalEmployees = 0;
+      let employeesWithMatrix = 0;
+
+      for (const section of department.sections || []) {
+        let sectionTotal = 0;
+        const employees = section.employees || [];
+        const sectionEmployeeCount = employees.length;
+        totalEmployees += sectionEmployeeCount;
+
+        // Get section-level PPE requirements
+        const sectionReqs = sectionMatrixMap[section.id] || [];
+
+        for (const employee of employees) {
+          let employeeTotal = 0;
+          const appliedItems = new Set(); // Track items already applied
+          let hasMatrixItems = false;
+
+          // 1. Apply Job Title PPE requirements first (higher priority)
+          const jobTitleKey = employee.jobTitleId || employee.jobTitleRef?.id;
+          const jobTitleReqs = jobTitleKey ? jobTitleMatrixMap[jobTitleKey] : [];
+
+          // Also check by job title string (legacy support)
+          const jobTitleStringReqs = employee.jobTitle ? jobTitleMatrixMap[employee.jobTitle] : [];
+          const allJobTitleReqs = [...(jobTitleReqs || []), ...(jobTitleStringReqs || [])];
+
+          for (const req of allJobTitleReqs) {
+            if (appliedItems.has(req.ppeItemId)) continue;
+            const price = ppeItemPrices[req.ppeItemId] || 0;
+            const cost = price * (req.quantityRequired || 1);
+            employeeTotal += cost;
+            appliedItems.add(req.ppeItemId);
+            if (cost > 0) hasMatrixItems = true;
+          }
+
+          // 2. Apply Section PPE requirements (only for items not already applied)
+          for (const req of sectionReqs) {
+            if (appliedItems.has(req.ppeItemId)) continue;
+            const price = ppeItemPrices[req.ppeItemId] || 0;
+            const cost = price * (req.quantityRequired || 1);
+            employeeTotal += cost;
+            appliedItems.add(req.ppeItemId);
+            if (cost > 0) hasMatrixItems = true;
+          }
+
+          sectionTotal += employeeTotal;
+          if (hasMatrixItems) employeesWithMatrix++;
+        }
+
+        sectionBreakdowns.push({
+          sectionId: section.id,
+          sectionName: section.name,
+          employeeCount: sectionEmployeeCount,
+          suggestedBudget: parseFloat(sectionTotal.toFixed(2))
+        });
+
+        departmentTotal += sectionTotal;
+      }
+
+      departmentSuggestedBudgets.push({
+        departmentId: department.id,
+        departmentName: department.name,
+        departmentCode: department.code,
+        suggestedBudget: parseFloat(departmentTotal.toFixed(2)),
+        totalEmployees,
+        employeesWithMatrix,
+        sections: sectionBreakdowns
+      });
+
+      overallSuggestedBudget += departmentTotal;
+    }
+
+    // Get current year's actual allocations for comparison
+    const yearStart = new Date(fiscalYear, 0, 1);
+    const yearEnd = new Date(fiscalYear, 11, 31, 23, 59, 59);
+
+    const allocations = await Allocation.findAll({
+      where: {
+        issueDate: { [Op.between]: [yearStart, yearEnd] }
+      },
+      attributes: [[Sequelize.fn('SUM', Sequelize.col('total_cost')), 'totalSpent']],
+      raw: true
+    });
+
+    const currentYearSpent = parseFloat(allocations[0]?.totalSpent || 0);
+
+    // Get current manual budgets for comparison
+    const companyBudget = await CompanyBudget.findOne({
+      where: { fiscalYear, status: 'active' }
+    });
+
+    const departmentBudgets = await Budget.findAll({
+      where: { fiscalYear },
+      include: [{ model: Department, as: 'department', attributes: ['id', 'name', 'code'] }]
+    });
+
+    // Map manual budgets by department
+    const manualBudgetMap = {};
+    departmentBudgets.forEach(b => {
+      manualBudgetMap[b.departmentId] = parseFloat(b.allocatedAmount || 0);
+    });
+
+    // Enrich with manual budget comparison
+    departmentSuggestedBudgets.forEach(dept => {
+      dept.manualBudget = manualBudgetMap[dept.departmentId] || 0;
+      dept.difference = parseFloat((dept.suggestedBudget - dept.manualBudget).toFixed(2));
+      dept.differencePercent = dept.manualBudget > 0 
+        ? parseFloat((((dept.suggestedBudget - dept.manualBudget) / dept.manualBudget) * 100).toFixed(2))
+        : 0;
+    });
+
+    res.json({
+      success: true,
+      data: {
+        fiscalYear: parseInt(fiscalYear),
+        overallSuggestedBudget: parseFloat(overallSuggestedBudget.toFixed(2)),
+        currentManualBudget: companyBudget ? parseFloat(companyBudget.totalBudget) : 0,
+        currentYearSpent: parseFloat(currentYearSpent.toFixed(2)),
+        budgetDifference: parseFloat((overallSuggestedBudget - (companyBudget?.totalBudget || 0)).toFixed(2)),
+        departments: departmentSuggestedBudgets,
+        summary: {
+          totalDepartments: departmentSuggestedBudgets.length,
+          totalEmployees: departmentSuggestedBudgets.reduce((sum, d) => sum + d.totalEmployees, 0),
+          employeesWithMatrix: departmentSuggestedBudgets.reduce((sum, d) => sum + d.employeesWithMatrix, 0),
+          avgBudgetPerEmployee: departmentSuggestedBudgets.reduce((sum, d) => sum + d.totalEmployees, 0) > 0
+            ? parseFloat((overallSuggestedBudget / departmentSuggestedBudgets.reduce((sum, d) => sum + d.totalEmployees, 0)).toFixed(2))
+            : 0
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error calculating suggested budget:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to calculate suggested budget',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   GET /api/v1/budgets/suggested/department/:departmentId
+ * @desc    Get detailed suggested budget for a specific department
+ * @access  Private
+ */
+router.get('/suggested/department/:departmentId', authenticate, async (req, res) => {
+  try {
+    const { departmentId } = req.params;
+    const { fiscalYear = new Date().getFullYear() } = req.query;
+
+    const department = await Department.findByPk(departmentId, {
+      include: [{
+        model: Section,
+        as: 'sections',
+        include: [{
+          model: Employee,
+          as: 'employees',
+          where: { isActive: true },
+          required: false,
+          include: [{
+            model: JobTitle,
+            as: 'jobTitleRef',
+            required: false
+          }]
+        }]
+      }]
+    });
+
+    if (!department) {
+      return res.status(404).json({
+        success: false,
+        message: 'Department not found'
+      });
+    }
+
+    // Get PPE items with prices
+    const ppeItems = await PPEItem.findAll({
+      where: { isActive: true },
+      include: [{
+        model: Stock,
+        as: 'stocks',
+        attributes: ['unitPriceUSD'],
+        limit: 1
+      }]
+    });
+
+    const ppeItemPrices = {};
+    const ppeItemDetails = {};
+    ppeItems.forEach(item => {
+      ppeItemPrices[item.id] = item.stocks && item.stocks[0] ? parseFloat(item.stocks[0].unitPriceUSD || 0) : 0;
+      ppeItemDetails[item.id] = { name: item.name, code: item.itemCode };
+    });
+
+    // Get matrix entries
+    const jobTitleMatrix = await JobTitlePPEMatrix.findAll({ where: { isActive: true } });
+    const sectionMatrix = await SectionPPEMatrix.findAll({ where: { isActive: true } });
+
+    const jobTitleMatrixMap = {};
+    jobTitleMatrix.forEach(entry => {
+      const key = entry.jobTitleId || entry.jobTitle;
+      if (!key) return;
+      if (!jobTitleMatrixMap[key]) jobTitleMatrixMap[key] = [];
+      jobTitleMatrixMap[key].push(entry);
+    });
+
+    const sectionMatrixMap = {};
+    sectionMatrix.forEach(entry => {
+      if (!sectionMatrixMap[entry.sectionId]) sectionMatrixMap[entry.sectionId] = [];
+      sectionMatrixMap[entry.sectionId].push(entry);
+    });
+
+    // Calculate detailed breakdown
+    const sectionBreakdowns = [];
+    let departmentTotal = 0;
+    const ppeItemBreakdown = {}; // Track total cost per PPE item
+
+    for (const section of department.sections || []) {
+      const employees = section.employees || [];
+      const employeeBreakdowns = [];
+
+      for (const employee of employees) {
+        let employeeTotal = 0;
+        const appliedItems = [];
+
+        // Job Title requirements
+        const jobTitleKey = employee.jobTitleId || employee.jobTitleRef?.id;
+        const jobTitleReqs = jobTitleKey ? jobTitleMatrixMap[jobTitleKey] : [];
+        const jobTitleStringReqs = employee.jobTitle ? jobTitleMatrixMap[employee.jobTitle] : [];
+        const allJobTitleReqs = [...(jobTitleReqs || []), ...(jobTitleStringReqs || [])];
+
+        const appliedItemIds = new Set();
+        for (const req of allJobTitleReqs) {
+          if (appliedItemIds.has(req.ppeItemId)) continue;
+          const price = ppeItemPrices[req.ppeItemId] || 0;
+          const cost = price * (req.quantityRequired || 1);
+          appliedItems.push({
+            ppeItemId: req.ppeItemId,
+            ppeItemName: ppeItemDetails[req.ppeItemId]?.name || 'Unknown',
+            quantity: req.quantityRequired || 1,
+            unitPrice: price,
+            totalCost: cost,
+            source: 'job_title'
+          });
+          employeeTotal += cost;
+          appliedItemIds.add(req.ppeItemId);
+
+          // Track for breakdown
+          if (!ppeItemBreakdown[req.ppeItemId]) {
+            ppeItemBreakdown[req.ppeItemId] = { name: ppeItemDetails[req.ppeItemId]?.name, quantity: 0, totalCost: 0 };
+          }
+          ppeItemBreakdown[req.ppeItemId].quantity += req.quantityRequired || 1;
+          ppeItemBreakdown[req.ppeItemId].totalCost += cost;
+        }
+
+        // Section requirements
+        const sectionReqs = sectionMatrixMap[section.id] || [];
+        for (const req of sectionReqs) {
+          if (appliedItemIds.has(req.ppeItemId)) continue;
+          const price = ppeItemPrices[req.ppeItemId] || 0;
+          const cost = price * (req.quantityRequired || 1);
+          appliedItems.push({
+            ppeItemId: req.ppeItemId,
+            ppeItemName: ppeItemDetails[req.ppeItemId]?.name || 'Unknown',
+            quantity: req.quantityRequired || 1,
+            unitPrice: price,
+            totalCost: cost,
+            source: 'section'
+          });
+          employeeTotal += cost;
+          appliedItemIds.add(req.ppeItemId);
+
+          if (!ppeItemBreakdown[req.ppeItemId]) {
+            ppeItemBreakdown[req.ppeItemId] = { name: ppeItemDetails[req.ppeItemId]?.name, quantity: 0, totalCost: 0 };
+          }
+          ppeItemBreakdown[req.ppeItemId].quantity += req.quantityRequired || 1;
+          ppeItemBreakdown[req.ppeItemId].totalCost += cost;
+        }
+
+        employeeBreakdowns.push({
+          employeeId: employee.id,
+          worksNumber: employee.worksNumber,
+          employeeName: `${employee.firstName} ${employee.lastName}`,
+          jobTitle: employee.jobTitleRef?.name || employee.jobTitle || 'N/A',
+          itemCount: appliedItems.length,
+          suggestedBudget: parseFloat(employeeTotal.toFixed(2)),
+          items: appliedItems
+        });
+
+        departmentTotal += employeeTotal;
+      }
+
+      sectionBreakdowns.push({
+        sectionId: section.id,
+        sectionName: section.name,
+        employeeCount: employees.length,
+        suggestedBudget: parseFloat(employeeBreakdowns.reduce((sum, e) => sum + e.suggestedBudget, 0).toFixed(2)),
+        employees: employeeBreakdowns
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        fiscalYear: parseInt(fiscalYear),
+        departmentId: department.id,
+        departmentName: department.name,
+        departmentCode: department.code,
+        suggestedBudget: parseFloat(departmentTotal.toFixed(2)),
+        sections: sectionBreakdowns,
+        ppeItemBreakdown: Object.entries(ppeItemBreakdown).map(([id, data]) => ({
+          ppeItemId: id,
+          ppeItemName: data.name,
+          totalQuantity: data.quantity,
+          totalCost: parseFloat(data.totalCost.toFixed(2))
+        })).sort((a, b) => b.totalCost - a.totalCost)
+      }
+    });
+  } catch (error) {
+    console.error('Error calculating department suggested budget:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to calculate department suggested budget',
+      error: error.message
+    });
+  }
+});
 
 // ============================================================
 // COMPANY BUDGET ROUTES (Company-wide annual PPE budget)
@@ -217,6 +644,109 @@ router.put('/company/:id', authenticate, requireRole('admin'), auditLog('UPDATE'
     res.status(500).json({
       success: false,
       message: 'Failed to update company budget',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   DELETE /api/v1/budgets/company/:id
+ * @desc    Delete company budget and all associated department budgets
+ * @access  Private (Admin only)
+ */
+router.delete('/company/:id', authenticate, requireRole('admin'), auditLog('DELETE', 'CompanyBudget'), async (req, res) => {
+  try {
+    const companyBudget = await CompanyBudget.findByPk(req.params.id, {
+      include: [{ model: Budget, as: 'departmentBudgets' }]
+    });
+
+    if (!companyBudget) {
+      return res.status(404).json({
+        success: false,
+        message: 'Company budget not found'
+      });
+    }
+
+    // Check if budget has any allocations spent
+    if (parseFloat(companyBudget.totalSpent) > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete budget with existing allocations. Set status to closed instead.'
+      });
+    }
+
+    // Delete all associated department budgets first
+    if (companyBudget.departmentBudgets && companyBudget.departmentBudgets.length > 0) {
+      await Budget.destroy({ where: { companyBudgetId: companyBudget.id } });
+    }
+
+    await companyBudget.destroy();
+
+    res.json({
+      success: true,
+      message: `Company budget for FY ${companyBudget.fiscalYear} deleted successfully`
+    });
+  } catch (error) {
+    console.error('Error deleting company budget:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete company budget',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   GET /api/v1/budgets/company
+ * @desc    Get all company budgets (list)
+ * @access  Private (Admin only)
+ */
+router.get('/company', authenticate, requireRole('admin'), async (req, res) => {
+  try {
+    const companyBudgets = await CompanyBudget.findAll({
+      include: [{
+        model: Budget,
+        as: 'departmentBudgets',
+        include: [{ model: Department, as: 'department', attributes: ['id', 'name', 'code'] }]
+      }],
+      order: [['fiscalYear', 'DESC']]
+    });
+
+    // Enrich with calculated fields
+    const enrichedBudgets = companyBudgets.map(cb => {
+      const totalAllocated = cb.departmentBudgets?.reduce((sum, db) => sum + parseFloat(db.allocatedAmount || 0), 0) || 0;
+      return {
+        id: cb.id,
+        fiscalYear: cb.fiscalYear,
+        totalBudget: parseFloat(cb.totalBudget),
+        suggestedBudget: parseFloat(cb.suggestedBudget || 0),
+        bufferAmount: parseFloat(cb.bufferAmount || 0),
+        allocatedToDepartments: totalAllocated,
+        totalSpent: parseFloat(cb.totalSpent || 0),
+        unallocated: parseFloat(cb.totalBudget) - totalAllocated,
+        remaining: parseFloat(cb.totalBudget) - parseFloat(cb.totalSpent || 0),
+        utilizationPercent: parseFloat(cb.totalBudget) > 0 
+          ? parseFloat(((parseFloat(cb.totalSpent || 0) / parseFloat(cb.totalBudget)) * 100).toFixed(2)) 
+          : 0,
+        status: cb.status,
+        startDate: cb.startDate,
+        endDate: cb.endDate,
+        notes: cb.notes,
+        departmentCount: cb.departmentBudgets?.length || 0,
+        createdAt: cb.createdAt,
+        updatedAt: cb.updatedAt
+      };
+    });
+
+    res.json({
+      success: true,
+      data: enrichedBudgets
+    });
+  } catch (error) {
+    console.error('Error fetching company budgets:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch company budgets',
       error: error.message
     });
   }
@@ -554,6 +1084,37 @@ router.post('/', authenticate, requireRole('admin'), auditLog('CREATE', 'Budget'
         { model: CompanyBudget, as: 'companyBudget' }
       ]
     });
+
+    // Send email notification to HOD of the department
+    try {
+      const hodRole = await Role.findOne({ where: { name: 'hod' } });
+      if (hodRole) {
+        const hodUsers = await User.findAll({
+          where: { 
+            roleId: hodRole.id, 
+            departmentId: departmentId,
+            isActive: true 
+          },
+          include: [{ model: Employee, as: 'employee' }]
+        });
+
+        for (const hodUser of hodUsers) {
+          if (hodUser.employee?.email || hodUser.email) {
+            await sendBudgetAllocatedEmail({
+              hodName: hodUser.employee?.fullName || hodUser.username,
+              hodEmail: hodUser.employee?.email || hodUser.email,
+              departmentName: department.name,
+              fiscalYear,
+              allocatedAmount: parseFloat(allocatedAmount),
+              notes: notes || null
+            });
+          }
+        }
+      }
+    } catch (emailError) {
+      console.error('Error sending budget allocation email:', emailError);
+      // Don't fail the request if email fails
+    }
 
     res.status(201).json({
       success: true,
