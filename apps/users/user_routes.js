@@ -7,6 +7,7 @@ const { auditLog } = require('../../middlewares/audit_middleware');
 const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
+const { sendUserCredentialsEmail, sendPasswordResetEmail, sendPasswordResetRequestToAdmin } = require('../../helpers/email_helper');
 
 // Helper to include employee with full details
 const employeeInclude = {
@@ -313,7 +314,8 @@ router.post(
         roleId,
         departmentId: (role.name === 'hod' || role.name === 'department-rep') ? departmentId : null,
         sectionId: role.name === 'section-rep' ? sectionId : null,
-        isActive: true
+        isActive: true,
+        mustChangePassword: true // Force password change on first login
       });
 
       // Fetch complete user data with associations
@@ -326,6 +328,25 @@ router.post(
         ],
         attributes: { exclude: ['passwordHash'] }
       });
+
+      // Send credentials email if employee has email
+      if (employee.email) {
+        try {
+          await sendUserCredentialsEmail(
+            {
+              firstName: employee.firstName,
+              lastName: employee.lastName,
+              email: employee.email,
+              username: user.username
+            },
+            password,
+            role.description || role.name
+          );
+        } catch (emailError) {
+          console.error('Failed to send credentials email:', emailError.message);
+          // Don't fail the request if email fails
+        }
+      }
 
       res.status(201).json({
         success: true,

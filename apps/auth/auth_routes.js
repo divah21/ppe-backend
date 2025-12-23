@@ -9,6 +9,7 @@ const {
   loginValidation,
   changePasswordValidation
 } = require('../../validations/auth_validation');
+const { sendPasswordResetRequestToAdmin, sendPasswordResetEmail } = require('../../helpers/email_helper');
 
 // Helper to include employee with full details
 const employeeInclude = {
@@ -234,9 +235,170 @@ router.put('/change-password', authenticate, changePasswordValidation, validate,
       req
     );
 
+    // Clear mustChangePassword flag after successful password change
+    if (req.user.mustChangePassword) {
+      await user.update({ mustChangePassword: false });
+    }
+
     res.json({
       success: true,
       message: 'Password changed successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   POST /api/v1/auth/request-password-reset
+ * @desc    User requests password reset (notifies admin)
+ * @access  Public
+ */
+router.post('/request-password-reset', async (req, res, next) => {
+  try {
+    const { username, reason } = req.body;
+
+    if (!username) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username is required'
+      });
+    }
+
+    // Find the user
+    const user = await User.findOne({
+      where: { username },
+      include: [
+        { model: Employee, as: 'employee' },
+        { model: Role, as: 'role' }
+      ]
+    });
+
+    if (!user) {
+      // Don't reveal if user exists
+      return res.json({
+        success: true,
+        message: 'If an account with this username exists, an admin has been notified of your request.'
+      });
+    }
+
+    // Find all admin users to notify
+    const adminRole = await Role.findOne({ where: { name: 'admin' } });
+    if (adminRole) {
+      const adminUsers = await User.findAll({
+        where: { roleId: adminRole.id, isActive: true },
+        include: [{ model: Employee, as: 'employee' }]
+      });
+
+      const userName = user.employee?.fullName || user.username;
+      const userEmail = user.employee?.email || 'Not specified';
+
+      for (const admin of adminUsers) {
+        const adminEmail = admin.employee?.email || admin.email;
+        if (adminEmail) {
+          await sendPasswordResetRequestToAdmin({
+            adminName: admin.employee?.fullName || admin.username,
+            adminEmail,
+            requestingUserName: userName,
+            requestingUsername: user.username,
+            requestingUserEmail: userEmail,
+            reason: reason || 'User did not provide a reason'
+          });
+        }
+      }
+    }
+
+    // Create audit log
+    await createAuditLog(
+      null,
+      'REQUEST',
+      'PasswordReset',
+      user.id,
+      null,
+      { username, reason: reason || 'No reason provided' },
+      req
+    );
+
+    res.json({
+      success: true,
+      message: 'If an account with this username exists, an admin has been notified of your request.'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   POST /api/v1/auth/admin-reset-password/:userId
+ * @desc    Admin resets a user's password
+ * @access  Private (Admin only)
+ */
+router.post('/admin-reset-password/:userId', authenticate, async (req, res, next) => {
+  try {
+    // Check if current user is admin
+    if (req.user.role?.name !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only administrators can reset user passwords'
+      });
+    }
+
+    const { userId } = req.params;
+    const { newPassword } = req.body;
+
+    if (!newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password is required'
+      });
+    }
+
+    // Find the user to reset
+    const user = await User.findByPk(userId, {
+      include: [{ model: Employee, as: 'employee' }]
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Update password and set mustChangePassword flag
+    await user.update({ 
+      passwordHash: newPassword, // Will be hashed by hook
+      mustChangePassword: true
+    });
+
+    // Send email notification to user
+    const userEmail = user.employee?.email || user.email;
+    if (userEmail) {
+      await sendPasswordResetEmail(
+        {
+          firstName: user.employee?.firstName || user.username,
+          lastName: user.employee?.lastName || '',
+          email: userEmail,
+          username: user.username
+        },
+        newPassword
+      );
+    }
+
+    // Create audit log
+    await createAuditLog(
+      req.user.id,
+      'RESET',
+      'User',
+      user.id,
+      null,
+      { action: 'admin_password_reset', resetByUserId: req.user.id },
+      req
+    );
+
+    res.json({
+      success: true,
+      message: `Password reset for ${user.username}. User will be required to change password on next login.`
     });
   } catch (error) {
     next(error);

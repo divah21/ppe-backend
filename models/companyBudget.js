@@ -25,7 +25,25 @@ const CompanyBudget = sequelize.define('CompanyBudget', {
     validate: {
       min: 0
     },
-    comment: 'Total company-wide PPE budget for the fiscal year'
+    comment: 'Total company-wide PPE budget for the fiscal year (suggestedBudget + bufferAmount)'
+  },
+  suggestedBudget: {
+    type: DataTypes.DECIMAL(14, 2),
+    allowNull: true,
+    defaultValue: 0,
+    validate: {
+      min: 0
+    },
+    comment: 'System-calculated budget based on PPE Matrix (read-only)'
+  },
+  bufferAmount: {
+    type: DataTypes.DECIMAL(14, 2),
+    allowNull: true,
+    defaultValue: 0,
+    validate: {
+      min: 0
+    },
+    comment: 'Additional buffer for emergencies, visitors, failures'
   },
   allocatedToDepartments: {
     type: DataTypes.DECIMAL(14, 2),
