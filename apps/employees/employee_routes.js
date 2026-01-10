@@ -352,6 +352,7 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
         quantityRequired: data.quantityRequired,
         replacementFrequency: data.replacementFrequency || ppeItem.replacementFrequency || null,
         sizes,
+        sizeScale: ppeItem.sizeScale, // Include size scale for dropdown selection
         hasSizeVariants: ppeItem.hasSizeVariants,
         lastIssueDate,
         nextDueDate,

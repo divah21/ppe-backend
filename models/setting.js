@@ -11,7 +11,7 @@ const Setting = sequelize.define('Setting', {
     type: DataTypes.STRING,
     allowNull: false,
     validate: {
-      isIn: [['general', 'notifications', 'security', 'database', 'email', 'appearance', 'api', 'users']]
+      isIn: [['general', 'notifications', 'security', 'database', 'email', 'appearance', 'api', 'users', 'allocation']]
     }
   },
   key: {

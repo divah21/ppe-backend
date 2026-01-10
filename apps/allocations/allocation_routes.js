@@ -862,4 +862,477 @@ router.put(
   }
 );
 
+/**
+ * @route   POST /api/v1/allocations/bulk-upload
+ * @desc    Bulk upload historical allocations (for migration/launch)
+ * @access  Private (Stores, Admin only)
+ * 
+ * Expected format:
+ * {
+ *   defaultSectionId: "uuid", // Default section for new employees
+ *   skipStockDeduction: true, // Don't deduct from stock (historical data)
+ *   allocations: [
+ *     {
+ *       firstName: "INNOCENT",
+ *       lastName: "NYAWANGA", 
+ *       worksNumber: "EMP001", // Optional - will generate if not provided
+ *       ppeItems: [
+ *         { itemName: "Worksuit", issueDate: "2024/12/10", quantity: 2 },
+ *         { itemName: "Safety Shoes", issueDate: "2025/02/04", quantity: 1 },
+ *         { itemName: "Winter Jackets", issueDate: "2025/06/03", quantity: 1 }
+ *       ]
+ *     }
+ *   ]
+ * }
+ */
+router.post(
+  '/bulk-upload',
+  authenticate,
+  requireRole('stores', 'admin'),
+  auditLog('CREATE', 'Allocation'),
+  async (req, res, next) => {
+    const transaction = await db.sequelize.transaction();
+
+    try {
+      const { 
+        defaultSectionId, 
+        skipStockDeduction = true, 
+        allocations: allocationData 
+      } = req.body;
+
+      if (!allocationData || !Array.isArray(allocationData) || allocationData.length === 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Allocations data is required and must be an array'
+        });
+      }
+
+      // Validate section exists if provided
+      if (defaultSectionId) {
+        const section = await Section.findByPk(defaultSectionId);
+        if (!section) {
+          await transaction.rollback();
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid default section ID'
+          });
+        }
+      }
+
+      // Get all PPE items for name matching
+      const allPPEItems = await PPEItem.findAll({
+        where: { itemType: 'PPE' }
+      });
+
+      // Build a lookup map for PPE items (case-insensitive)
+      const ppeItemMap = new Map();
+      for (const item of allPPEItems) {
+        // Match by exact name (case-insensitive)
+        ppeItemMap.set(item.name.toLowerCase(), item);
+        // Also add common variations
+        const baseName = item.name.toLowerCase()
+          .replace(/s$/, '') // Remove trailing 's' for singular/plural matching
+          .replace(/-/g, ' '); // Replace dashes with spaces
+        ppeItemMap.set(baseName, item);
+      }
+
+      // Common name mappings for PPE items
+      const nameAliases = {
+        'worksuit': ['work suit', 'overalls', 'overall', 'coverall', 'coveralls'],
+        'safety shoes': ['safety shoe', 'safety boots', 'safety boot', 'boots', 'steel toe boots'],
+        'winter jackets': ['winter jacket', 'jacket', 'jackets', 'cold weather jacket'],
+        'hard hat': ['helmet', 'safety helmet', 'hard hats'],
+        'safety glasses': ['glasses', 'goggles', 'safety goggles', 'eye protection'],
+        'gloves': ['glove', 'work gloves', 'safety gloves'],
+        'ear plugs': ['earplugs', 'ear plug', 'hearing protection'],
+        'dust mask': ['dust masks', 'respirator', 'face mask', 'mask'],
+        'reflective vest': ['hi-vis vest', 'high visibility vest', 'safety vest', 'reflective vests']
+      };
+
+      // Add aliases to the map
+      for (const [mainName, aliases] of Object.entries(nameAliases)) {
+        const mainItem = ppeItemMap.get(mainName);
+        if (mainItem) {
+          for (const alias of aliases) {
+            if (!ppeItemMap.has(alias)) {
+              ppeItemMap.set(alias, mainItem);
+            }
+          }
+        }
+      }
+
+      const results = {
+        created: [],
+        skipped: [],
+        errors: [],
+        employeesCreated: [],
+        employeesFound: []
+      };
+
+      let worksNumberCounter = await Employee.count() + 1;
+
+      // Process each employee's allocations
+      for (let i = 0; i < allocationData.length; i++) {
+        const empData = allocationData[i];
+        const rowIndex = i + 1;
+
+        try {
+          if (!empData.firstName || !empData.lastName) {
+            results.skipped.push({
+              row: rowIndex,
+              reason: 'Missing first name or last name',
+              data: empData
+            });
+            continue;
+          }
+
+          // Skip if no PPE items to allocate
+          if (!empData.ppeItems || empData.ppeItems.length === 0) {
+            results.skipped.push({
+              row: rowIndex,
+              reason: 'No PPE items to allocate',
+              employee: `${empData.firstName} ${empData.lastName}`
+            });
+            continue;
+          }
+
+          // Check if all PPE items have valid data
+          const hasValidPPE = empData.ppeItems.some(item => 
+            item.itemName && item.issueDate && item.quantity > 0
+          );
+          
+          if (!hasValidPPE) {
+            results.skipped.push({
+              row: rowIndex,
+              reason: 'No valid PPE items with issue date and quantity',
+              employee: `${empData.firstName} ${empData.lastName}`
+            });
+            continue;
+          }
+
+          // Find or create employee
+          const firstName = empData.firstName.trim().toUpperCase();
+          const lastName = empData.lastName.trim().toUpperCase();
+
+          let employee = await Employee.findOne({
+            where: {
+              [Op.and]: [
+                db.sequelize.where(
+                  fn('UPPER', col('firstName')),
+                  firstName
+                ),
+                db.sequelize.where(
+                  fn('UPPER', col('lastName')),
+                  lastName
+                )
+              ]
+            },
+            transaction
+          });
+
+          if (!employee) {
+            // Create new employee
+            const worksNumber = empData.worksNumber || `EMP${String(worksNumberCounter++).padStart(5, '0')}`;
+            
+            if (!defaultSectionId) {
+              results.errors.push({
+                row: rowIndex,
+                error: 'Cannot create employee without default section ID',
+                employee: `${firstName} ${lastName}`
+              });
+              continue;
+            }
+
+            employee = await Employee.create({
+              firstName,
+              lastName,
+              worksNumber,
+              sectionId: defaultSectionId,
+              isActive: true,
+              jobType: empData.jobType || 'NEC'
+            }, { transaction });
+
+            results.employeesCreated.push({
+              id: employee.id,
+              name: `${firstName} ${lastName}`,
+              worksNumber
+            });
+          } else {
+            results.employeesFound.push({
+              id: employee.id,
+              name: `${firstName} ${lastName}`,
+              worksNumber: employee.worksNumber
+            });
+          }
+
+          // Process each PPE item allocation
+          for (const ppeAlloc of empData.ppeItems) {
+            if (!ppeAlloc.itemName || !ppeAlloc.issueDate || !ppeAlloc.quantity) {
+              continue; // Skip invalid items
+            }
+
+            // Find PPE item by name
+            let ppeItem = ppeItemMap.get(ppeAlloc.itemName.toLowerCase().trim());
+            
+            if (!ppeItem) {
+              // Create the PPE item if it doesn't exist
+              const itemName = ppeAlloc.itemName.trim();
+              const itemCode = itemName.toUpperCase().replace(/\s+/g, '-').substring(0, 20);
+              
+              // Check if we already created this item in this batch
+              ppeItem = ppeItemMap.get(itemName.toLowerCase());
+              
+              if (!ppeItem) {
+                // Determine category based on item name
+                let category = 'General';
+                const nameLower = itemName.toLowerCase();
+                if (nameLower.includes('shoe') || nameLower.includes('boot')) {
+                  category = 'Footwear';
+                } else if (nameLower.includes('jacket') || nameLower.includes('suit') || nameLower.includes('overall') || nameLower.includes('coat')) {
+                  category = 'Clothing';
+                } else if (nameLower.includes('helmet') || nameLower.includes('hat') || nameLower.includes('cap')) {
+                  category = 'Head Protection';
+                } else if (nameLower.includes('glass') || nameLower.includes('goggle')) {
+                  category = 'Eye Protection';
+                } else if (nameLower.includes('glove')) {
+                  category = 'Hand Protection';
+                } else if (nameLower.includes('mask') || nameLower.includes('respirator')) {
+                  category = 'Respiratory';
+                } else if (nameLower.includes('ear') || nameLower.includes('hearing')) {
+                  category = 'Hearing Protection';
+                } else if (nameLower.includes('vest') || nameLower.includes('hi-vis') || nameLower.includes('reflective')) {
+                  category = 'High Visibility';
+                }
+
+                // Create new PPE item
+                ppeItem = await PPEItem.create({
+                  name: itemName,
+                  itemCode: `PPE-${itemCode}`,
+                  category,
+                  itemType: 'PPE',
+                  description: `${itemName} - Auto-created during bulk upload`,
+                  replacementFrequency: 12, // Default 12 months
+                  isActive: true
+                }, { transaction });
+
+                // Add to map for future lookups in this batch
+                ppeItemMap.set(itemName.toLowerCase(), ppeItem);
+                
+                // Track created items
+                if (!results.ppeItemsCreated) {
+                  results.ppeItemsCreated = [];
+                }
+                results.ppeItemsCreated.push({
+                  id: ppeItem.id,
+                  name: ppeItem.name,
+                  itemCode: ppeItem.itemCode,
+                  category: ppeItem.category
+                });
+              }
+            }
+
+            // Parse issue date (handles multiple formats)
+            let issueDate;
+            try {
+              // Handle formats: 2024/12/10, 12/10/24, 2024-12-10
+              const dateStr = String(ppeAlloc.issueDate).trim();
+              
+              if (dateStr.includes('/')) {
+                const parts = dateStr.split('/');
+                if (parts[0].length === 4) {
+                  // YYYY/MM/DD format
+                  issueDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+                } else if (parts[2].length === 4) {
+                  // DD/MM/YYYY format
+                  issueDate = new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+                } else {
+                  // DD/MM/YY format - assume 2000s
+                  const year = parseInt(parts[2]) < 50 ? 2000 + parseInt(parts[2]) : 1900 + parseInt(parts[2]);
+                  issueDate = new Date(year, parseInt(parts[1]) - 1, parseInt(parts[0]));
+                }
+              } else if (dateStr.includes('-')) {
+                issueDate = new Date(dateStr);
+              } else {
+                throw new Error('Invalid date format');
+              }
+
+              // Validate date is reasonable (not in far future or too far past)
+              if (isNaN(issueDate.getTime())) {
+                throw new Error('Invalid date');
+              }
+              
+              // If date is unreasonably far in the future (like 2050), it's probably a typo
+              if (issueDate.getFullYear() > new Date().getFullYear() + 2) {
+                results.errors.push({
+                  row: rowIndex,
+                  error: `Issue date seems incorrect (year ${issueDate.getFullYear()}): ${ppeAlloc.issueDate}`,
+                  employee: `${firstName} ${lastName}`,
+                  item: ppeAlloc.itemName
+                });
+                continue;
+              }
+            } catch (e) {
+              results.errors.push({
+                row: rowIndex,
+                error: `Invalid date format: ${ppeAlloc.issueDate}`,
+                employee: `${firstName} ${lastName}`,
+                item: ppeAlloc.itemName
+              });
+              continue;
+            }
+
+            // Calculate next renewal date based on PPE item's replacement frequency
+            const nextRenewalDate = new Date(issueDate);
+            const replacementMonths = ppeItem.replacementFrequency || 12;
+            nextRenewalDate.setMonth(nextRenewalDate.getMonth() + replacementMonths);
+
+            // Check if allocation already exists (prevent duplicates)
+            const existingAllocation = await Allocation.findOne({
+              where: {
+                employeeId: employee.id,
+                ppeItemId: ppeItem.id,
+                issueDate: issueDate
+              },
+              transaction
+            });
+
+            if (existingAllocation) {
+              results.skipped.push({
+                row: rowIndex,
+                reason: 'Allocation already exists for this date',
+                employee: `${firstName} ${lastName}`,
+                item: ppeItem.name,
+                date: issueDate.toISOString().split('T')[0]
+              });
+              continue;
+            }
+
+            // Create allocation
+            const allocation = await Allocation.create({
+              employeeId: employee.id,
+              ppeItemId: ppeItem.id,
+              issuedById: req.user.id,
+              quantity: parseInt(ppeAlloc.quantity) || 1,
+              size: ppeAlloc.size || null,
+              issueDate,
+              nextRenewalDate,
+              allocationType: 'annual',
+              status: nextRenewalDate <= new Date() ? 'expired' : 'active',
+              notes: 'Historical allocation (bulk import)'
+            }, { transaction });
+
+            results.created.push({
+              id: allocation.id,
+              employee: `${firstName} ${lastName}`,
+              item: ppeItem.name,
+              quantity: allocation.quantity,
+              issueDate: issueDate.toISOString().split('T')[0]
+            });
+          }
+        } catch (rowError) {
+          results.errors.push({
+            row: rowIndex,
+            error: rowError.message,
+            employee: `${empData.firstName || 'Unknown'} ${empData.lastName || 'Unknown'}`
+          });
+        }
+      }
+
+      await transaction.commit();
+
+      res.status(201).json({
+        success: true,
+        message: `Bulk upload completed. Created ${results.created.length} allocations.`,
+        data: {
+          summary: {
+            totalProcessed: allocationData.length,
+            allocationsCreated: results.created.length,
+            employeesCreated: results.employeesCreated.length,
+            employeesFound: results.employeesFound.length,
+            ppeItemsCreated: results.ppeItemsCreated ? results.ppeItemsCreated.length : 0,
+            skipped: results.skipped.length,
+            errors: results.errors.length
+          },
+          created: results.created,
+          employeesCreated: results.employeesCreated,
+          employeesFound: results.employeesFound,
+          ppeItemsCreated: results.ppeItemsCreated || [],
+          skipped: results.skipped,
+          errors: results.errors
+        }
+      });
+    } catch (error) {
+      await transaction.rollback();
+      console.error('Bulk allocation upload error:', error);
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   GET /api/v1/allocations/bulk-upload/template
+ * @desc    Get bulk upload template info and PPE items list
+ * @access  Private (Stores, Admin only)
+ */
+router.get('/bulk-upload/template', authenticate, requireRole('stores', 'admin'), async (req, res, next) => {
+  try {
+    // Get all sections for dropdown
+    const sections = await Section.findAll({
+      include: [{ model: Department, as: 'department' }],
+      order: [['name', 'ASC']]
+    });
+
+    // Get all PPE items for reference
+    const ppeItems = await PPEItem.findAll({
+      where: { itemType: 'PPE' },
+      attributes: ['id', 'name', 'itemCode', 'category', 'replacementFrequency'],
+      order: [['name', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: {
+        sections: sections.map(s => ({
+          id: s.id,
+          name: s.name,
+          department: s.department?.name
+        })),
+        ppeItems: ppeItems.map(p => ({
+          id: p.id,
+          name: p.name,
+          itemCode: p.itemCode,
+          category: p.category,
+          replacementFrequency: p.replacementFrequency
+        })),
+        templateColumns: [
+          'FirstName',
+          'Surname',
+          'WorksNumber (optional)',
+          'PPE Item Name',
+          'Issue Date (YYYY/MM/DD)',
+          'Quantity'
+        ],
+        supportedDateFormats: [
+          'YYYY/MM/DD (e.g., 2024/12/10)',
+          'DD/MM/YYYY (e.g., 10/12/2024)',
+          'YYYY-MM-DD (e.g., 2024-12-10)'
+        ],
+        exampleRow: {
+          firstName: 'INNOCENT',
+          lastName: 'NYAWANGA',
+          worksNumber: 'EMP00001',
+          ppeItems: [
+            { itemName: 'Worksuit', issueDate: '2024/12/10', quantity: 2 },
+            { itemName: 'Safety Shoes', issueDate: '2025/02/04', quantity: 1 },
+            { itemName: 'Winter Jackets', issueDate: '2025/06/03', quantity: 1 }
+          ]
+        }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;
