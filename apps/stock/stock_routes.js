@@ -149,6 +149,61 @@ router.get('/', authenticate, async (req, res, next) => {
 });
 
 /**
+ * @route   GET /api/v1/stock/stats
+ * @desc    Get overall stock statistics (for all stock, not paginated)
+ * @access  Private
+ */
+router.get('/stats', authenticate, async (req, res, next) => {
+  try {
+    // Get all stock items aggregated
+    const allStock = await Stock.findAll({
+      include: [{
+        model: PPEItem,
+        as: 'ppeItem',
+        required: true
+      }]
+    });
+
+    // Group by PPE item to count unique items
+    const groupedStock = {};
+    let totalUnits = 0;
+    let totalValue = 0;
+
+    allStock.forEach(stock => {
+      const ppeId = stock.ppeItemId;
+      totalUnits += stock.quantity || 0;
+      const unitPrice = parseFloat(stock.unitPriceUSD) || 0;
+      totalValue += unitPrice * (stock.quantity || 0);
+
+      if (!groupedStock[ppeId]) {
+        groupedStock[ppeId] = {
+          ppeItemId: ppeId,
+          totalQuantity: 0,
+          minLevel: stock.minLevel || 10
+        };
+      }
+      groupedStock[ppeId].totalQuantity += stock.quantity || 0;
+    });
+
+    // Count low stock items
+    const groupedArray = Object.values(groupedStock);
+    const lowStockCount = groupedArray.filter(item => item.totalQuantity <= item.minLevel).length;
+
+    res.json({
+      success: true,
+      data: {
+        totalPPEItems: groupedArray.length,
+        totalUnits,
+        totalValue,
+        lowStockItems: lowStockCount
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * @route   GET /api/v1/stock/low-stock
  * @desc    Get low stock items
  * @access  Private (Stores)

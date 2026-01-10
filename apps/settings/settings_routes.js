@@ -50,6 +50,42 @@ router.get('/', authenticate, requireRole('admin'), async (req, res) => {
   }
 });
 
+// Get allocation settings for additional items (accessible by all authenticated users)
+router.get('/allocation/additional-items', authenticate, async (req, res) => {
+  try {
+    const settings = await Setting.findAll({
+      where: { category: 'allocation' },
+      order: [['key', 'ASC']]
+    });
+
+    const result = {};
+    settings.forEach(setting => {
+      result[setting.key] = setting.getParsedValue();
+    });
+
+    // Default values if not set
+    const allocationSettings = {
+      enableAdditionalItems: result.enableAdditionalItems ?? true,
+      restrictAdditionalItems: result.restrictAdditionalItems ?? false,
+      allowedAdditionalItemIds: result.allowedAdditionalItemIds || [],
+      maxAdditionalItems: result.maxAdditionalItems ?? 5,
+      requireJustificationForAdditional: result.requireJustificationForAdditional ?? true
+    };
+
+    res.json({
+      success: true,
+      data: allocationSettings
+    });
+  } catch (error) {
+    console.error('Error fetching allocation settings:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch allocation settings',
+      error: error.message
+    });
+  }
+});
+
 // Get settings by category
 router.get('/:category', authenticate, requireRole('admin'), async (req, res) => {
   try {
@@ -90,7 +126,7 @@ router.put('/:category', authenticate, requireRole('admin'), async (req, res) =>
     const settings = req.body;
     const userId = req.user.id;
 
-    const validCategories = ['general', 'notifications', 'security', 'database', 'email', 'appearance', 'api', 'users'];
+    const validCategories = ['general', 'notifications', 'security', 'database', 'email', 'appearance', 'api', 'users', 'allocation'];
     if (!validCategories.includes(category)) {
       return res.status(400).json({
         success: false,
@@ -139,16 +175,15 @@ router.put('/:category', authenticate, requireRole('admin'), async (req, res) =>
       updates.push({ key, created });
     }
 
-    // Create audit log
+    // Create audit log (entityId is null for settings since they don't have UUIDs)
     await createAuditLog(
       userId,
       'UPDATE',
       'Settings',
-      category,
+      null,  // entityId must be UUID or null
       { category, updatedKeys: updates.map(u => u.key) },
       { url: req.originalUrl, method: req.method },
-      req.ip,
-      req.get('user-agent')
+      req
     );
 
     res.json({
@@ -288,6 +323,13 @@ function getDefaultSettings() {
       maxPPERequestItems: { value: 10, type: 'number', description: 'Max PPE request items' },
       requireManagerApproval: { value: true, type: 'boolean', description: 'Require manager approval' },
       allowSelfRegistration: { value: false, type: 'boolean', description: 'Allow self registration' }
+    },
+    allocation: {
+      enableAdditionalItems: { value: true, type: 'boolean', description: 'Allow additional items beyond eligibility matrix' },
+      restrictAdditionalItems: { value: true, type: 'boolean', description: 'Restrict which items can be added as additional' },
+      allowedAdditionalItemIds: { value: [], type: 'json', description: 'List of PPE item IDs allowed for additional allocations' },
+      maxAdditionalItems: { value: 5, type: 'number', description: 'Maximum number of additional items per request' },
+      requireJustificationForAdditional: { value: true, type: 'boolean', description: 'Require reason for additional items' }
     }
   };
 }
