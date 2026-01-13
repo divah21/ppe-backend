@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { JobTitlePPEMatrix, PPEItem, Employee } = require('../../models');
+const { JobTitlePPEMatrix, PPEItem, Employee, JobTitle, Section, Department } = require('../../models');
 const { sequelize } = require('../../database/db');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
@@ -595,5 +595,455 @@ router.delete(
     }
   }
 );
+
+/**
+ * @route   POST /api/v1/matrix/bulk-upload
+ * @desc    Bulk upload PPE matrix configuration from Excel
+ *          Creates job titles if they don't exist, maps PPE items by name
+ * @access  Private (Admin, SHEQ, Stores)
+ */
+router.post(
+  '/bulk-upload',
+  authenticate,
+  requireRole('admin', 'sheq', 'stores'),
+  async (req, res, next) => {
+    const t = await sequelize.transaction();
+    
+    try {
+      const { entries, defaultSectionId, createJobTitles = true, createPPEItems = true, updateExisting = false } = req.body;
+      
+      if (!Array.isArray(entries) || entries.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Entries array is required'
+        });
+      }
+
+      // Load all PPE items for name matching
+      const allPPEItems = await PPEItem.findAll({
+        where: { isActive: true },
+        attributes: ['id', 'name', 'itemCode', 'category', 'replacementFrequency', 'unit']
+      });
+      
+      // Create lookup maps for PPE items (by name, partial name match)
+      const ppeByName = new Map();
+      const ppeByCode = new Map();
+      allPPEItems.forEach(item => {
+        ppeByName.set(item.name.toLowerCase().trim(), item);
+        if (item.itemCode) {
+          ppeByCode.set(item.itemCode.toLowerCase().trim(), item);
+        }
+      });
+
+      // Load all job titles
+      const allJobTitles = await JobTitle.findAll({
+        include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }]
+      });
+      const jobTitleByName = new Map();
+      allJobTitles.forEach(jt => {
+        jobTitleByName.set(jt.name.toLowerCase().trim(), jt);
+      });
+
+      // Load all sections
+      const allSections = await Section.findAll({
+        include: [{ model: Department, as: 'department' }]
+      });
+      const sectionByName = new Map();
+      allSections.forEach(s => {
+        sectionByName.set(s.name.toLowerCase().trim(), s);
+      });
+
+      // Get default section for new job titles
+      let defaultSection = null;
+      if (defaultSectionId) {
+        defaultSection = await Section.findByPk(defaultSectionId);
+      }
+      if (!defaultSection && allSections.length > 0) {
+        // Use first available section as fallback
+        defaultSection = allSections[0];
+      }
+
+      const results = {
+        matrixCreated: [],
+        matrixUpdated: [],
+        matrixSkipped: [],
+        jobTitlesCreated: [],
+        ppeItemsCreated: [],
+        ppeNotFound: [],
+        errors: []
+      };
+
+      // Helper to determine PPE category based on item name
+      const determinePPECategory = (name) => {
+        const nameLower = name.toLowerCase();
+        
+        // FEET
+        if (nameLower.includes('boot') || nameLower.includes('shoe') || nameLower.includes('spat')) {
+          return 'FEET';
+        }
+        // HANDS
+        if (nameLower.includes('glove')) {
+          return 'HANDS';
+        }
+        // EYES/FACE
+        if (nameLower.includes('glass') || nameLower.includes('goggle') || nameLower.includes('shield') || 
+            nameLower.includes('visor') || nameLower.includes('visa') || nameLower.includes('helmet')) {
+          return 'EYES/FACE';
+        }
+        // HEAD
+        if (nameLower.includes('hard hat') || nameLower.includes('hat') || nameLower.includes('sunbrim') || 
+            nameLower.includes('liner') || nameLower.includes('hair net') || nameLower.includes('neckerchief')) {
+          return 'HEAD';
+        }
+        // EARS
+        if (nameLower.includes('ear') || nameLower.includes('noise')) {
+          return 'EARS';
+        }
+        // RESPIRATORY
+        if (nameLower.includes('mask') || nameLower.includes('respirator') || nameLower.includes('cartridge') || 
+            nameLower.includes('filter')) {
+          return 'RESPIRATORY';
+        }
+        // BODY/TORSO
+        if (nameLower.includes('suit') || nameLower.includes('jacket') || nameLower.includes('vest') || 
+            nameLower.includes('apron') || nameLower.includes('shirt') || nameLower.includes('trouser') ||
+            nameLower.includes('coat') || nameLower.includes('overall') || nameLower.includes('rain')) {
+          return 'BODY/TORSO';
+        }
+        // FALL PROTECTION
+        if (nameLower.includes('harness') || nameLower.includes('lanyard')) {
+          return 'FALL PROTECTION';
+        }
+        // SPECIALIZED EQUIPMENT
+        if (nameLower.includes('tong') || nameLower.includes('bag') || nameLower.includes('guard')) {
+          return 'SPECIALIZED EQUIPMENT';
+        }
+        
+        return 'OTHER';
+      };
+
+      // Helper to determine if item has size variants
+      const hasSizeVariants = (name) => {
+        const nameLower = name.toLowerCase();
+        return nameLower.includes('shoe') || nameLower.includes('boot') || nameLower.includes('glove') ||
+               nameLower.includes('suit') || nameLower.includes('jacket') || nameLower.includes('shirt') ||
+               nameLower.includes('trouser') || nameLower.includes('apron') || nameLower.includes('harness');
+      };
+
+      // Helper function to find PPE item by name (fuzzy match)
+      const findPPEItem = (name) => {
+        if (!name) return null;
+        const normalizedName = name.toLowerCase().trim();
+        
+        // Exact match first
+        if (ppeByName.has(normalizedName)) {
+          return ppeByName.get(normalizedName);
+        }
+        
+        // Partial match - check if PPE name contains the search term or vice versa
+        for (const [key, item] of ppeByName) {
+          if (key.includes(normalizedName) || normalizedName.includes(key)) {
+            return item;
+          }
+        }
+        
+        // Try matching by item code
+        if (ppeByCode.has(normalizedName)) {
+          return ppeByCode.get(normalizedName);
+        }
+        
+        return null;
+      };
+
+      // Helper to parse frequency string (e.g., "2", "8 months", "1year", "When worn out")
+      const parseFrequency = (freqStr) => {
+        if (!freqStr) return null;
+        const str = freqStr.toString().toLowerCase().trim();
+        
+        // Check for "when worn out" or similar
+        if (str.includes('worn') || str.includes('disposable') || str.includes('clogged') || str.includes('need')) {
+          return 0; // 0 means "as needed"
+        }
+        
+        // Extract number
+        const match = str.match(/(\d+)/);
+        if (!match) return null;
+        
+        const num = parseInt(match[1]);
+        
+        // Check for years
+        if (str.includes('year')) {
+          return num * 12; // Convert years to months
+        }
+        
+        // Default to months
+        return num;
+      };
+
+      // Process each entry
+      for (const entry of entries) {
+        try {
+          const ppeName = (entry.ppeItem || entry.ppeName || entry['PPE ITEM'] || '').toString().trim();
+          const jobTitleName = (entry.jobTitle || entry.occupation || entry['OCCUPATIONS'] || '').toString().trim();
+          const quantity = parseInt(entry.quantity || entry.quantityRequired || 1) || 1;
+          const frequency = parseFrequency(entry.frequency || entry.replacementFrequency || entry['ISSUANCE FREQUENCY']);
+          const isMandatory = entry.isMandatory !== false;
+          const specifications = (entry.specifications || entry['SPECIFICATIONS'] || '').toString().trim();
+          const unit = (entry.unit || entry['UNIT OF MEASURE'] || 'Each').toString().trim();
+          const gender = (entry.gender || '').toString().trim().toLowerCase();
+
+          if (!ppeName) {
+            results.errors.push({ entry, error: 'PPE item name is required' });
+            continue;
+          }
+
+          // Find PPE item
+          let ppeItem = findPPEItem(ppeName);
+          
+          // If not found and createPPEItems is enabled, create the PPE item
+          if (!ppeItem && createPPEItems) {
+            // Generate item code from name
+            const itemCode = ppeName
+              .toUpperCase()
+              .replace(/[^A-Z0-9]/g, '-')
+              .replace(/-+/g, '-')
+              .substring(0, 30);
+            
+            // Determine category based on name
+            const category = determinePPECategory(ppeName);
+            
+            // Parse unit of measure
+            let ppeUnit = 'EA';
+            const unitLower = unit.toLowerCase();
+            if (unitLower.includes('pair')) ppeUnit = 'PAIR';
+            else if (unitLower.includes('set')) ppeUnit = 'SET';
+            else if (unitLower.includes('each') || unitLower === 'ea') ppeUnit = 'EA';
+            
+            // Parse frequency to get replacement frequency
+            const replacementFreq = frequency || 12;
+            
+            // Create new PPE item
+            ppeItem = await PPEItem.create({
+              name: ppeName,
+              itemCode: itemCode + '-' + Date.now().toString().slice(-6),
+              category: category,
+              unit: ppeUnit,
+              description: specifications || null,
+              replacementFrequency: replacementFreq > 0 ? replacementFreq : 12,
+              hasSizeVariants: hasSizeVariants(ppeName),
+              isMandatory: true,
+              isActive: true
+            }, { transaction: t });
+            
+            // Add to lookup maps
+            ppeByName.set(ppeItem.name.toLowerCase().trim(), ppeItem);
+            
+            results.ppeItemsCreated.push({
+              id: ppeItem.id,
+              name: ppeItem.name,
+              itemCode: ppeItem.itemCode,
+              category: ppeItem.category,
+              unit: ppeItem.unit
+            });
+          }
+          
+          if (!ppeItem) {
+            results.ppeNotFound.push({ ppeName, entry });
+            continue;
+          }
+
+          // Handle multiple job titles (comma or & separated)
+          const jobTitleNames = jobTitleName
+            .split(/[,&]/)
+            .map(jt => jt.trim())
+            .filter(jt => jt.length > 0);
+
+          if (jobTitleNames.length === 0) {
+            results.errors.push({ entry, error: 'Job title/occupation is required' });
+            continue;
+          }
+
+          // Process each job title
+          for (const jtName of jobTitleNames) {
+            // Find or create job title
+            let jobTitle = jobTitleByName.get(jtName.toLowerCase().trim());
+            
+            if (!jobTitle && createJobTitles) {
+              if (!defaultSection) {
+                results.errors.push({ 
+                  entry, 
+                  jobTitle: jtName,
+                  error: 'Cannot create job title: no default section available' 
+                });
+                continue;
+              }
+
+              // Create new job title with optional gender suffix
+              let finalName = jtName;
+              if (gender && !jtName.toLowerCase().includes(gender)) {
+                // Check if this is a gender-specific entry
+                if (gender === 'male' || gender === 'female' || gender === 'ladies') {
+                  // Don't modify the name, gender will be handled in notes
+                }
+              }
+
+              jobTitle = await JobTitle.create({
+                name: finalName,
+                sectionId: defaultSection.id,
+                isActive: true
+              }, { transaction: t });
+
+              results.jobTitlesCreated.push({
+                id: jobTitle.id,
+                name: jobTitle.name,
+                section: defaultSection.name
+              });
+
+              jobTitleByName.set(jobTitle.name.toLowerCase().trim(), jobTitle);
+            }
+
+            if (!jobTitle) {
+              results.errors.push({ 
+                entry, 
+                jobTitle: jtName,
+                error: `Job title "${jtName}" not found and createJobTitles is disabled` 
+              });
+              continue;
+            }
+
+            // Check for existing matrix entry
+            const existingMatrix = await JobTitlePPEMatrix.findOne({
+              where: {
+                jobTitleId: jobTitle.id,
+                ppeItemId: ppeItem.id
+              },
+              transaction: t
+            });
+
+            if (existingMatrix) {
+              if (updateExisting) {
+                await existingMatrix.update({
+                  quantityRequired: quantity,
+                  replacementFrequency: frequency || ppeItem.replacementFrequency || 12,
+                  isMandatory,
+                  notes: specifications || existingMatrix.notes,
+                  category: ppeItem.category
+                }, { transaction: t });
+
+                results.matrixUpdated.push({
+                  id: existingMatrix.id,
+                  jobTitle: jobTitle.name,
+                  ppeItem: ppeItem.name,
+                  quantity,
+                  frequency
+                });
+              } else {
+                results.matrixSkipped.push({
+                  jobTitle: jobTitle.name,
+                  ppeItem: ppeItem.name,
+                  reason: 'Already exists'
+                });
+              }
+              continue;
+            }
+
+            // Create new matrix entry
+            const matrixEntry = await JobTitlePPEMatrix.create({
+              jobTitleId: jobTitle.id,
+              jobTitle: jobTitle.name,
+              ppeItemId: ppeItem.id,
+              quantityRequired: quantity,
+              replacementFrequency: frequency || ppeItem.replacementFrequency || 12,
+              isMandatory,
+              category: ppeItem.category,
+              notes: specifications || null,
+              isActive: true
+            }, { transaction: t });
+
+            results.matrixCreated.push({
+              id: matrixEntry.id,
+              jobTitle: jobTitle.name,
+              ppeItem: ppeItem.name,
+              quantity,
+              frequency
+            });
+          }
+        } catch (entryError) {
+          results.errors.push({ entry, error: entryError.message });
+        }
+      }
+
+      await t.commit();
+
+      res.status(201).json({
+        success: true,
+        message: `Bulk upload completed: ${results.matrixCreated.length} matrix entries created, ${results.matrixUpdated.length} updated, ${results.matrixSkipped.length} skipped`,
+        data: results
+      });
+    } catch (error) {
+      await t.rollback();
+      next(error);
+    }
+  }
+);
+
+/**
+ * @route   GET /api/v1/matrix/bulk-upload-template
+ * @desc    Get template data for bulk matrix upload (PPE items, sections, job titles)
+ * @access  Private
+ */
+router.get('/bulk-upload-template', authenticate, async (req, res, next) => {
+  try {
+    // Get all PPE items
+    const ppeItems = await PPEItem.findAll({
+      where: { isActive: true },
+      attributes: ['id', 'name', 'itemCode', 'category', 'replacementFrequency', 'unit'],
+      order: [['category', 'ASC'], ['name', 'ASC']]
+    });
+
+    // Get all sections with departments
+    const sections = await Section.findAll({
+      include: [{ model: Department, as: 'department', attributes: ['id', 'name'] }],
+      order: [['name', 'ASC']]
+    });
+
+    // Get all job titles
+    const jobTitles = await JobTitle.findAll({
+      include: [{ 
+        model: Section, 
+        as: 'section',
+        include: [{ model: Department, as: 'department', attributes: ['id', 'name'] }]
+      }],
+      order: [['name', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: {
+        ppeItems: ppeItems.map(p => ({
+          id: p.id,
+          name: p.name,
+          itemCode: p.itemCode,
+          category: p.category,
+          replacementFrequency: p.replacementFrequency,
+          unit: p.unit
+        })),
+        sections: sections.map(s => ({
+          id: s.id,
+          name: s.name,
+          department: s.department?.name || 'Unknown'
+        })),
+        jobTitles: jobTitles.map(jt => ({
+          id: jt.id,
+          name: jt.name,
+          section: jt.section?.name || 'Unknown',
+          department: jt.section?.department?.name || 'Unknown'
+        }))
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 module.exports = router;
