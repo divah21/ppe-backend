@@ -217,6 +217,10 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
             model: Department,
             as: 'department'
           }]
+        },
+        {
+          model: JobTitle,
+          as: 'jobTitleRef'
         }
       ]
     });
@@ -231,9 +235,11 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
     // ==========================================
     // 1. Get PPE from Job Title Matrix
     // ==========================================
+    // Use ppeCategoryId mapping if available, otherwise fall back to direct jobTitleId
+    const matrixJobTitleId = employee.jobTitleRef?.ppeCategoryId || employee.jobTitleId;
     const jobTitleMatrixWhere = { isActive: true };
-    if (employee.jobTitleId) {
-      jobTitleMatrixWhere.jobTitleId = employee.jobTitleId;
+    if (matrixJobTitleId) {
+      jobTitleMatrixWhere.jobTitleId = matrixJobTitleId;
     } else if (employee.jobTitle) {
       jobTitleMatrixWhere.jobTitle = employee.jobTitle;
     }

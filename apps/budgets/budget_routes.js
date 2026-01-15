@@ -35,12 +35,18 @@ router.get('/suggested', authenticate, async (req, res) => {
           include: [{
             model: JobTitle,
             as: 'jobTitleRef',
-            required: false
+            required: false,
+            attributes: ['id', 'name', 'ppeCategoryId']
           }]
         }]
       }],
       order: [['name', 'ASC']]
     });
+
+    // Get total employee counts (active and inactive)
+    const totalAllEmployees = await Employee.count();
+    const totalActiveEmployees = await Employee.count({ where: { isActive: true } });
+    const totalInactiveEmployees = totalAllEmployees - totalActiveEmployees;
 
     // Get all PPE items with their current stock prices
     const ppeItems = await PPEItem.findAll({
@@ -124,9 +130,19 @@ router.get('/suggested', authenticate, async (req, res) => {
           const appliedItems = new Set(); // Track items already applied
           let hasMatrixItems = false;
 
+          // Get employee's job title and its PPE category mapping
+          const jobTitleId = employee.jobTitleId || employee.jobTitleRef?.id;
+          const jobTitleRef = employee.jobTitleRef;
+          const ppeCategoryId = jobTitleRef?.ppeCategoryId; // Get the mapped PPE category
+
           // 1. Apply Job Title PPE requirements first (higher priority)
-          const jobTitleKey = employee.jobTitleId || employee.jobTitleRef?.id;
-          const jobTitleReqs = jobTitleKey ? jobTitleMatrixMap[jobTitleKey] : [];
+          // First try direct job title ID match
+          let jobTitleReqs = jobTitleId ? jobTitleMatrixMap[jobTitleId] : [];
+          
+          // If no direct match, try the mapped PPE category
+          if ((!jobTitleReqs || jobTitleReqs.length === 0) && ppeCategoryId) {
+            jobTitleReqs = jobTitleMatrixMap[ppeCategoryId] || [];
+          }
 
           // Also check by job title string (legacy support)
           const jobTitleStringReqs = employee.jobTitle ? jobTitleMatrixMap[employee.jobTitle] : [];
@@ -229,6 +245,9 @@ router.get('/suggested', authenticate, async (req, res) => {
         summary: {
           totalDepartments: departmentSuggestedBudgets.length,
           totalEmployees: departmentSuggestedBudgets.reduce((sum, d) => sum + d.totalEmployees, 0),
+          totalActiveEmployees: totalActiveEmployees,
+          totalInactiveEmployees: totalInactiveEmployees,
+          totalAllEmployees: totalAllEmployees,
           employeesWithMatrix: departmentSuggestedBudgets.reduce((sum, d) => sum + d.employeesWithMatrix, 0),
           avgBudgetPerEmployee: departmentSuggestedBudgets.reduce((sum, d) => sum + d.totalEmployees, 0) > 0
             ? parseFloat((overallSuggestedBudget / departmentSuggestedBudgets.reduce((sum, d) => sum + d.totalEmployees, 0)).toFixed(2))

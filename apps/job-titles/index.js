@@ -1,9 +1,187 @@
 const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
-const { JobTitle, Section, Department, Employee } = require('../../models');
+const { JobTitle, Section, Department, Employee, JobTitlePPEMatrix } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { adminOrStoresMiddleware } = require('../../middlewares/role_middleware');
+
+// ============================================================
+// PPE CATEGORY MAPPING ROUTES
+// ============================================================
+
+// @route   GET /api/v1/job-titles/mappings
+// @desc    Get all job title to PPE category mappings
+// @access  Private
+router.get('/mappings', authenticate, async (req, res, next) => {
+  try {
+    const jobTitles = await JobTitle.findAll({
+      where: { ppeCategoryId: { [Op.not]: null } },
+      attributes: ['id', 'ppeCategoryId']
+    });
+
+    const mappings = {};
+    jobTitles.forEach(jt => {
+      mappings[jt.id] = jt.ppeCategoryId;
+    });
+
+    res.json({
+      success: true,
+      data: mappings
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/v1/job-titles/mappings
+// @desc    Save job title to PPE category mappings
+// @access  Private (Admin/Stores)
+router.post('/mappings', authenticate, adminOrStoresMiddleware, async (req, res, next) => {
+  try {
+    const { mappings } = req.body;
+
+    if (!mappings || typeof mappings !== 'object') {
+      return res.status(400).json({
+        success: false,
+        message: 'Mappings object is required'
+      });
+    }
+
+    // Clear all existing mappings first
+    await JobTitle.update(
+      { ppeCategoryId: null },
+      { where: {} }
+    );
+
+    // Apply new mappings
+    const jobTitleIds = Object.keys(mappings);
+    for (const jobTitleId of jobTitleIds) {
+      const ppeCategoryId = mappings[jobTitleId];
+      if (ppeCategoryId) {
+        await JobTitle.update(
+          { ppeCategoryId },
+          { where: { id: jobTitleId } }
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Updated ${jobTitleIds.length} job title mappings`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @route   POST /api/v1/job-titles/auto-map
+// @desc    Automatically map job titles based on keyword matching
+// @access  Private (Admin/Stores)
+router.post('/auto-map', authenticate, adminOrStoresMiddleware, async (req, res, next) => {
+  try {
+    // Get all PPE categories (job titles that have matrix entries)
+    const matrixEntries = await JobTitlePPEMatrix.findAll({
+      where: { isActive: true },
+      attributes: ['jobTitleId', 'jobTitle'],
+      group: ['jobTitleId', 'jobTitle']
+    });
+
+    const ppeCategories = [];
+    for (const entry of matrixEntries) {
+      if (entry.jobTitleId) {
+        const cat = await JobTitle.findByPk(entry.jobTitleId);
+        if (cat) {
+          ppeCategories.push({
+            id: cat.id,
+            name: cat.name.toLowerCase(),
+            originalName: cat.name
+          });
+        }
+      }
+    }
+
+    // Get all employee job titles
+    const jobTitles = await JobTitle.findAll({
+      attributes: ['id', 'name']
+    });
+
+    // Define keyword mappings for common categories
+    const keywordMappings = {
+      'lab': ['laboratory', 'lab ', 'assay', 'metallurg', 'chemist', 'sample'],
+      'plant': ['plant ', 'operator', 'crushing', 'milling', 'flotation', 'leach', 'ccd', 'detox'],
+      'plumbers': ['plumber', 'pipe fitter', 'pipefitter'],
+      'electrical': ['electric', 'electrician'],
+      'mechanical': ['mechan', 'fitter', 'turner', 'machinist', 'welder', 'boiler'],
+      'it': ['it ', ' it', 'information technology', 'programmer', 'software', 'network', 'system admin'],
+      'admin': ['admin', 'clerk', 'secretary', 'receptionist', 'typist', 'filing'],
+      'management': ['manager', 'superintendent', 'supervisor', 'foreman', 'team leader', 'head of'],
+      'safety': ['safety', 'sheq', 'environment', 'health'],
+      'security': ['security', 'guard', 'patrol'],
+      'stores': ['store', 'warehouse', 'inventory', 'stock'],
+      'mining': ['miner', 'mining', 'underground', 'drill', 'blast'],
+      'workshop': ['workshop', 'garage', 'diesel', 'auto '],
+      'reagents': ['reagent'],
+      'gold room': ['gold room', 'smelter', 'smelt', 'refin'],
+      'outdoor': ['outdoor', 'garden', 'landscap', 'grounds'],
+      'indoor': ['indoor', 'office', 'cleaning', 'janitor', 'housekeep'],
+      'surveyor': ['survey'],
+      'driver': ['driver', 'chauffeur', 'transport'],
+      'construction': ['construct', 'building', 'civil', 'mason', 'carpenter', 'brick'],
+    };
+
+    const autoMappings = {};
+    let mappedCount = 0;
+
+    for (const jt of jobTitles) {
+      const jtNameLower = jt.name.toLowerCase();
+      
+      // Skip if it's already a PPE category itself
+      if (ppeCategories.some(c => c.id === jt.id)) continue;
+
+      // Try to match by keyword
+      for (const [categoryKey, keywords] of Object.entries(keywordMappings)) {
+        const matchedCategory = ppeCategories.find(c => 
+          c.name.includes(categoryKey) || categoryKey.includes(c.name)
+        );
+
+        if (matchedCategory) {
+          const hasKeyword = keywords.some(kw => jtNameLower.includes(kw));
+          if (hasKeyword) {
+            autoMappings[jt.id] = matchedCategory.id;
+            mappedCount++;
+            break;
+          }
+        }
+      }
+
+      // Direct name matching as fallback
+      if (!autoMappings[jt.id]) {
+        for (const cat of ppeCategories) {
+          if (jtNameLower.includes(cat.name) || cat.name.includes(jtNameLower.split(' ')[0])) {
+            autoMappings[jt.id] = cat.id;
+            mappedCount++;
+            break;
+          }
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Auto-mapped ${mappedCount} job titles`,
+      data: {
+        mappings: autoMappings,
+        count: mappedCount
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ============================================================
+// STANDARD JOB TITLE ROUTES
+// ============================================================
 
 // @route   GET /api/v1/job-titles
 // @desc    Get all job titles with optional filtering

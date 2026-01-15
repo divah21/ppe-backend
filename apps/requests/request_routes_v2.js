@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock } = require('../../models');
+const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock, JobTitle, JobTitlePPEMatrix } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { authorize } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
@@ -250,7 +250,9 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
     // For normal flows, employeeId must be a valid employee.
     let employee = null;
     if (employeeId) {
-      employee = await Employee.findByPk(employeeId);
+      employee = await Employee.findByPk(employeeId, {
+        include: [{ model: JobTitle, as: 'jobTitleRef' }]
+      });
     }
 
     if (!employee) {
@@ -265,8 +267,17 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
 
     // For new employee issues, auto-populate from job title PPE matrix if items not provided
     if (requestType === 'new' && (!items || items.length === 0)) {
+      // Use ppeCategoryId mapping if available
+      const matrixJobTitleId = employee.jobTitleRef?.ppeCategoryId || employee.jobTitleId;
+      const matrixWhere = { isActive: true };
+      if (matrixJobTitleId) {
+        matrixWhere.jobTitleId = matrixJobTitleId;
+      } else if (employee.jobTitle) {
+        matrixWhere.jobTitle = employee.jobTitle;
+      }
+      
       const matrixEntries = await JobTitlePPEMatrix.findAll({
-        where: { jobTitle: employee.jobTitle, isActive: true }
+        where: matrixWhere
       });
 
       items = matrixEntries.map(entry => ({
@@ -303,8 +314,17 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
     const now = new Date();
 
     // Load matrix for employee for rules that depend on it
+    // Use ppeCategoryId mapping if available
+    const eligibilityMatrixJobTitleId = employee.jobTitleRef?.ppeCategoryId || employee.jobTitleId;
+    const eligibilityMatrixWhere = { isActive: true };
+    if (eligibilityMatrixJobTitleId) {
+      eligibilityMatrixWhere.jobTitleId = eligibilityMatrixJobTitleId;
+    } else if (employee.jobTitle) {
+      eligibilityMatrixWhere.jobTitle = employee.jobTitle;
+    }
+    
     const matrixEntries = await JobTitlePPEMatrix.findAll({
-      where: { jobTitle: employee.jobTitle, isActive: true }
+      where: eligibilityMatrixWhere
     });
     const matrixItemIds = new Set(matrixEntries.map(e => e.ppeItemId));
 

@@ -115,8 +115,11 @@ router.get('/cost-analysis', authenticate, authorize(['admin', 'hod-hos', 'store
 
     for (const employee of employees) {
       // Get PPE matrix for this employee's job title
+      // First check if the job title has a ppeCategoryId mapping, otherwise use direct jobTitleId
+      const matrixJobTitleId = employee.jobTitleRef?.ppeCategoryId || employee.jobTitleId;
+      
       const matrixEntries = await JobTitlePPEMatrix.findAll({
-        where: { jobTitleId: employee.jobTitleId, isActive: true },
+        where: { jobTitleId: matrixJobTitleId, isActive: true },
         include: [{ model: PPEItem, as: 'ppeItem' }]
       });
 

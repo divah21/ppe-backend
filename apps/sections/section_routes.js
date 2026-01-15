@@ -51,6 +51,33 @@ router.get('/', authenticate, async (req, res, next) => {
 });
 
 /**
+ * @route   GET /api/v1/sections/department/:departmentId
+ * @desc    Get sections by department ID
+ * @access  Private
+ */
+router.get('/department/:departmentId', authenticate, async (req, res, next) => {
+  try {
+    const { departmentId } = req.params;
+
+    const sections = await Section.findAll({
+      where: { departmentId },
+      include: [{
+        model: Department,
+        as: 'department'
+      }],
+      order: [['name', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: sections
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * @route   GET /api/v1/sections/:id
  * @desc    Get section by ID
  * @access  Private

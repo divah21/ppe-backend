@@ -236,6 +236,258 @@ router.get('/low-stock', authenticate, requireRole('stores', 'admin'), async (re
 });
 
 /**
+ * @route   GET /api/v1/stock/out-of-stock
+ * @desc    Get PPE items that are out of stock - includes both:
+ *          1. Items that have been allocated but don't exist in stock
+ *          2. Items needed for pending requests (approved, ready to fulfill) but have insufficient stock
+ * @access  Private (Stores, Admin)
+ */
+router.get('/out-of-stock', authenticate, requireRole('stores', 'admin'), async (req, res, next) => {
+  try {
+    const { Allocation, Request, RequestItem } = require('../../models');
+    
+    // ============================================
+    // 1. Get items from past allocations with no stock
+    // ============================================
+    const allocatedPPEItems = await Allocation.findAll({
+      attributes: [[sequelize.fn('DISTINCT', sequelize.col('ppe_item_id')), 'ppeItemId']],
+      raw: true
+    });
+    const allocatedPPEIds = allocatedPPEItems.map(a => a.ppeItemId).filter(Boolean);
+
+    // Get all PPE items that have stock records with their quantities
+    const stockRecords = await Stock.findAll({
+      attributes: [
+        'ppeItemId',
+        'size',
+        [sequelize.fn('SUM', sequelize.col('quantity')), 'totalQuantity']
+      ],
+      group: ['ppeItemId', 'size'],
+      raw: true
+    });
+
+    // Build stock map: ppeItemId -> { total: X, bySize: { size: qty } }
+    const stockMap = {};
+    stockRecords.forEach(s => {
+      if (!stockMap[s.ppeItemId]) {
+        stockMap[s.ppeItemId] = { total: 0, bySize: {} };
+      }
+      const qty = parseInt(s.totalQuantity) || 0;
+      stockMap[s.ppeItemId].total += qty;
+      if (s.size) {
+        stockMap[s.ppeItemId].bySize[s.size] = (stockMap[s.ppeItemId].bySize[s.size] || 0) + qty;
+      }
+    });
+
+    const stockedPPEIds = new Set(Object.keys(stockMap));
+
+    // Find PPE items that are allocated but not in stock at all
+    const noStockPPEIds = allocatedPPEIds.filter(id => !stockedPPEIds.has(id));
+
+    // ============================================
+    // 2. Get items from pending requests with insufficient stock
+    // ============================================
+    const pendingRequests = await Request.findAll({
+      where: { 
+        status: { [Op.in]: ['approved', 'stores-review'] } // Ready to fulfill or being reviewed by stores
+      },
+      include: [{
+        model: RequestItem,
+        as: 'items',
+        include: [{
+          model: PPEItem,
+          as: 'ppeItem'
+        }]
+      }]
+    });
+
+    // Track items needed from pending requests that have insufficient stock
+    const insufficientStockItems = new Map(); // ppeItemId:size -> { item, neededQty, availableQty, pendingRequests }
+    
+    for (const request of pendingRequests) {
+      for (const reqItem of (request.items || [])) {
+        if (!reqItem.ppeItem) continue;
+        
+        const ppeId = reqItem.ppeItemId;
+        const neededQty = reqItem.approvedQuantity || reqItem.quantity || 1;
+        const size = reqItem.size;
+        
+        // Check available stock - must match the exact size requested
+        let availableQty = 0;
+        if (stockMap[ppeId]) {
+          if (size) {
+            // If a specific size is requested, only count stock for that exact size
+            availableQty = stockMap[ppeId].bySize[size] || 0;
+          } else {
+            // If no size specified, use total stock
+            availableQty = stockMap[ppeId].total;
+          }
+        }
+        
+        // If insufficient stock for this item (size-specific)
+        if (availableQty < neededQty) {
+          const key = size ? `${ppeId}:${size}` : `${ppeId}:any`;
+          
+          if (!insufficientStockItems.has(key)) {
+            insufficientStockItems.set(key, {
+              ppeItem: reqItem.ppeItem,
+              size: size,
+              neededQty: 0,
+              availableQty: availableQty,
+              pendingRequestCount: 0,
+              shortfall: 0
+            });
+          }
+          
+          const entry = insufficientStockItems.get(key);
+          entry.neededQty += neededQty;
+          entry.pendingRequestCount += 1;
+          entry.shortfall = Math.max(0, entry.neededQty - entry.availableQty);
+        }
+      }
+    }
+
+    // ============================================
+    // 3. Combine both sources of out-of-stock items
+    // ============================================
+    const outOfStockPPEIds = [...new Set([...noStockPPEIds, ...Array.from(insufficientStockItems.values()).map(i => i.ppeItem.id)])];
+
+    if (outOfStockPPEIds.length === 0 && insufficientStockItems.size === 0) {
+      return res.json({
+        success: true,
+        data: [],
+        meta: {
+          totalOutOfStock: 0,
+          pendingRequestsBlocked: 0,
+          message: 'All items have sufficient stock'
+        }
+      });
+    }
+
+    // Get details for out-of-stock PPE items
+    const outOfStockItems = await PPEItem.findAll({
+      where: { id: { [Op.in]: outOfStockPPEIds } },
+      order: [['name', 'ASC']]
+    });
+
+    // Get allocation counts per item
+    const allocationCounts = await Allocation.findAll({
+      where: { ppeItemId: { [Op.in]: outOfStockPPEIds } },
+      attributes: [
+        'ppeItemId',
+        [sequelize.fn('COUNT', sequelize.col('Allocation.id')), 'allocationCount'],
+        [sequelize.fn('SUM', sequelize.col('quantity')), 'totalAllocated']
+      ],
+      group: ['ppeItemId'],
+      raw: true
+    });
+
+    const allocationMap = {};
+    allocationCounts.forEach(a => {
+      allocationMap[a.ppeItemId] = {
+        allocationCount: parseInt(a.allocationCount) || 0,
+        totalAllocated: parseInt(a.totalAllocated) || 0
+      };
+    });
+
+    // Format response - prioritize items needed for pending requests
+    const formattedItems = [];
+    const addedIds = new Set();
+
+    // First add items with pending requests (more urgent)
+    for (const [key, data] of insufficientStockItems) {
+      const item = data.ppeItem;
+      const itemKey = data.size ? `${item.id}:${data.size}` : item.id;
+      
+      if (!addedIds.has(itemKey)) {
+        addedIds.add(itemKey);
+        formattedItems.push({
+          id: item.id,
+          name: item.name,
+          itemCode: item.itemCode,
+          category: item.category,
+          description: item.description,
+          sizeScale: item.sizeScale,
+          availableSizes: item.availableSizes,
+          targetGender: item.targetGender,
+          size: data.size || null,
+          stockStatus: data.availableQty === 0 ? 'out_of_stock' : 'insufficient_stock',
+          quantity: data.availableQty,
+          neededQty: data.neededQty,
+          shortfall: data.shortfall,
+          minLevel: 10,
+          allocationCount: allocationMap[item.id]?.allocationCount || 0,
+          totalAllocated: allocationMap[item.id]?.totalAllocated || 0,
+          pendingRequestCount: data.pendingRequestCount,
+          needsReorder: true,
+          urgent: true // Flag for pending requests
+        });
+      }
+    }
+
+    // Then add items from allocations that have no stock at all
+    for (const item of outOfStockItems) {
+      if (!addedIds.has(item.id) && noStockPPEIds.includes(item.id)) {
+        addedIds.add(item.id);
+        formattedItems.push({
+          id: item.id,
+          name: item.name,
+          itemCode: item.itemCode,
+          category: item.category,
+          description: item.description,
+          sizeScale: item.sizeScale,
+          availableSizes: item.availableSizes,
+          targetGender: item.targetGender,
+          size: null,
+          stockStatus: 'out_of_stock',
+          quantity: 0,
+          neededQty: 0,
+          shortfall: 0,
+          minLevel: 10,
+          allocationCount: allocationMap[item.id]?.allocationCount || 0,
+          totalAllocated: allocationMap[item.id]?.totalAllocated || 0,
+          pendingRequestCount: 0,
+          needsReorder: true,
+          urgent: false
+        });
+      }
+    }
+
+    // Sort: urgent items first, then by name
+    formattedItems.sort((a, b) => {
+      if (a.urgent && !b.urgent) return -1;
+      if (!a.urgent && b.urgent) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    const pendingRequestsBlocked = new Set(pendingRequests.filter(r => 
+      (r.items || []).some(item => {
+        const ppeId = item.ppeItemId;
+        const size = item.size;
+        const needed = item.approvedQuantity || item.quantity || 1;
+        const available = stockMap[ppeId] 
+          ? (size && stockMap[ppeId].bySize[size] !== undefined ? stockMap[ppeId].bySize[size] : stockMap[ppeId].total)
+          : 0;
+        return available < needed;
+      })
+    ).map(r => r.id)).size;
+
+    res.json({
+      success: true,
+      data: formattedItems,
+      meta: {
+        totalOutOfStock: formattedItems.length,
+        totalAllocationsWithoutStock: formattedItems.filter(i => !i.urgent).reduce((sum, i) => sum + i.allocationCount, 0),
+        pendingRequestsBlocked,
+        urgentItems: formattedItems.filter(i => i.urgent).length
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * @route   GET /api/v1/stock/:id
  * @desc    Get stock item by ID
  * @access  Private
