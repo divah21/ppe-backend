@@ -502,7 +502,7 @@ router.get('/requests', authenticate, async (req, res) => {
     // Role-based filtering
     if (user.role?.name === 'section-rep' && user.sectionId) {
       where.sectionId = user.sectionId;
-    } else if ((user.role?.name === 'hod-hos' || user.role?.name === 'department-rep') && user.departmentId) {
+    } else if ((user.role?.name === 'hod' || user.role?.name === 'department-rep') && user.departmentId) {
       where.departmentId = user.departmentId;
     }
 

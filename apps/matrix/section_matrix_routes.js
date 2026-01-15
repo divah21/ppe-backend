@@ -292,6 +292,8 @@ router.put('/:id',
   requireRole('stores', 'admin'),
   [
     param('id').isUUID().withMessage('Valid ID is required'),
+    body('sectionId').optional().isUUID().withMessage('Valid section ID is required'),
+    body('ppeItemId').optional().isUUID().withMessage('Valid PPE item ID is required'),
     body('quantityRequired').optional().isInt({ min: 1 }),
     body('replacementFrequency').optional().isInt({ min: 1 }),
     body('isMandatory').optional().isBoolean(),
@@ -310,9 +312,11 @@ router.put('/:id',
         });
       }
 
-      const { quantityRequired, replacementFrequency, isMandatory, notes, isActive } = req.body;
+      const { sectionId, ppeItemId, quantityRequired, replacementFrequency, isMandatory, notes, isActive } = req.body;
 
       await matrixEntry.update({
+        sectionId: sectionId ?? matrixEntry.sectionId,
+        ppeItemId: ppeItemId ?? matrixEntry.ppeItemId,
         quantityRequired: quantityRequired ?? matrixEntry.quantityRequired,
         replacementFrequency: replacementFrequency ?? matrixEntry.replacementFrequency,
         isMandatory: isMandatory ?? matrixEntry.isMandatory,

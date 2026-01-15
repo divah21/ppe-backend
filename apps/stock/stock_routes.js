@@ -105,6 +105,7 @@ router.get('/', authenticate, async (req, res, next) => {
         id: stock.id,
         size: stock.size,
         color: stock.color,
+        gender: stock.gender,
         quantity: stock.quantity,
         binLocation: stock.binLocation,
         batchNumber: stock.batchNumber,
@@ -542,6 +543,7 @@ router.post(
       if (value === null || value === undefined || value === '') return true;
       return typeof value === 'string';
     }).withMessage('Color must be a string'),
+    body('gender').optional({ nullable: true }).isIn(['male', 'female', 'unisex', null, '']).withMessage('Gender must be male, female, or unisex'),
     body('location').optional({ nullable: true }).isString().withMessage('Location must be a string'),
     body('binLocation').optional({ nullable: true }).isString().withMessage('Bin location must be a string'),
     body('supplier').optional({ nullable: true }).trim(),
@@ -550,7 +552,7 @@ router.post(
       if (value === null || value === undefined || value === '') return true;
       return !isNaN(Date.parse(value));
     }).withMessage('Expiry date must be a valid date'),
-    body('stockAccount').optional().isString().withMessage('Stock account must be a string'),
+    body('stockAccount').optional({ nullable: true }).isString().withMessage('Stock account must be a string'),
     body('notes').optional({ nullable: true }).isString().withMessage('Notes must be a string'),
     body('eligibleDepartments').optional().isArray().withMessage('Eligible departments must be an array'),
     body('eligibleDepartments.*').optional().isUUID().withMessage('Each department ID must be a UUID'),
@@ -563,7 +565,7 @@ router.post(
     try {
       const { 
         ppeItemId, quantity, minLevel, maxLevel, reorderPoint, unitCost, unitPriceUSD,
-        supplier, batchNumber, size, color, location, binLocation, expiryDate, 
+        supplier, batchNumber, size, color, gender, location, binLocation, expiryDate, 
         stockAccount, notes, eligibleDepartments, eligibleSections 
       } = req.body;
 
@@ -585,7 +587,7 @@ router.post(
       }
 
       // Check if stock entry already exists for this variant
-      const existing = await Stock.findOne({ where: { ppeItemId, size: size || null, color: color || null, location: location || 'Main Store' } });
+      const existing = await Stock.findOne({ where: { ppeItemId, size: size || null, color: color || null, gender: gender || null, location: location || 'Main Store' } });
       
       let stock;
       let isUpdate = false;
@@ -649,6 +651,7 @@ router.post(
           batchNumber: batchNumber || null,
           size: size || null,
           color: color || null,
+          gender: gender || null,
           location: location || 'Main Store',
           binLocation: binLocation || null,
           expiryDate: expiryDate || null,

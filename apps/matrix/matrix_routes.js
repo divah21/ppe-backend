@@ -31,13 +31,64 @@ router.post('/test', (req, res) => {
  */
 router.get('/', authenticate, async (req, res, next) => {
   try {
-    const { jobTitle, jobTitleId, category, ppeItemId, page = 1, limit = 100 } = req.query;
+    const { jobTitle, jobTitleId, category, ppeItemId, departmentId, page = 1, limit = 100 } = req.query;
+
+    // If departmentId provided, get PPE category names for job titles in that department
+    let departmentPPECategories = null;
+    if (departmentId) {
+      // Get job titles that belong to sections in this department
+      const jobTitleRecords = await JobTitle.findAll({
+        attributes: ['id', 'name', 'ppeCategoryId'],
+        include: [{
+          model: Section,
+          as: 'section',
+          where: { departmentId },
+          attributes: []
+        }]
+      });
+      
+      if (jobTitleRecords.length > 0) {
+        // Collect unique ppeCategoryIds
+        const ppeCategoryIds = [...new Set(jobTitleRecords.map(jt => jt.ppeCategoryId).filter(Boolean))];
+        
+        // Get the PPE category names (these are also JobTitle records used as categories)
+        if (ppeCategoryIds.length > 0) {
+          const ppeCategories = await JobTitle.findAll({
+            attributes: ['name'],
+            where: { id: { [Op.in]: ppeCategoryIds } }
+          });
+          departmentPPECategories = ppeCategories.map(c => c.name);
+        }
+        
+        // Also include the job title names in case matrix uses them directly
+        const jobTitleNames = jobTitleRecords.map(jt => jt.name);
+        departmentPPECategories = departmentPPECategories 
+          ? [...new Set([...departmentPPECategories, ...jobTitleNames])]
+          : jobTitleNames;
+      }
+    }
 
     const where = {};
     if (jobTitle) where.jobTitle = { [Op.iLike]: `%${jobTitle}%` };
     if (jobTitleId) where.jobTitleId = jobTitleId;
     if (category) where.category = category;
     if (ppeItemId) where.ppeItemId = ppeItemId;
+    // Filter by PPE categories for the department
+    if (departmentPPECategories && departmentPPECategories.length > 0) {
+      where.jobTitle = { [Op.in]: departmentPPECategories };
+    } else if (departmentId && (!departmentPPECategories || departmentPPECategories.length === 0)) {
+      // If departmentId provided but no PPE categories found, return empty
+      return res.json({
+        success: true,
+        data: [],
+        pagination: {
+          total: 0,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: 0
+        }
+      });
+    }
 
     const offset = (page - 1) * limit;
 
@@ -501,6 +552,9 @@ router.put(
   requireRole('admin', 'sheq', 'stores'),
   [
     param('id').isUUID().withMessage('Valid matrix entry ID is required'),
+    body('jobTitle').optional().trim(),
+    body('jobTitleId').optional().isUUID().withMessage('Valid job title ID is required'),
+    body('ppeItemId').optional().isUUID().withMessage('Valid PPE item ID is required'),
     body('quantityRequired').optional().isInt({ min: 1 }).withMessage('Quantity must be at least 1'),
     body('replacementFrequency').optional().isInt({ min: 1 }).withMessage('Replacement frequency must be positive'),
     body('heavyUseFrequency').optional().isInt({ min: 1 }).withMessage('Heavy use frequency must be positive'),
@@ -522,6 +576,9 @@ router.put(
       }
 
       const {
+        jobTitle,
+        jobTitleId,
+        ppeItemId,
         quantityRequired,
         replacementFrequency,
         heavyUseFrequency,
@@ -531,7 +588,19 @@ router.put(
         isActive
       } = req.body;
 
+      // If changing job title, get the name from JobTitle table
+      let jobTitleName = jobTitle;
+      if (jobTitleId && !jobTitle) {
+        const jobTitleRecord = await JobTitle.findByPk(jobTitleId);
+        if (jobTitleRecord) {
+          jobTitleName = jobTitleRecord.name;
+        }
+      }
+
       await matrixEntry.update({
+        ...(jobTitleName !== undefined && { jobTitle: jobTitleName }),
+        ...(jobTitleId !== undefined && { jobTitleId }),
+        ...(ppeItemId !== undefined && { ppeItemId }),
         ...(quantityRequired !== undefined && { quantityRequired }),
         ...(replacementFrequency !== undefined && { replacementFrequency }),
         ...(heavyUseFrequency !== undefined && { heavyUseFrequency }),
@@ -560,6 +629,47 @@ router.put(
 );
 
 /**
+ * @route   DELETE /api/v1/matrix/by-job-title/:jobTitleName
+ * @desc    Delete all matrix entries for a specific job title
+ * @access  Private (Admin, SHEQ, Stores)
+ */
+router.delete(
+  '/by-job-title/:jobTitleName',
+  authenticate,
+  requireRole('admin', 'sheq', 'stores'),
+  async (req, res, next) => {
+    try {
+      const { jobTitleName } = req.params;
+      console.log('[MATRIX] Delete by job title:', jobTitleName);
+      
+      const deletedCount = await JobTitlePPEMatrix.destroy({
+        where: {
+          jobTitle: { [Op.iLike]: jobTitleName }
+        }
+      });
+
+      console.log('[MATRIX] Deleted count:', deletedCount);
+
+      if (deletedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'No matrix entries found for this job title'
+        });
+      }
+
+      res.json({
+        success: true,
+        message: `Deleted ${deletedCount} matrix entries for job title "${jobTitleName}"`,
+        deletedCount
+      });
+    } catch (error) {
+      console.error('[MATRIX] Delete error:', error);
+      next(error);
+    }
+  }
+);
+
+/**
  * @route   DELETE /api/v1/matrix/:id
  * @desc    Delete job title PPE matrix entry
  * @access  Private (Admin, SHEQ, Stores)
@@ -572,7 +682,6 @@ router.delete(
     param('id').isUUID().withMessage('Valid matrix entry ID is required')
   ],
   validate,
-  auditLog,
   async (req, res, next) => {
     try {
       const matrixEntry = await JobTitlePPEMatrix.findByPk(req.params.id);
