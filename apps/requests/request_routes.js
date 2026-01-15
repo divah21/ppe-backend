@@ -204,7 +204,16 @@ router.get('/:id', authenticate, async (req, res) => {
         {
           model: RequestItem,
           as: 'items',
-          include: [{ model: PPEItem, as: 'ppeItem' }]
+          include: [{ 
+            model: PPEItem, 
+            as: 'ppeItem',
+            include: [{
+              model: Stock,
+              as: 'stocks',
+              attributes: ['unitCost', 'unitPriceUSD'],
+              required: false
+            }]
+          }]
         }
       ]
     });
@@ -216,9 +225,34 @@ router.get('/:id', authenticate, async (req, res) => {
       });
     }
 
+    // Enrich PPE items with average price from stock
+    const enrichedRequest = request.toJSON();
+    if (enrichedRequest.items) {
+      enrichedRequest.items = enrichedRequest.items.map(item => {
+        if (item.ppeItem && item.ppeItem.stocks && item.ppeItem.stocks.length > 0) {
+          // Calculate average unit cost from stock entries
+          const stocks = item.ppeItem.stocks;
+          const totalCost = stocks.reduce((sum, s) => sum + (parseFloat(s.unitCost) || 0), 0);
+          const avgCost = totalCost / stocks.length;
+          
+          // Also get USD price if available
+          const totalUSD = stocks.reduce((sum, s) => sum + (parseFloat(s.unitPriceUSD) || 0), 0);
+          const avgUSD = totalUSD / stocks.length;
+          
+          item.ppeItem.price = avgCost || avgUSD || 0;
+          item.ppeItem.priceUSD = avgUSD || 0;
+        } else {
+          item.ppeItem = item.ppeItem || {};
+          item.ppeItem.price = 0;
+          item.ppeItem.priceUSD = 0;
+        }
+        return item;
+      });
+    }
+
     res.json({
       success: true,
-      data: request
+      data: enrichedRequest
     });
   } catch (error) {
     console.error('Error fetching request:', error);
@@ -281,9 +315,10 @@ router.post('/', authenticate, authorize(['section-rep', 'admin']), auditLog('CR
       // Get employee's PPE matrix from BOTH sources
       // ==========================================
       
-      // 1. Job Title Matrix
+      // 1. Job Title Matrix - use ppeCategoryId mapping if available
+      const matrixJobTitleId = employee.jobTitleRef?.ppeCategoryId || employee.jobTitleId;
       const jobTitleEligibility = await JobTitlePPEMatrix.findAll({
-        where: { jobTitleId: employee.jobTitleId, isActive: true },
+        where: { jobTitleId: matrixJobTitleId, isActive: true },
         include: [{ model: PPEItem, as: 'ppeItem' }]
       });
 

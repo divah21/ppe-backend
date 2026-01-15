@@ -669,6 +669,7 @@ router.post(
         matrixSkipped: [],
         jobTitlesCreated: [],
         ppeItemsCreated: [],
+        ppeItemsUpdated: [],
         ppeNotFound: [],
         errors: []
       };
@@ -800,27 +801,59 @@ router.post(
           // Find PPE item
           let ppeItem = findPPEItem(ppeName);
           
-          // If not found and createPPEItems is enabled, create the PPE item
-          if (!ppeItem && createPPEItems) {
+          // Determine category based on name
+          const category = determinePPECategory(ppeName);
+          
+          // Parse unit of measure
+          let ppeUnit = 'EA';
+          const unitLower = unit.toLowerCase();
+          if (unitLower.includes('pair')) ppeUnit = 'PAIR';
+          else if (unitLower.includes('set')) ppeUnit = 'SET';
+          else if (unitLower.includes('each') || unitLower === 'ea') ppeUnit = 'EA';
+          
+          // Parse frequency to get replacement frequency
+          const replacementFreq = frequency || 12;
+          
+          if (ppeItem && createPPEItems) {
+            // PPE item exists - update it with new info if specifications provided
+            const updateData = {};
+            if (specifications && specifications !== ppeItem.description) {
+              updateData.description = specifications;
+            }
+            if (category && category !== 'OTHER' && ppeItem.category !== category) {
+              updateData.category = category;
+            }
+            if (replacementFreq > 0 && replacementFreq !== ppeItem.replacementFrequency) {
+              updateData.replacementFrequency = replacementFreq;
+            }
+            if (ppeUnit !== ppeItem.unit) {
+              updateData.unit = ppeUnit;
+            }
+            
+            // Only update if there are changes
+            if (Object.keys(updateData).length > 0) {
+              await ppeItem.update(updateData, { transaction: t });
+              
+              // Check if already tracked as updated
+              const alreadyUpdated = results.ppeItemsUpdated.some(p => p.id === ppeItem.id);
+              if (!alreadyUpdated) {
+                results.ppeItemsUpdated.push({
+                  id: ppeItem.id,
+                  name: ppeItem.name,
+                  itemCode: ppeItem.itemCode,
+                  category: ppeItem.category,
+                  updates: updateData
+                });
+              }
+            }
+          } else if (!ppeItem && createPPEItems) {
+            // PPE item not found - create new one
             // Generate item code from name
             const itemCode = ppeName
               .toUpperCase()
               .replace(/[^A-Z0-9]/g, '-')
               .replace(/-+/g, '-')
               .substring(0, 30);
-            
-            // Determine category based on name
-            const category = determinePPECategory(ppeName);
-            
-            // Parse unit of measure
-            let ppeUnit = 'EA';
-            const unitLower = unit.toLowerCase();
-            if (unitLower.includes('pair')) ppeUnit = 'PAIR';
-            else if (unitLower.includes('set')) ppeUnit = 'SET';
-            else if (unitLower.includes('each') || unitLower === 'ea') ppeUnit = 'EA';
-            
-            // Parse frequency to get replacement frequency
-            const replacementFreq = frequency || 12;
             
             // Create new PPE item
             ppeItem = await PPEItem.create({
@@ -977,7 +1010,7 @@ router.post(
 
       res.status(201).json({
         success: true,
-        message: `Bulk upload completed: ${results.matrixCreated.length} matrix entries created, ${results.matrixUpdated.length} updated, ${results.matrixSkipped.length} skipped`,
+        message: `Bulk upload completed: ${results.matrixCreated.length} matrix entries created, ${results.matrixUpdated.length} updated, ${results.matrixSkipped.length} skipped. PPE items: ${results.ppeItemsCreated.length} created, ${results.ppeItemsUpdated.length} updated.`,
         data: results
       });
     } catch (error) {

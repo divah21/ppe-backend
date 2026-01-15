@@ -25,6 +25,11 @@ const JobTitle = sequelize.define('JobTitle', {
     allowNull: false,
     comment: 'Job titles belong to sections'
   },
+  ppeCategoryId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'Links to PPE category job title for matrix inheritance'
+  },
   isActive: {
     type: DataTypes.BOOLEAN,
     defaultValue: true

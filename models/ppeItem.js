@@ -106,6 +106,13 @@ const PPEItem = sequelize.define('PPEItem', {
     field: 'available_colors',
     comment: 'JSON array of available colors for this item (e.g., ["Blue", "Red", "Yellow"])'
   },
+  targetGender: {
+    type: DataTypes.ENUM('MALE', 'FEMALE', 'UNISEX'),
+    allowNull: true,
+    defaultValue: 'UNISEX',
+    field: 'target_gender',
+    comment: 'Target gender for this PPE item (MALE, FEMALE, or UNISEX)'
+  },
   isActive: {
     type: DataTypes.BOOLEAN,
     defaultValue: true

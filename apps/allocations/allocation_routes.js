@@ -1084,25 +1084,29 @@ router.post(
               ppeItem = ppeItemMap.get(itemName.toLowerCase());
               
               if (!ppeItem) {
-                // Determine category based on item name
-                let category = 'General';
+                // Determine category based on item name - use standardized category names
+                let category = 'SPECIALIZED EQUIPMENT';
                 const nameLower = itemName.toLowerCase();
-                if (nameLower.includes('shoe') || nameLower.includes('boot')) {
-                  category = 'Footwear';
-                } else if (nameLower.includes('jacket') || nameLower.includes('suit') || nameLower.includes('overall') || nameLower.includes('coat')) {
-                  category = 'Clothing';
-                } else if (nameLower.includes('helmet') || nameLower.includes('hat') || nameLower.includes('cap')) {
-                  category = 'Head Protection';
-                } else if (nameLower.includes('glass') || nameLower.includes('goggle')) {
-                  category = 'Eye Protection';
+                if (nameLower.includes('shoe') || nameLower.includes('boot') || nameLower.includes('gum')) {
+                  category = 'FEET';
+                } else if (nameLower.includes('jacket') || nameLower.includes('suit') || nameLower.includes('overall') || nameLower.includes('coat') || nameLower.includes('vest') || nameLower.includes('apron') || nameLower.includes('trousers') || nameLower.includes('jean') || nameLower.includes('shirt')) {
+                  category = 'BODY/TORSO';
+                } else if (nameLower.includes('helmet') || nameLower.includes('hard hat') || nameLower.includes('balaclava') || nameLower.includes('cap')) {
+                  category = 'HEAD';
+                } else if (nameLower.includes('glass') || nameLower.includes('goggle') || nameLower.includes('face shield') || nameLower.includes('lens')) {
+                  category = 'EYES/FACE';
                 } else if (nameLower.includes('glove')) {
-                  category = 'Hand Protection';
-                } else if (nameLower.includes('mask') || nameLower.includes('respirator')) {
-                  category = 'Respiratory';
-                } else if (nameLower.includes('ear') || nameLower.includes('hearing')) {
-                  category = 'Hearing Protection';
-                } else if (nameLower.includes('vest') || nameLower.includes('hi-vis') || nameLower.includes('reflective')) {
-                  category = 'High Visibility';
+                  category = 'HANDS';
+                } else if (nameLower.includes('mask') || nameLower.includes('respirator') || nameLower.includes('cartridge') || nameLower.includes('filter')) {
+                  category = 'RESPIRATORY';
+                } else if (nameLower.includes('ear') || nameLower.includes('hearing') || nameLower.includes('plug') || nameLower.includes('muff')) {
+                  category = 'EARS';
+                } else if (nameLower.includes('knee') || nameLower.includes('spat')) {
+                  category = 'LEGS/LOWER/KNEES';
+                } else if (nameLower.includes('harness') || nameLower.includes('lanyard') || nameLower.includes('fall')) {
+                  category = 'FALL PROTECTION';
+                } else if (nameLower.includes('neck')) {
+                  category = 'NECK';
                 }
 
                 // Create new PPE item
