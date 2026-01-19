@@ -66,7 +66,7 @@ router.get('/', authenticate, async (req, res) => {
       // Dept Rep sees requests from their department that need their approval
       where.status = { [Op.in]: ['dept-rep-review', 'hod-review', 'stores-review', 'approved', 'fulfilled'] };
       where['$targetEmployee.section.department_id$'] = req.user.departmentId;
-    } else if (userRole === 'hod-hos' && req.user.departmentId) {
+    } else if (userRole === 'hod' && req.user.departmentId) {
       // HOD sees requests from their department that need their approval
       where.status = { [Op.in]: ['hod-review', 'stores-review', 'approved', 'fulfilled'] };
       where['$targetEmployee.section.department_id$'] = req.user.departmentId;
@@ -591,7 +591,7 @@ router.put('/:id/dept-rep-approve', authenticate, authorize(['department-rep', '
  * @desc    HOD approves request
  * @access  Private (HOD only)
  */
-router.put('/:id/hod-approve', authenticate, authorize(['hod-hos', 'admin']), auditLog('UPDATE', 'Request'), async (req, res) => {
+router.put('/:id/hod-approve', authenticate, authorize(['hod', 'admin']), auditLog('UPDATE', 'Request'), async (req, res) => {
   try {
     const { comment } = req.body;
     

@@ -340,6 +340,9 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
       let lastIssueDate = null;
       let nextDueDate = null;
       let eligibleNowForAnnual = true;
+      let hasActiveAllocation = false;
+      let activeAllocationDate = null;
+      let daysUntilEligible = null;
 
       if (latestAlloc) {
         lastIssueDate = latestAlloc.issueDate;
@@ -348,6 +351,16 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
         due.setMonth(due.getMonth() + months);
         nextDueDate = due;
         eligibleNowForAnnual = now >= due;
+        
+        // Check if allocation is still active (not expired, replaced, or returned)
+        hasActiveAllocation = latestAlloc.status === 'active';
+        if (hasActiveAllocation) {
+          activeAllocationDate = latestAlloc.issueDate;
+          // Calculate days until eligible for replacement
+          if (!eligibleNowForAnnual) {
+            daysUntilEligible = Math.ceil((due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+          }
+        }
       }
 
       eligibility.push({
@@ -363,6 +376,9 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
         lastIssueDate,
         nextDueDate,
         eligibleNowForAnnual,
+        hasActiveAllocation,
+        activeAllocationDate,
+        daysUntilEligible,
         source: data.source, // 'jobTitle' or 'section' - indicates where this requirement came from
         isMandatory: data.isMandatory
       });

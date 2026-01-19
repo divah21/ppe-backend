@@ -79,6 +79,12 @@ const Stock = sequelize.define('Stock', {
     allowNull: true,
     comment: 'Color variant (e.g., Blue, Red, Yellow, etc.)'
   },
+  gender: {
+    type: DataTypes.ENUM('male', 'female', 'unisex'),
+    allowNull: true,
+    defaultValue: null,
+    comment: 'Gender variant for body/torso and feet items (male, female, unisex)'
+  },
   lastRestocked: {
     type: DataTypes.DATE,
     allowNull: true
@@ -112,7 +118,7 @@ const Stock = sequelize.define('Stock', {
   indexes: [
     {
       unique: true,
-      fields: ['ppe_item_id', 'size', 'color', 'location', 'batch_number'],
+      fields: ['ppe_item_id', 'size', 'color', 'gender', 'location', 'batch_number'],
       name: 'unique_stock_variant_batch'
     },
     {

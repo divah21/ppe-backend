@@ -249,7 +249,7 @@ router.get('/renewals', authenticate, requireRole('stores', 'admin'), async (req
  * @desc    Get allocations with expiry dates, grouped by PPE item
  * @access  Private (Stores, HOD, Admin)
  */
-router.get('/expiry-by-item', authenticate, requireRole('stores', 'hod-hos', 'admin'), async (req, res, next) => {
+router.get('/expiry-by-item', authenticate, requireRole('stores', 'hod', 'admin'), async (req, res, next) => {
   try {
     const { daysAhead = 90, departmentId, sectionId } = req.query;
 
@@ -326,7 +326,7 @@ router.get('/expiry-by-item', authenticate, requireRole('stores', 'hod-hos', 'ad
  * @desc    Get allocations due or nearing expiry per employee
  * @access  Private (Stores, HOD, Admin)
  */
-router.get('/expiry-by-personnel', authenticate, requireRole('stores', 'hod-hos', 'admin'), async (req, res, next) => {
+router.get('/expiry-by-personnel', authenticate, requireRole('stores', 'hod', 'admin'), async (req, res, next) => {
   try {
     const { daysAhead = 90, departmentId, sectionId } = req.query;
 
@@ -462,13 +462,20 @@ router.post(
           });
         }
 
-        // Check stock availability (including size if applicable)
+        // Check stock availability (including size and gender if applicable)
         const requestedSize = allocItem.size || requestItem.size;
+        const requestedGender = allocItem.gender; // Override gender from frontend
+        const isOverridden = allocItem.isOverridden;
         const stockWhere = { ppeItemId: requestItem.ppeItemId };
         
         // Only add size constraint if the item has size variants and a size is specified
         if (requestItem.ppeItem.hasSizeVariants && requestedSize) {
           stockWhere.size = requestedSize;
+        }
+        
+        // Add gender constraint if override specifies a gender
+        if (isOverridden && requestedGender) {
+          stockWhere.gender = requestedGender;
         }
         // For non-sized items, we don't filter by size at all - find any stock for this PPE item
         // This allows stock with size=null OR any other size value
@@ -486,13 +493,26 @@ router.post(
             order: [['quantity', 'DESC']]
           });
         }
+        
+        // If still no stock with the exact constraints and this is an override, try without gender
+        if (!stock && isOverridden) {
+          const relaxedWhere = { ppeItemId: requestItem.ppeItemId };
+          if (requestedSize) {
+            relaxedWhere.size = requestedSize;
+          }
+          stock = await Stock.findOne({ 
+            where: relaxedWhere,
+            order: [['quantity', 'DESC']]
+          });
+        }
 
         if (!stock || stock.quantity < allocItem.quantity) {
           await transaction.rollback();
           const sizeInfo = requestedSize ? ` (size: ${requestedSize})` : '';
+          const genderInfo = requestedGender ? ` (gender: ${requestedGender})` : '';
           return res.status(400).json({
             success: false,
-            message: `Insufficient stock for ${requestItem.ppeItem.name}${sizeInfo}. Available: ${stock ? stock.quantity : 0}, Requested: ${allocItem.quantity}`
+            message: `Insufficient stock for ${requestItem.ppeItem.name}${sizeInfo}${genderInfo}. Available: ${stock ? stock.quantity : 0}, Requested: ${allocItem.quantity}`
           });
         }
 
@@ -501,6 +521,22 @@ router.post(
         const nextRenewalDate = new Date(issueDate);
         nextRenewalDate.setMonth(nextRenewalDate.getMonth() + requestItem.ppeItem.replacementFrequency);
 
+        // Build allocation notes
+        let allocationNotes = null;
+        if (isOverridden) {
+          const overrideDetails = [];
+          if (requestedSize && requestedSize !== requestItem.size) {
+            overrideDetails.push(`Size override: ${requestItem.size || 'none'} → ${requestedSize}`);
+          }
+          if (requestedGender) {
+            overrideDetails.push(`Gender: ${requestedGender}`);
+          }
+          if (stock.size !== requestItem.size || stock.gender) {
+            overrideDetails.push(`Allocated from stock: size=${stock.size || 'standard'}, gender=${stock.gender || 'unisex'}`);
+          }
+          allocationNotes = `Override allocation: ${overrideDetails.join('; ')}`;
+        }
+
         // Create allocation
         const allocation = await Allocation.create({
           employeeId: request.employeeId,
@@ -508,11 +544,12 @@ router.post(
           requestId: request.id,
           issuedById: req.user.id,
           quantity: allocItem.quantity,
-          size: allocItem.size || requestItem.size,
+          size: stock.size || allocItem.size || requestItem.size, // Use actual stock size
           issueDate,
           nextRenewalDate,
           status: 'active',
-          totalCost: (parseFloat(stock.unitPriceUSD) || 0) * allocItem.quantity
+          totalCost: (parseFloat(stock.unitPriceUSD) || 0) * allocItem.quantity,
+          notes: allocationNotes
         }, { transaction });
 
         // Update stock

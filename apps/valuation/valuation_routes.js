@@ -82,7 +82,7 @@ router.get('/stock-value', authenticate, authorize(['admin', 'sheq', 'stores']),
  * @desc    Comprehensive PPE cost analysis per employee/section/department based on PPE matrices
  * @access  Private (Admin, HOD, Stores)
  */
-router.get('/cost-analysis', authenticate, authorize(['admin', 'hod-hos', 'stores']), async (req, res) => {
+router.get('/cost-analysis', authenticate, authorize(['admin', 'hod', 'stores']), async (req, res) => {
   try {
     const { departmentId, sectionId, employeeId, groupBy = 'employee' } = req.query;
 
@@ -279,7 +279,7 @@ router.get('/cost-analysis', authenticate, authorize(['admin', 'hod-hos', 'store
  * @desc    Actual PPE spending from fulfilled allocations (not matrix projections)
  * @access  Private (Admin, HOD, Stores)
  */
-router.get('/actual-spending', authenticate, authorize(['admin', 'hod-hos', 'stores']), async (req, res) => {
+router.get('/actual-spending', authenticate, authorize(['admin', 'hod', 'stores']), async (req, res) => {
   try {
     const { departmentId, sectionId, employeeId, groupBy = 'employee', fromDate, toDate } = req.query;
 
@@ -287,9 +287,12 @@ router.get('/actual-spending', authenticate, authorize(['admin', 'hod-hos', 'sto
     const allocationWhere = {};
     if (fromDate) allocationWhere.issueDate = { [Sequelize.Op.gte]: new Date(fromDate) };
     if (toDate) {
+      // Set toDate to start of next day to include all allocations on that day
+      const nextDay = new Date(toDate);
+      nextDay.setDate(nextDay.getDate() + 1);
       allocationWhere.issueDate = { 
         ...allocationWhere.issueDate, 
-        [Sequelize.Op.lte]: new Date(toDate) 
+        [Sequelize.Op.lt]: nextDay 
       };
     }
 
@@ -330,10 +333,44 @@ router.get('/actual-spending', authenticate, authorize(['admin', 'hod-hos', 'sto
       order: [['issueDate', 'DESC']]
     });
 
+    // Get average prices for PPE items from stock to use as fallback for allocations without cost
+    const ppeItemIds = [...new Set(allocations.map(a => a.ppeItemId).filter(Boolean))];
+    const stockPrices = {};
+    if (ppeItemIds.length > 0) {
+      const stocks = await Stock.findAll({
+        where: {
+          ppeItemId: { [Sequelize.Op.in]: ppeItemIds },
+          unitPriceUSD: { [Sequelize.Op.ne]: null }
+        },
+        attributes: ['ppeItemId', 'unitPriceUSD'],
+        raw: true
+      });
+      // Calculate average manually since Sequelize.col has issues with camelCase
+      const pricesByItem = {};
+      for (const s of stocks) {
+        if (!pricesByItem[s.ppeItemId]) pricesByItem[s.ppeItemId] = [];
+        pricesByItem[s.ppeItemId].push(parseFloat(s.unitPriceUSD) || 0);
+      }
+      for (const [ppeId, prices] of Object.entries(pricesByItem)) {
+        stockPrices[ppeId] = prices.reduce((a, b) => a + b, 0) / prices.length;
+      }
+    }
+
     const spendingDetails = [];
 
     for (const alloc of allocations) {
       if (!alloc.employee) continue;
+      
+      // Use allocation's totalCost if available, otherwise calculate from stock average price
+      let totalCost = parseFloat(alloc.totalCost || 0);
+      let unitCost = parseFloat(alloc.unitCost || 0);
+      let isEstimated = false;
+      
+      if (totalCost === 0 && alloc.ppeItemId && stockPrices[alloc.ppeItemId]) {
+        unitCost = stockPrices[alloc.ppeItemId];
+        totalCost = unitCost * (alloc.quantity || 1);
+        isEstimated = true;
+      }
       
       spendingDetails.push({
         allocationId: alloc.id,
@@ -351,8 +388,9 @@ router.get('/actual-spending', authenticate, authorize(['admin', 'hod-hos', 'sto
         ppeItemCode: alloc.ppeItem ? alloc.ppeItem.itemCode : null,
         category: alloc.ppeItem ? alloc.ppeItem.category : null,
         quantity: alloc.quantity,
-        unitCost: parseFloat(alloc.unitCost || 0),
-        totalCost: parseFloat(alloc.totalCost || 0),
+        unitCost,
+        totalCost,
+        isEstimated,
         size: alloc.size,
         status: alloc.status
       });
@@ -725,7 +763,7 @@ router.get('/low-stock', authenticate, authorize(['admin', 'sheq', 'stores']), a
  * @desc    Get PPE cost aggregated by employee/section/department/item
  * @access  Private (Stores, HOD, Admin)
  */
-router.get('/costs', authenticate, authorize(['stores', 'hod-hos', 'admin']), async (req, res) => {
+router.get('/costs', authenticate, authorize(['stores', 'hod', 'admin']), async (req, res) => {
   try {
     const { fromDate, toDate, groupBy = 'employee', departmentId, sectionId } = req.query;
 
@@ -828,7 +866,7 @@ router.get('/costs', authenticate, authorize(['stores', 'hod-hos', 'admin']), as
  * @access  Private (Stores, HOD, Admin)
  * @query   days - forecast period in days (default: 90, max: 365)
  */
-router.get('/forecast-90-days', authenticate, authorize(['stores', 'hod-hos', 'admin']), async (req, res) => {
+router.get('/forecast-90-days', authenticate, authorize(['stores', 'hod', 'admin']), async (req, res) => {
   try {
     const { departmentId, sectionId, days } = req.query;
 
@@ -1029,7 +1067,7 @@ router.get('/stock-vs-forecast', authenticate, authorize(['stores', 'admin']), a
  * @desc    Total PPE issued value over a period with budget tracking using real budget data
  * @access  Private (Stores, HOD, Admin)
  */
-router.get('/issued-value', authenticate, authorize(['stores', 'hod-hos', 'admin']), async (req, res) => {
+router.get('/issued-value', authenticate, authorize(['stores', 'hod', 'admin']), async (req, res) => {
   try {
     const { fromDate, toDate, groupBy = 'month', departmentId, sectionId, alertThreshold } = req.query;
 
@@ -1155,7 +1193,7 @@ router.get('/issued-value', authenticate, authorize(['stores', 'hod-hos', 'admin
  * @desc    Compare PPE budget vs expenditure for a department
  * @access  Private (Stores, HOD, Admin)
  */
-router.get('/budget-vs-spend', authenticate, authorize(['stores', 'hod-hos', 'admin']), async (req, res) => {
+router.get('/budget-vs-spend', authenticate, authorize(['stores', 'hod', 'admin']), async (req, res) => {
   try {
     const { departmentId, fromDate, toDate } = req.query;
 
