@@ -197,9 +197,32 @@ router.get('/', authenticate, async (req, res, next) => {
       subQuery: false
     });
 
+    // Convert Sequelize instances to plain objects and ensure nextRenewalDate
+    // is calculated using the PPE item's replacementFrequency when available.
+    const allocationsPlain = allocations.map((a) => {
+      const obj = a.toJSON();
+
+      try {
+        const freq = a.ppeItem && a.ppeItem.replacementFrequency ? parseInt(a.ppeItem.replacementFrequency) : null;
+        let renewalDate = null;
+        if (obj.issueDate && freq && !isNaN(freq)) {
+          renewalDate = new Date(obj.issueDate);
+          renewalDate.setMonth(renewalDate.getMonth() + freq);
+        } else if (obj.nextRenewalDate) {
+          renewalDate = new Date(obj.nextRenewalDate);
+        }
+
+        obj.nextRenewalDate = renewalDate ? renewalDate.toISOString() : null;
+      } catch (e) {
+        obj.nextRenewalDate = obj.nextRenewalDate ? new Date(obj.nextRenewalDate).toISOString() : null;
+      }
+
+      return obj;
+    });
+
     res.json({
       success: true,
-      data: allocations,
+      data: allocationsPlain,
       pagination: {
         total: count,
         page: parseInt(page),
