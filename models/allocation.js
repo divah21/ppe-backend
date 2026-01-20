@@ -56,6 +56,11 @@ const Allocation = sequelize.define('Allocation', {
     allowNull: true,
     comment: 'Replacement frequency in months'
   },
+  requestItemId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'Optional link back to the originating RequestItem'
+  },
   stockId: {
     type: DataTypes.UUID,
     allowNull: true,

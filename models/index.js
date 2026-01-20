@@ -146,6 +146,10 @@ User.hasMany(Allocation, { foreignKey: 'issuedById', as: 'issuedAllocations' });
 Allocation.belongsTo(Request, { foreignKey: 'requestId', as: 'request', allowNull: true });
 Request.hasMany(Allocation, { foreignKey: 'requestId', as: 'allocations' });
 
+// Allocation <-> RequestItem (optional link to the originating request item)
+Allocation.belongsTo(RequestItem, { foreignKey: 'requestItemId', as: 'requestItem', allowNull: true });
+RequestItem.hasMany(Allocation, { foreignKey: 'requestItemId', as: 'allocations' });
+
 // Budget <-> Department
 Budget.belongsTo(Department, { foreignKey: 'departmentId', as: 'department' });
 Department.hasMany(Budget, { foreignKey: 'departmentId', as: 'budgets' });

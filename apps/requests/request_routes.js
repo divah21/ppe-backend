@@ -10,7 +10,8 @@ const {
   sendRequestSubmittedToHOD, 
   sendRequestApprovedToStores, 
   sendPPEReadyForCollection,
-  sendRequestRejectedEmail 
+  sendRequestRejectedEmail,
+  sendTemplatedEmail
 } = require('../../helpers/email_helper');
 
 // Helper function to include User with Employee name data
@@ -122,17 +123,17 @@ router.get('/', authenticate, async (req, res) => {
     } else if (userRole === 'department-rep' && req.user.departmentId) {
       // Dept Rep sees requests from their department that need their approval
       if (!status) {
-        where.status = { [Op.in]: ['dept-rep-review', 'hod-review', 'stores-review', 'approved', 'fulfilled'] };
+        where.status = { [Op.in]: ['dept-rep-review', 'hod-review', 'stores-review', 'approved', 'partially-fulfilled', 'fulfilled'] };
       }
     } else if (userRole === 'hod' && req.user.departmentId) {
       // HOD sees requests from their department that need their approval
       if (!status) {
-        where.status = { [Op.in]: ['hod-review', 'stores-review', 'approved', 'fulfilled'] };
+        where.status = { [Op.in]: ['hod-review', 'stores-review', 'approved', 'partially-fulfilled', 'fulfilled'] };
       }
     } else if (userRole === 'stores') {
       // Stores sees all requests that reached stores stage
       if (!status) {
-        where.status = { [Op.in]: ['stores-review', 'approved', 'fulfilled'] };
+        where.status = { [Op.in]: ['stores-review', 'approved', 'partially-fulfilled', 'fulfilled'] };
       }
     }
 
@@ -214,6 +215,15 @@ router.get('/:id', authenticate, async (req, res) => {
               required: false
             }]
           }]
+        },
+        // Include allocations for this request so the frontend can show replacements
+        {
+          model: Allocation,
+          as: 'allocations',
+          include: [
+            { model: PPEItem, as: 'ppeItem' },
+            { model: RequestItem, as: 'requestItem' }
+          ]
         }
       ]
     });
@@ -740,21 +750,15 @@ router.put('/:id/hod-approve', authenticate, authorize(['hod', 'admin']), auditL
           }));
           
           await sendRequestApprovedToStores(
-            { 
-              id: updatedRequest.id, 
+            {
+              id: updatedRequest.id,
               requestNumber: updatedRequest.requestNumber,
-              items 
+              items
             },
             {
               firstName: employee.firstName,
               lastName: employee.lastName,
-              worksNumber: employee.worksNumber,
-              department: employee.section?.department?.name,
-              section: employee.section?.name
-            },
-            { 
-              firstName: req.user.employee?.firstName || 'HOD',
-              lastName: req.user.employee?.lastName || ''
+              worksNumber: employee.worksNumber
             },
             storesEmails
           );
@@ -984,10 +988,10 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
   
   try {
     const { fulfillmentNote } = req.body;
-    
+
     const request = await Request.findByPk(req.params.id, {
       include: [
-        { model: Employee, as: 'targetEmployee' },
+        { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section' }] },
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ]
     });
@@ -1008,103 +1012,110 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
       });
     }
 
-    // Create allocations for each request item
-    const allocations = await Promise.all(
-      request.items.map(async (item) => {
-        // Check stock availability
-        const stock = await Stock.findOne({
-          where: { ppeItemId: item.ppeItemId },
-          transaction
+    // Similar to allocations controller: allow partial allocations.
+    const createdAllocations = [];
+    const pendingItems = [];
+
+    for (const item of request.items) {
+      // find stock for this PPE item, prefer highest quantity
+      let stock = await Stock.findOne({ where: { ppeItemId: item.ppeItemId }, order: [['quantity', 'DESC']], transaction });
+
+      if (!stock || stock.quantity < item.quantity) {
+        pendingItems.push({
+          requestItemId: item.id,
+          name: item.ppeItem?.name,
+          available: stock ? stock.quantity : 0,
+          requested: item.quantity,
+          size: item.size || null,
+          message: `Insufficient stock for ${item.ppeItem?.name}. Available: ${stock ? stock.quantity : 0}, Requested: ${item.quantity}`
         });
+        continue; // skip creating allocation for this item
+      }
 
-        if (!stock || stock.quantity < item.quantity) {
-          throw new Error(`Insufficient stock for ${item.ppeItem.name}. Available: ${stock?.quantity || 0}, Required: ${item.quantity}`);
-        }
+      // compute next renewal from issueDate + replacementFrequency if available
+      const issueDate = new Date();
+      const freq = item.ppeItem && (item.ppeItem.replacementFrequency || item.ppeItem.renewalFrequency) ? parseInt(item.ppeItem.replacementFrequency || item.ppeItem.renewalFrequency) : null;
+      const nextRenewalDate = new Date(issueDate);
+      if (freq && !isNaN(freq)) nextRenewalDate.setMonth(nextRenewalDate.getMonth() + freq);
 
-        // Get item cost
-        const unitCost = parseFloat(stock.unitPriceUSD || 0);
-        const totalCost = unitCost * item.quantity;
+      const allocation = await Allocation.create({
+        employeeId: request.employeeId,
+        ppeItemId: item.ppeItemId,
+        requestId: request.id,
+        issuedById: req.user.id,
+        quantity: item.quantity,
+        size: stock.size || item.size || null,
+        issueDate,
+        nextRenewalDate: freq ? nextRenewalDate : null,
+        status: 'active',
+        totalCost: (parseFloat(stock.unitPriceUSD) || 0) * item.quantity,
+        notes: `Allocated from request #${request.id.slice(0,8)}`
+      }, { transaction });
 
-        // Calculate renewal date (example: 12 months)
-        const renewalMonths = item.ppeItem.renewalFrequency || 12;
-        const nextRenewalDate = new Date();
-        nextRenewalDate.setMonth(nextRenewalDate.getMonth() + renewalMonths);
+      // deduct stock
+      await stock.update({ quantity: stock.quantity - item.quantity }, { transaction });
 
-        // Create allocation
-        const allocation = await Allocation.create({
-          employeeId: request.employeeId,
-          ppeItemId: item.ppeItemId,
-          quantity: item.quantity,
-          size: item.size,
-          unitCost,
-          totalCost,
-          issueDate: new Date(),
-          nextRenewalDate,
-          expiryDate: nextRenewalDate,
-          allocationType: request.requestType,
-          status: 'active',
-          replacementFrequency: renewalMonths,
-          notes: `Allocated from request #${request.id.slice(0, 8)}`
-        }, { transaction });
+      // update request item approvedQuantity
+      await RequestItem.update({ approvedQuantity: item.quantity }, { where: { id: item.id }, transaction });
 
-        // Update stock quantity
-        await stock.update({
-          quantity: stock.quantity - item.quantity
-        }, { transaction });
+      createdAllocations.push(allocation);
+    }
 
-        return allocation;
-      })
-    );
+    if (createdAllocations.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No allocations could be created due to insufficient stock for all items', pendingItems });
+    }
 
-    // Update request status
-    await request.update({
-      status: 'fulfilled',
-      fulfilledDate: new Date(),
-      fulfilledByUserId: req.user.id,
-      storesComment: fulfillmentNote || request.storesComment
-    }, { transaction });
+    const newStatus = pendingItems.length > 0 ? 'partially-fulfilled' : 'fulfilled';
+
+    await request.update({ status: newStatus, fulfilledDate: new Date(), fulfilledByUserId: req.user.id, storesComment: fulfillmentNote || request.storesComment }, { transaction });
 
     await transaction.commit();
 
-    const updatedRequest = await Request.findByPk(request.id, {
-      include: [
-        { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }] },
-        userInclude('createdBy'),
-        userInclude('sectionRepApprover'),
-        userInclude('deptRepApprover'),
-        userInclude('hodApprover'),
-        userInclude('storesApprover'),
-        userInclude('fulfilledBy'),
-        { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
-      ]
-    });
+    const fullAllocations = await Allocation.findAll({ where: { id: createdAllocations.map(a => a.id) }, include: [{ model: Employee, as: 'employee' }, { model: PPEItem, as: 'ppeItem' }, { model: User, as: 'issuedBy', attributes: ['id','username'], include: [{ model: Employee, as: 'employee', attributes: ['id','firstName','lastName'] }] }] });
 
-    // Send email notification to employee about PPE ready for collection
+    // Notify employee: either full ready-for-collection or partial templated email
     try {
-      const employee = updatedRequest.targetEmployee;
-      if (employee?.email) {
-        const allocatedItems = updatedRequest.items?.map(item => ({
-          name: item.ppeItem?.name || 'PPE Item',
-          quantity: item.quantity,
-          size: item.size || 'Standard'
-        }));
+      const allocatedItems = fullAllocations.map(a => ({ ppeName: a.ppeItem?.name || a.ppeItemId, quantity: a.quantity, size: a.size || 'Standard' }));
+      const pending = pendingItems || [];
 
-        await sendPPEReadyForCollection(
-          { id: updatedRequest.id, requestNumber: updatedRequest.requestNumber || updatedRequest.id.slice(0, 8) },
-          { firstName: employee.firstName, lastName: employee.lastName, email: employee.email },
-          allocatedItems
-        );
+      if (pending.length === 0) {
+        await sendPPEReadyForCollection(request, request.targetEmployee || request.employee, allocatedItems);
+      } else {
+        const allocatedRows = allocatedItems.map(i => `<tr><td style="padding:10px;border-bottom:1px solid #E5E7EB;">${i.ppeName}</td><td style="padding:10px;border-bottom:1px solid #E5E7EB;text-align:center;">${i.quantity}</td><td style="padding:10px;border-bottom:1px solid #E5E7EB;">${i.size}</td></tr>`).join('') || '<tr><td colspan="3" style="padding:10px;">No items allocated</td></tr>';
+        const pendingRows = pending.map(p => `<tr><td style="padding:10px;border-bottom:1px solid #E5E7EB;">${p.name}</td><td style="padding:10px;border-bottom:1px solid #E5E7EB;text-align:center;">${p.requested}</td><td style="padding:10px;border-bottom:1px solid #E5E7EB;">${p.size || 'N/A'}</td></tr>`).join('') || '<tr><td colspan="3" style="padding:10px;">No pending items</td></tr>';
+
+        const content = `
+          <p style="color: #374151; line-height: 1.6;">Hello <strong>${(request.targetEmployee && (request.targetEmployee.firstName + ' ' + request.targetEmployee.lastName)) || 'Employee'}</strong>,</p>
+          <p style="color: #374151; line-height: 1.6;">Your PPE request has been <strong>partially fulfilled</strong>. Some items have been allocated and are ready for collection; others are pending due to insufficient stock.</p>
+          <h3 style="color: #2563EB; margin-top: 18px;">Items Allocated</h3>
+          <table style="width:100%; border-collapse: collapse; margin: 8px 0;">
+            <thead>
+              <tr style="background-color:#10B981;color:white;"><th style="padding:12px;text-align:left;">PPE Item</th><th style="padding:12px;text-align:center;">Quantity</th><th style="padding:12px;text-align:left;">Size</th></tr>
+            </thead>
+            <tbody>
+              ${allocatedRows}
+            </tbody>
+          </table>
+          <h3 style="color: #2563EB; margin-top: 18px;">Items Pending</h3>
+          <table style="width:100%; border-collapse: collapse; margin: 8px 0;">
+            <thead>
+              <tr style="background-color:#F59E0B;color:white;"><th style="padding:12px;text-align:left;">PPE Item</th><th style="padding:12px;text-align:center;">Requested</th><th style="padding:12px;text-align:left;">Size</th></tr>
+            </thead>
+            <tbody>
+              ${pendingRows}
+            </tbody>
+          </table>
+          <p style="color: #374151; line-height: 1.6;">Allocated items are available at Stores. We will notify you when pending items become available.</p>
+        `;
+
+        await sendTemplatedEmail(request.targetEmployee?.email || request.employee?.email, `PPE Partially Fulfilled - #${request.requestNumber || request.id}`, 'PPE Partially Fulfilled', content, `${process.env.FRONTEND_URL || 'http://localhost:3000'}/stores/allocations/${request.id}`, 'View Request');
       }
-    } catch (emailError) {
-      console.error('Failed to send PPE collection notification:', emailError.message);
+    } catch (emailErr) {
+      console.error('Error sending fulfillment emails from requests controller:', emailErr);
     }
 
-    res.json({
-      success: true,
-      message: `Request fulfilled successfully. ${allocations.length} allocation(s) created.`,
-      data: updatedRequest,
-      allocations: allocations.map(a => a.id)
-    });
+    res.status(201).json({ success: true, message: newStatus === 'fulfilled' ? 'Request fulfilled successfully' : 'Request partially fulfilled', data: fullAllocations, pendingItems, status: newStatus });
   } catch (error) {
     await transaction.rollback();
     console.error('Error fulfilling request:', error);
