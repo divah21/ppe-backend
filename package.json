@@ -8,6 +8,8 @@
     "dev": "nodemon app.js",
     "db:sync": "node database/syncTables.js",
     "db:seed": "node database/seedData.js",
+    "db:migrate": "npx sequelize-cli db:migrate",
+    "db:migrate:single": "npx sequelize-cli db:migrate --to",
     "test": "jest --coverage"
   },
   "keywords": [

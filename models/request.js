@@ -15,6 +15,7 @@ const Request = sequelize.define('Request', {
       'stores-review',     // Approved by HOD, waiting for Stores
       'approved',          // Approved by Stores, ready to fulfill
       'fulfilled',         // Items issued to employee
+      'partially-fulfilled', // Some items issued, others pending
       'rejected',          // Rejected at any stage
       'cancelled',         // Cancelled by requester
       'sheq-review'        // Waiting for SHEQ Manager approval (replacement requests)
