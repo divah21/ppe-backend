@@ -535,21 +535,17 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
     }
 
     // Determine next status based on request type
+    // Note: SHEQ review is only for failure-related requests (handled separately)
     let nextStatus;
     let successMessage;
     
     switch (request.requestType) {
       case 'replacement':
-        // Replacement: Section Rep → SHEQ Manager
-        nextStatus = 'sheq-review';
-        successMessage = 'Request approved and forwarded to SHEQ Manager';
-        break;
-      
       case 'annual':
       case 'new':
       case 'emergency':
       default:
-        // Annual/New/Emergency: Section Rep → HOD (skipping Dept Rep for now)
+        // All regular requests: Section Rep → HOD → Stores
         nextStatus = 'hod-review';
         successMessage = 'Request approved and forwarded to Head of Department';
         break;
