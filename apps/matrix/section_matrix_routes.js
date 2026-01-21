@@ -146,8 +146,8 @@ router.post('/',
   authenticate,
   requireRole('stores', 'admin'),
   [
-    body('sectionId').isUUID().withMessage('Valid section ID is required'),
-    body('ppeItemId').isUUID().withMessage('Valid PPE item ID is required'),
+    body('sectionId').isUUID(4).withMessage('Valid section ID is required'),
+    body('ppeItemId').isUUID(4).withMessage('Valid PPE item ID is required'),
     body('quantityRequired').optional().isInt({ min: 1 }).withMessage('Quantity must be at least 1'),
     body('replacementFrequency').optional().isInt({ min: 1 }).withMessage('Replacement frequency must be positive'),
     body('isMandatory').optional().isBoolean(),
@@ -157,6 +157,8 @@ router.post('/',
   async (req, res, next) => {
     try {
       const { sectionId, ppeItemId, quantityRequired, replacementFrequency, isMandatory, notes } = req.body;
+
+      console.log('[SECTION MATRIX CREATE] Received:', { sectionId, ppeItemId, quantityRequired });
 
       // Check if entry already exists
       const existing = await SectionPPEMatrix.findOne({

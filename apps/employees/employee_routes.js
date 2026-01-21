@@ -235,19 +235,45 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
     // ==========================================
     // 1. Get PPE from Job Title Matrix
     // ==========================================
-    // Use ppeCategoryId mapping if available, otherwise fall back to direct jobTitleId
-    const matrixJobTitleId = employee.jobTitleRef?.ppeCategoryId || employee.jobTitleId;
-    const jobTitleMatrixWhere = { isActive: true };
-    if (matrixJobTitleId) {
-      jobTitleMatrixWhere.jobTitleId = matrixJobTitleId;
-    } else if (employee.jobTitle) {
-      jobTitleMatrixWhere.jobTitle = employee.jobTitle;
+    // Try multiple lookup strategies in order of priority:
+    // 1. Direct jobTitleId (most specific - the actual job title)
+    // 2. ppeCategoryId (if job title is mapped to a category)
+    // 3. jobTitle name string (fallback)
+    
+    let jobTitleMatrixEntries = [];
+    
+    // First try: lookup by direct jobTitleId
+    if (employee.jobTitleId) {
+      jobTitleMatrixEntries = await JobTitlePPEMatrix.findAll({
+        where: { jobTitleId: employee.jobTitleId, isActive: true },
+        include: [{ model: PPEItem, as: 'ppeItem' }]
+      });
+      if (jobTitleMatrixEntries.length > 0) {
+        console.log(`[PPE-ELIGIBILITY] Found ${jobTitleMatrixEntries.length} entries by jobTitleId`);
+      }
     }
-
-    const jobTitleMatrixEntries = await JobTitlePPEMatrix.findAll({
-      where: jobTitleMatrixWhere,
-      include: [{ model: PPEItem, as: 'ppeItem' }]
-    });
+    
+    // Second try: if no entries found and ppeCategoryId exists, try that
+    if (jobTitleMatrixEntries.length === 0 && employee.jobTitleRef?.ppeCategoryId) {
+      jobTitleMatrixEntries = await JobTitlePPEMatrix.findAll({
+        where: { jobTitleId: employee.jobTitleRef.ppeCategoryId, isActive: true },
+        include: [{ model: PPEItem, as: 'ppeItem' }]
+      });
+      if (jobTitleMatrixEntries.length > 0) {
+        console.log(`[PPE-ELIGIBILITY] Found ${jobTitleMatrixEntries.length} entries by ppeCategoryId`);
+      }
+    }
+    
+    // Third try: fallback to jobTitle name string
+    if (jobTitleMatrixEntries.length === 0 && employee.jobTitle) {
+      jobTitleMatrixEntries = await JobTitlePPEMatrix.findAll({
+        where: { jobTitle: employee.jobTitle, isActive: true },
+        include: [{ model: PPEItem, as: 'ppeItem' }]
+      });
+      if (jobTitleMatrixEntries.length > 0) {
+        console.log(`[PPE-ELIGIBILITY] Found ${jobTitleMatrixEntries.length} entries by jobTitle name`);
+      }
+    }
 
     // ==========================================
     // 2. Get PPE from Section Matrix
@@ -264,37 +290,44 @@ router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
     }
 
     // ==========================================
-    // 3. Merge both matrices (Job Title overrides Section)
+    // 3. Use Job Title Matrix ONLY if it exists, otherwise fall back to Section Matrix
     // ==========================================
-    // Create a map to track PPE items - Job Title takes priority
+    // Priority: If job title has PPE configured, use ONLY job title matrix
+    // Only use section matrix if NO job title matrix entries exist
     const ppeItemMap = new Map();
     
-    // First, add all Section Matrix items (baseline)
-    for (const entry of sectionMatrixEntries) {
-      if (entry.ppeItem) {
-        ppeItemMap.set(entry.ppeItem.id, {
-          source: 'section',
-          entry: entry,
-          ppeItem: entry.ppeItem,
-          quantityRequired: entry.quantityRequired,
-          replacementFrequency: entry.replacementFrequency,
-          isMandatory: entry.isMandatory
-        });
+    if (jobTitleMatrixEntries.length > 0) {
+      // Job Title Matrix exists - use ONLY job title matrix, ignore section
+      console.log(`[PPE-ELIGIBILITY] Employee ${employee.id}: Using Job Title Matrix (${jobTitleMatrixEntries.length} items), ignoring Section Matrix`);
+      for (const entry of jobTitleMatrixEntries) {
+        if (entry.ppeItem) {
+          ppeItemMap.set(entry.ppeItem.id, {
+            source: 'jobTitle',
+            entry: entry,
+            ppeItem: entry.ppeItem,
+            quantityRequired: entry.quantityRequired,
+            replacementFrequency: entry.replacementFrequency,
+            isMandatory: entry.isMandatory !== undefined ? entry.isMandatory : true
+          });
+        }
       }
-    }
-
-    // Then, add/override with Job Title Matrix items (takes priority)
-    for (const entry of jobTitleMatrixEntries) {
-      if (entry.ppeItem) {
-        ppeItemMap.set(entry.ppeItem.id, {
-          source: 'jobTitle',
-          entry: entry,
-          ppeItem: entry.ppeItem,
-          quantityRequired: entry.quantityRequired,
-          replacementFrequency: entry.replacementFrequency,
-          isMandatory: entry.isMandatory !== undefined ? entry.isMandatory : true
-        });
+    } else if (sectionMatrixEntries.length > 0) {
+      // No Job Title Matrix - fall back to Section Matrix
+      console.log(`[PPE-ELIGIBILITY] Employee ${employee.id}: No Job Title Matrix found, using Section Matrix (${sectionMatrixEntries.length} items)`);
+      for (const entry of sectionMatrixEntries) {
+        if (entry.ppeItem) {
+          ppeItemMap.set(entry.ppeItem.id, {
+            source: 'section',
+            entry: entry,
+            ppeItem: entry.ppeItem,
+            quantityRequired: entry.quantityRequired,
+            replacementFrequency: entry.replacementFrequency,
+            isMandatory: entry.isMandatory
+          });
+        }
       }
+    } else {
+      console.log(`[PPE-ELIGIBILITY] Employee ${employee.id}: No PPE Matrix found (neither Job Title nor Section)`);
     }
 
     // ==========================================

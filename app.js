@@ -169,6 +169,14 @@ const startServer = async () => {
     } catch (backupError) {
       console.warn('⚠️  Could not initialize backup scheduler:', backupError.message);
     }
+
+    // Initialize cron jobs for scheduled notifications
+    try {
+      const { initializeCronJobs } = require('./scripts/cron_scheduler');
+      initializeCronJobs();
+    } catch (cronError) {
+      console.warn('⚠️  Could not initialize cron scheduler:', cronError.message);
+    }
     
     // Start server
     app.listen(PORT, () => {

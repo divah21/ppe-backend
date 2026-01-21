@@ -190,6 +190,82 @@ router.get('/by-job-title/:jobTitle', authenticate, async (req, res, next) => {
 });
 
 /**
+ * @route   GET /api/v1/matrix/bulk-upload-template
+ * @desc    Get template data for bulk matrix upload (PPE items, sections, job titles)
+ * @access  Private
+ */
+router.get('/bulk-upload-template', authenticate, async (req, res, next) => {
+  try {
+    console.log('[MATRIX TEMPLATE] Fetching template data for bulk upload...');
+    
+    // Get all PPE items
+    const ppeItems = await PPEItem.findAll({
+      where: { isActive: true },
+      attributes: ['id', 'name', 'itemCode', 'category', 'replacementFrequency', 'unit'],
+      order: [['category', 'ASC'], ['name', 'ASC']]
+    });
+    console.log(`[MATRIX TEMPLATE] Found ${ppeItems.length} PPE items`);
+
+    // Get all sections with departments
+    const sections = await Section.findAll({
+      include: [{ 
+        model: Department, 
+        as: 'department', 
+        attributes: ['id', 'name'],
+        required: false
+      }],
+      order: [['name', 'ASC']]
+    });
+    console.log(`[MATRIX TEMPLATE] Found ${sections.length} sections`);
+
+    // Get all job titles
+    const jobTitles = await JobTitle.findAll({
+      include: [{ 
+        model: Section, 
+        as: 'section',
+        required: false,
+        include: [{ 
+          model: Department, 
+          as: 'department', 
+          attributes: ['id', 'name'],
+          required: false
+        }]
+      }],
+      order: [['name', 'ASC']]
+    });
+    console.log(`[MATRIX TEMPLATE] Found ${jobTitles.length} job titles`);
+
+    res.json({
+      success: true,
+      data: {
+        ppeItems: ppeItems.map(p => ({
+          id: p.id,
+          name: p.name,
+          itemCode: p.itemCode || '',
+          category: p.category || '',
+          replacementFrequency: p.replacementFrequency,
+          unit: p.unit || 'Each'
+        })),
+        sections: sections.map(s => ({
+          id: s.id,
+          name: s.name,
+          department: s.department?.name || 'Unknown'
+        })),
+        jobTitles: jobTitles.map(jt => ({
+          id: jt.id,
+          name: jt.name,
+          section: jt.section?.name || 'Unknown',
+          department: jt.section?.department?.name || 'Unknown'
+        }))
+      }
+    });
+  } catch (error) {
+    console.error('[MATRIX TEMPLATE] Error fetching template data:', error);
+    next(error);
+  }
+});
+
+/**
  * @route   GET /api/v1/matrix/:id
  * @desc    Get single matrix entry by ID
  * @access  Private
@@ -994,11 +1070,20 @@ router.post(
             continue;
           }
 
-          // Handle multiple job titles (comma or & separated)
-          const jobTitleNames = jobTitleName
-            .split(/[,&]/)
-            .map(jt => jt.trim())
-            .filter(jt => jt.length > 0);
+          // Handle job title lookup - first try exact match, then try splitting by comma/&
+          let jobTitleNames = [];
+          const trimmedJobTitle = jobTitleName.trim();
+          
+          // First, check if the full job title name exists in the database (exact match)
+          if (jobTitleByName.has(trimmedJobTitle.toLowerCase())) {
+            jobTitleNames = [trimmedJobTitle];
+          } else {
+            // If no exact match, try splitting by comma or & (for old format compatibility)
+            jobTitleNames = trimmedJobTitle
+              .split(/[,&]/)
+              .map(jt => jt.trim())
+              .filter(jt => jt.length > 0);
+          }
 
           if (jobTitleNames.length === 0) {
             results.errors.push({ entry, error: 'Job title/occupation is required' });
@@ -1128,64 +1213,5 @@ router.post(
     }
   }
 );
-
-/**
- * @route   GET /api/v1/matrix/bulk-upload-template
- * @desc    Get template data for bulk matrix upload (PPE items, sections, job titles)
- * @access  Private
- */
-router.get('/bulk-upload-template', authenticate, async (req, res, next) => {
-  try {
-    // Get all PPE items
-    const ppeItems = await PPEItem.findAll({
-      where: { isActive: true },
-      attributes: ['id', 'name', 'itemCode', 'category', 'replacementFrequency', 'unit'],
-      order: [['category', 'ASC'], ['name', 'ASC']]
-    });
-
-    // Get all sections with departments
-    const sections = await Section.findAll({
-      include: [{ model: Department, as: 'department', attributes: ['id', 'name'] }],
-      order: [['name', 'ASC']]
-    });
-
-    // Get all job titles
-    const jobTitles = await JobTitle.findAll({
-      include: [{ 
-        model: Section, 
-        as: 'section',
-        include: [{ model: Department, as: 'department', attributes: ['id', 'name'] }]
-      }],
-      order: [['name', 'ASC']]
-    });
-
-    res.json({
-      success: true,
-      data: {
-        ppeItems: ppeItems.map(p => ({
-          id: p.id,
-          name: p.name,
-          itemCode: p.itemCode,
-          category: p.category,
-          replacementFrequency: p.replacementFrequency,
-          unit: p.unit
-        })),
-        sections: sections.map(s => ({
-          id: s.id,
-          name: s.name,
-          department: s.department?.name || 'Unknown'
-        })),
-        jobTitles: jobTitles.map(jt => ({
-          id: jt.id,
-          name: jt.name,
-          section: jt.section?.name || 'Unknown',
-          department: jt.section?.department?.name || 'Unknown'
-        }))
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
-});
 
 module.exports = router;
