@@ -478,11 +478,8 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
     }
 
     let nextStatus;
-    if (request.requestType === 'replacement') {
-      // Replacement: Section Rep -> SHEQ -> HOD -> Stores
-      nextStatus = 'sheq-review';
-    } else if (request.requestType === 'annual') {
-      // Annual: Section Rep -> HOD -> Stores (skip dept-rep)
+    if (request.requestType === 'replacement' || request.requestType === 'annual') {
+      // Replacement & Annual: Section Rep -> HOD -> Stores (SHEQ only for failure reports)
       nextStatus = 'hod-review';
     } else {
       // Default (e.g. new, emergency) keeps legacy dept-rep step
@@ -506,9 +503,7 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
     });
 
     const message =
-      nextStatus === 'sheq-review'
-        ? 'Request approved and forwarded to SHEQ Manager'
-        : nextStatus === 'hod-review'
+      nextStatus === 'hod-review'
         ? 'Request approved and forwarded to Head of Department'
         : 'Request approved and forwarded to Department Representative';
 

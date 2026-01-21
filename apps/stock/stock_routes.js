@@ -974,7 +974,8 @@ router.post(
             expiryDate,
             batchNumber,
             size: itemSize,    // Size from Excel
-            color: itemColor   // Color from Excel
+            color: itemColor,  // Color from Excel
+            gender: itemGender // Gender from Excel (MALE, FEMALE, UNISEX)
           } = item;
 
           // Find the PPE item using multiple matching strategies
@@ -1140,6 +1141,16 @@ router.post(
           // Extract size and color - prefer Excel values over extracted from description
           const extractedSize = normalizeSize(itemSize) || normalizeSize(extractSize(fullDescription)) || null;
           const extractedColor = itemColor || extractColor(fullDescription) || null;
+          // Normalize gender value
+          const normalizeGender = (gender) => {
+            if (!gender) return null;
+            const upper = gender.toString().toUpperCase().trim();
+            if (['MALE', 'M'].includes(upper)) return 'MALE';
+            if (['FEMALE', 'F'].includes(upper)) return 'FEMALE';
+            if (['UNISEX', 'U', 'ANY', 'ALL'].includes(upper)) return 'UNISEX';
+            return null;
+          };
+          const extractedGender = normalizeGender(itemGender) || (ppeItem?.targetGender) || null;
           
           // Parse expiry date properly (handles Excel date formats)
           let parsedExpiryDate = null;
@@ -1170,6 +1181,7 @@ router.post(
               ppeItemId: ppeItem.id,
               size: extractedSize,
               color: extractedColor,
+              gender: extractedGender,
               location: location || 'Main Store',
               batchNumber: stockBatchNumber
             }
@@ -1217,6 +1229,7 @@ router.post(
               unitPriceUSD: unitPrice ? parseFloat(unitPrice) : 0,
               size: extractedSize,
               color: extractedColor,
+              gender: extractedGender,
               location: location || 'Main Store',
               stockAccount: accountCode || null,
               expiryDate: parsedExpiryDate,

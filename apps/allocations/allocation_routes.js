@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Allocation, Employee, PPEItem, User, Request, RequestItem, Stock, Section, Department, Budget, Role } = require('../../models');
+const { Allocation, Employee, PPEItem, User, Request, RequestItem, Stock, Section, Department, Budget, Role, JobTitlePPEMatrix, SectionPPEMatrix, JobTitle } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
@@ -279,6 +279,133 @@ router.get('/renewals', authenticate, requireRole('stores', 'admin'), async (req
       }
     });
   } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/allocations/section-renewals
+ * @desc    Get allocations due for renewal for a specific section (calculated from issueDate + replacementFrequency)
+ * @access  Private (Section Rep, Dept Rep, HOD, Admin)
+ */
+router.get('/section-renewals', authenticate, requireRole('section-rep', 'dept-rep', 'hod', 'admin'), async (req, res, next) => {
+  try {
+    const { sectionId, daysAhead = 90, includeExpired = 'true' } = req.query;
+    
+    // Section reps can only view their own section (use req.userRole for the string role name)
+    const userRole = req.userRole || req.user?.role?.name;
+    const userSectionId = req.user?.sectionId || req.user?.employee?.sectionId;
+    
+    const effectiveSectionId = userRole === 'section-rep' ? userSectionId : (sectionId || userSectionId);
+    
+    if (!effectiveSectionId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Section ID is required. Ensure the user is linked to an employee with a section.'
+      });
+    }
+
+    // Get all active allocations for the section with PPE item details
+    const allocations = await Allocation.findAll({
+      where: {
+        status: 'active'
+      },
+      include: [
+        { 
+          model: Employee, 
+          as: 'employee',
+          where: { sectionId: effectiveSectionId, isActive: true },
+          include: [
+            { model: Section, as: 'section', include: [{ model: Department, as: 'department' }] },
+            { model: JobTitle, as: 'jobTitleRef', attributes: ['id', 'name'] }
+          ]
+        },
+        { 
+          model: PPEItem, 
+          as: 'ppeItem',
+          attributes: ['id', 'name', 'itemCode', 'category', 'replacementFrequency', 'heavyUseFrequency']
+        }
+      ],
+      order: [['issueDate', 'ASC']]
+    });
+
+    const now = new Date();
+    const futureDate = new Date();
+    futureDate.setDate(futureDate.getDate() + parseInt(daysAhead));
+
+    // Calculate renewal dates and filter
+    const renewalItems = [];
+    
+    for (const alloc of allocations) {
+      // Calculate renewal date from issueDate + replacementFrequency
+      const replacementFrequency = alloc.ppeItem?.replacementFrequency || alloc.replacementFrequency || 12;
+      const issueDate = new Date(alloc.issueDate);
+      const renewalDate = new Date(issueDate);
+      renewalDate.setMonth(renewalDate.getMonth() + replacementFrequency);
+
+      const daysUntilRenewal = Math.ceil((renewalDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+      const isExpired = daysUntilRenewal < 0;
+      const isDueWithinPeriod = daysUntilRenewal <= parseInt(daysAhead);
+
+      // Include if expired (and includeExpired=true) or due within period
+      if ((isExpired && includeExpired === 'true') || (isDueWithinPeriod && !isExpired)) {
+        renewalItems.push({
+          id: alloc.id,
+          issueDate: alloc.issueDate,
+          quantity: alloc.quantity,
+          size: alloc.size,
+          status: alloc.status,
+          renewalDate: renewalDate,
+          daysUntilRenewal: daysUntilRenewal,
+          isExpired: isExpired,
+          replacementFrequency: replacementFrequency,
+          employee: {
+            id: alloc.employee.id,
+            firstName: alloc.employee.firstName,
+            lastName: alloc.employee.lastName,
+            worksNumber: alloc.employee.worksNumber,
+            email: alloc.employee.email,
+            section: alloc.employee.section,
+            jobTitle: alloc.employee.jobTitleRef
+          },
+          ppeItem: {
+            id: alloc.ppeItem.id,
+            name: alloc.ppeItem.name,
+            itemCode: alloc.ppeItem.itemCode,
+            category: alloc.ppeItem.category,
+            replacementFrequency: alloc.ppeItem.replacementFrequency
+          }
+        });
+      }
+    }
+
+    // Sort by renewal date (most urgent first - expired items first, then by days until renewal)
+    renewalItems.sort((a, b) => {
+      if (a.isExpired && !b.isExpired) return -1;
+      if (!a.isExpired && b.isExpired) return 1;
+      return a.daysUntilRenewal - b.daysUntilRenewal;
+    });
+
+    // Calculate stats
+    const stats = {
+      total: renewalItems.length,
+      expired: renewalItems.filter(r => r.isExpired).length,
+      next7Days: renewalItems.filter(r => !r.isExpired && r.daysUntilRenewal <= 7).length,
+      next30Days: renewalItems.filter(r => !r.isExpired && r.daysUntilRenewal <= 30).length,
+      next90Days: renewalItems.filter(r => !r.isExpired && r.daysUntilRenewal <= 90).length
+    };
+
+    res.json({
+      success: true,
+      data: renewalItems,
+      meta: {
+        sectionId: effectiveSectionId,
+        daysAhead: parseInt(daysAhead),
+        stats: stats
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching section renewals:', error);
     next(error);
   }
 });
@@ -1494,6 +1621,235 @@ router.post(
     }
   }
 );
+
+/**
+ * @route   GET /api/v1/allocations/bulk-upload/matrix-items
+ * @desc    Get PPE items and employees for bulk upload template (by job title or section)
+ * @access  Private (Stores, Admin only)
+ * @query   mode - 'job_title' or 'section'
+ * @query   jobTitleId - required if mode is 'job_title'
+ * @query   sectionId - required if mode is 'section'
+ */
+router.get('/bulk-upload/matrix-items', authenticate, requireRole('stores', 'admin'), async (req, res, next) => {
+  try {
+    const { mode, jobTitleId, sectionId } = req.query;
+
+    if (!mode || !['job_title', 'section'].includes(mode)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mode must be either "job_title" or "section"'
+      });
+    }
+
+    let employees = [];
+    let matrixPPEItems = [];
+    let contextName = '';
+
+    if (mode === 'job_title') {
+      if (!jobTitleId) {
+        return res.status(400).json({
+          success: false,
+          message: 'jobTitleId is required when mode is "job_title"'
+        });
+      }
+
+      // Get the job title info
+      const jobTitle = await JobTitle.findByPk(jobTitleId, {
+        include: [{ model: Section, as: 'section', include: [{ model: Department, as: 'department' }] }]
+      });
+
+      if (!jobTitle) {
+        return res.status(404).json({
+          success: false,
+          message: 'Job title not found'
+        });
+      }
+
+      contextName = jobTitle.name;
+
+      // Get employees with this job title
+      employees = await Employee.findAll({
+        where: { jobTitleId, isActive: true },
+        attributes: ['id', 'firstName', 'lastName', 'worksNumber', 'sectionId'],
+        order: [['lastName', 'ASC'], ['firstName', 'ASC']]
+      });
+
+      // Get PPE items from job title matrix
+      const jobTitleMatrixItems = await JobTitlePPEMatrix.findAll({
+        where: { jobTitleId, isActive: true },
+        include: [{
+          model: PPEItem,
+          as: 'ppeItem',
+          where: { isActive: true, itemType: 'PPE' },
+          attributes: ['id', 'name', 'itemCode', 'category', 'replacementFrequency']
+        }]
+      });
+
+      matrixPPEItems = jobTitleMatrixItems
+        .filter(item => item.ppeItem)
+        .map(item => ({
+          id: item.ppeItem.id,
+          name: item.ppeItem.name,
+          itemCode: item.ppeItem.itemCode,
+          category: item.ppeItem.category,
+          replacementFrequency: item.ppeItem.replacementFrequency,
+          quantityRequired: item.quantityRequired || 1
+        }));
+
+    } else if (mode === 'section') {
+      if (!sectionId) {
+        return res.status(400).json({
+          success: false,
+          message: 'sectionId is required when mode is "section"'
+        });
+      }
+
+      // Get the section info
+      const section = await Section.findByPk(sectionId, {
+        include: [{ model: Department, as: 'department' }]
+      });
+
+      if (!section) {
+        return res.status(404).json({
+          success: false,
+          message: 'Section not found'
+        });
+      }
+
+      contextName = section.name;
+
+      // Get all employees in this section
+      employees = await Employee.findAll({
+        where: { sectionId, isActive: true },
+        attributes: ['id', 'firstName', 'lastName', 'worksNumber', 'jobTitleId'],
+        order: [['lastName', 'ASC'], ['firstName', 'ASC']]
+      });
+
+      // Get PPE items from section matrix (baseline for everyone in section)
+      const sectionMatrixItems = await SectionPPEMatrix.findAll({
+        where: { sectionId, isActive: true },
+        include: [{
+          model: PPEItem,
+          as: 'ppeItem',
+          where: { isActive: true, itemType: 'PPE' },
+          attributes: ['id', 'name', 'itemCode', 'category', 'replacementFrequency']
+        }]
+      });
+
+      matrixPPEItems = sectionMatrixItems
+        .filter(item => item.ppeItem)
+        .map(item => ({
+          id: item.ppeItem.id,
+          name: item.ppeItem.name,
+          itemCode: item.ppeItem.itemCode,
+          category: item.ppeItem.category,
+          replacementFrequency: item.ppeItem.replacementFrequency,
+          quantityRequired: item.quantityRequired || 1
+        }));
+    }
+
+    // Sort PPE items by name
+    matrixPPEItems.sort((a, b) => a.name.localeCompare(b.name));
+
+    res.json({
+      success: true,
+      data: {
+        mode,
+        contextName,
+        employees: employees.map(e => ({
+          id: e.id,
+          firstName: e.firstName,
+          lastName: e.lastName,
+          worksNumber: e.worksNumber
+        })),
+        ppeItems: matrixPPEItems
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/allocations/bulk-upload/job-titles
+ * @desc    Get job titles with their sections for bulk upload dropdown
+ * @access  Private (Stores, Admin only)
+ */
+router.get('/bulk-upload/job-titles', authenticate, requireRole('stores', 'admin'), async (req, res, next) => {
+  try {
+    // Get all job titles that have a matrix defined
+    const jobTitlesWithMatrix = await JobTitlePPEMatrix.findAll({
+      where: { isActive: true },
+      attributes: ['jobTitleId'],
+      group: ['jobTitleId']
+    });
+
+    const jobTitleIds = jobTitlesWithMatrix.map(j => j.jobTitleId).filter(id => id);
+
+    // Get job title details
+    const jobTitles = await JobTitle.findAll({
+      where: { 
+        id: { [Op.in]: jobTitleIds },
+        isActive: true 
+      },
+      include: [{
+        model: Section,
+        as: 'section',
+        include: [{ model: Department, as: 'department' }]
+      }],
+      order: [['name', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: jobTitles.map(jt => ({
+        id: jt.id,
+        name: jt.name,
+        sectionId: jt.sectionId,
+        sectionName: jt.section?.name,
+        departmentName: jt.section?.department?.name
+      }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/allocations/bulk-upload/sections-with-matrix
+ * @desc    Get sections that have a matrix defined for bulk upload dropdown
+ * @access  Private (Stores, Admin only)
+ */
+router.get('/bulk-upload/sections-with-matrix', authenticate, requireRole('stores', 'admin'), async (req, res, next) => {
+  try {
+    // Get all sections that have a section matrix defined
+    const sectionsWithMatrix = await SectionPPEMatrix.findAll({
+      where: { isActive: true },
+      attributes: ['sectionId'],
+      group: ['sectionId']
+    });
+
+    const sectionIds = sectionsWithMatrix.map(s => s.sectionId).filter(id => id);
+
+    // Get section details
+    const sections = await Section.findAll({
+      where: { id: { [Op.in]: sectionIds } },
+      include: [{ model: Department, as: 'department' }],
+      order: [['name', 'ASC']]
+    });
+
+    res.json({
+      success: true,
+      data: sections.map(s => ({
+        id: s.id,
+        name: s.name,
+        departmentName: s.department?.name
+      }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 /**
  * @route   GET /api/v1/allocations/bulk-upload/template
