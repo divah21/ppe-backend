@@ -1141,16 +1141,16 @@ router.post(
           // Extract size and color - prefer Excel values over extracted from description
           const extractedSize = normalizeSize(itemSize) || normalizeSize(extractSize(fullDescription)) || null;
           const extractedColor = itemColor || extractColor(fullDescription) || null;
-          // Normalize gender value
+          // Normalize gender value to lowercase to match database enum ('male', 'female', 'unisex')
           const normalizeGender = (gender) => {
             if (!gender) return null;
             const upper = gender.toString().toUpperCase().trim();
-            if (['MALE', 'M'].includes(upper)) return 'MALE';
-            if (['FEMALE', 'F'].includes(upper)) return 'FEMALE';
-            if (['UNISEX', 'U', 'ANY', 'ALL'].includes(upper)) return 'UNISEX';
+            if (['MALE', 'M'].includes(upper)) return 'male';
+            if (['FEMALE', 'F'].includes(upper)) return 'female';
+            if (['UNISEX', 'U', 'ANY', 'ALL'].includes(upper)) return 'unisex';
             return null;
           };
-          const extractedGender = normalizeGender(itemGender) || (ppeItem?.targetGender) || null;
+          const extractedGender = normalizeGender(itemGender) || (ppeItem?.targetGender ? ppeItem.targetGender.toLowerCase() : null);
           
           // Parse expiry date properly (handles Excel date formats)
           let parsedExpiryDate = null;
