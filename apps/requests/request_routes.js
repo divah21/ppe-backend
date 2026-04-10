@@ -1105,7 +1105,7 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
           <p style="color: #374151; line-height: 1.6;">Allocated items are available at Stores. We will notify you when pending items become available.</p>
         `;
 
-        await sendTemplatedEmail(request.targetEmployee?.email || request.employee?.email, `PPE Partially Fulfilled - #${request.requestNumber || request.id}`, 'PPE Partially Fulfilled', content, `${process.env.FRONTEND_URL || 'http://localhost:3000'}/stores/allocations/${request.id}`, 'View Request');
+        await sendTemplatedEmail(request.targetEmployee?.email || request.employee?.email, `PPE Partially Fulfilled - #${request.requestNumber || request.id}`, 'PPE Partially Fulfilled', content, `${process.env.FRONTEND_URL || 'https://chengeto.eurekasystems.biz'}/stores/allocations/${request.id}`, 'View Request');
       }
     } catch (emailErr) {
       console.error('Error sending fulfillment emails from requests controller:', emailErr);

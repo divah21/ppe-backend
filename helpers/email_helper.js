@@ -4,7 +4,7 @@ const emailLogger = require('./email_logger.js');
 // Chengeto PPE System Branding
 const BRAND_COLOR = '#2563EB'; // Blue theme
 const BRAND_SECONDARY = '#1E40AF';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://chengeto.eurekasystems.biz';
 const SYSTEM_NAME = 'Chengeto PPE System';
 
 /**

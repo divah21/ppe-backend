@@ -963,7 +963,7 @@ router.post(
               <p style="color: #374151; line-height: 1.6;">Allocated items are available at Stores. We will notify you when pending items become available.</p>
             `;
 
-            await sendTemplatedEmail(request.targetEmployee?.email || request.employee?.email, `PPE Partially Fulfilled - #${request.requestNumber || request.id}`, 'PPE Partially Fulfilled', content, `${process.env.FRONTEND_URL || 'http://localhost:3000'}/stores/allocations/${request.id}`, 'View Request');
+            await sendTemplatedEmail(request.targetEmployee?.email || request.employee?.email, `PPE Partially Fulfilled - #${request.requestNumber || request.id}`, 'PPE Partially Fulfilled', content, `${process.env.FRONTEND_URL || 'https://chengeto.eurekasystems.biz'}/stores/allocations/${request.id}`, 'View Request');
           }
         } catch (empEmailErr) {
           console.error('Error sending allocation email to employee:', empEmailErr);
@@ -991,7 +991,7 @@ router.post(
                     <p style="color:#374151;">Please advise the employee to collect allocated items from Stores.</p>
                   `;
 
-                  await sendTemplatedEmail(recipients.join(','), `PPE Request Processed - #${request.requestNumber || request.id}`, 'PPE Request Processed', content, `${process.env.FRONTEND_URL || 'http://localhost:3000'}/stores/allocations/${request.id}`, 'View Request');
+                  await sendTemplatedEmail(recipients.join(','), `PPE Request Processed - #${request.requestNumber || request.id}`, 'PPE Request Processed', content, `${process.env.FRONTEND_URL || 'https://chengeto.eurekasystems.biz'}/stores/allocations/${request.id}`, 'View Request');
                 }
               }
             }

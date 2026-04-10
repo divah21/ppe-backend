@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
@@ -178,10 +179,11 @@ const startServer = async () => {
       console.warn('⚠️  Could not initialize cron scheduler:', cronError.message);
     }
     
-    // Start server
+    // Start HTTP server (Nginx handles SSL termination)
     app.listen(PORT, () => {
       console.log('\n🚀 ========================================');
-      console.log(`   PPE Management System API`);
+      console.log(`   PPE Management System API (HTTP)`);
+      console.log(`   Nginx handles SSL termination`);
       console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`   Server running on port ${PORT}`);
       console.log(`   API Base: http://localhost:${PORT}${API_PREFIX}`);
