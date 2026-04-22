@@ -52,34 +52,42 @@ const PORT = process.env.PORT || 5000;
 // Security
 app.use(helmet());
 
-// CORS — restrict to known origins
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+// Trust the first proxy hop (Nginx) so rate-limit sees real client IP
+app.set('trust proxy', 1);
+
+// CORS - env-driven allowlist (never '*' with credentials)
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000')
   .split(',')
   .map(o => o.trim())
   .filter(Boolean);
 
 app.use(cors({
-  origin: allowedOrigins.length ? allowedOrigins : false,
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // server-to-server, curl, same-origin
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS blocked: ${origin}`));
+  },
   credentials: true
 }));
 
-// Global rate limiter
+// Global API rate limiter (protects against scraping and brute force floods)
 const globalLimiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10) || 100,
+  windowMs: 60 * 1000,
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many requests, please try again later.' }
+  message: { success: false, message: 'Too many requests, slow down.' }
 });
 app.use(globalLimiter);
 
-// Strict auth rate limiter (5 attempts per 15 min)
+// Stricter limiter on auth endpoints (login brute-force, password reset abuse)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5,
+  max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many login attempts, please try again after 15 minutes.' }
+  skipSuccessfulRequests: true,
+  message: { success: false, message: 'Too many auth attempts, try again later.' }
 });
 
 // Body parsing - increased limit for bulk uploads
@@ -119,12 +127,14 @@ app.get('/health', async (req, res) => {
     await sequelize.authenticate();
     res.json({
       status: 'healthy',
+      database: 'connected',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
     res.status(503).json({
       status: 'unhealthy',
-      timestamp: new Date().toISOString()
+      database: 'disconnected',
+      error: error.message
     });
   }
 });
