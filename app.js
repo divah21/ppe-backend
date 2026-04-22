@@ -4,6 +4,7 @@ const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
 const { sequelize, testConnection } = require('./database/db');
 
 // Import models to ensure associations are set up
@@ -51,11 +52,35 @@ const PORT = process.env.PORT || 5000;
 // Security
 app.use(helmet());
 
-// CORS
+// CORS — restrict to known origins
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: '*',
+  origin: allowedOrigins.length ? allowedOrigins : false,
   credentials: true
 }));
+
+// Global rate limiter
+const globalLimiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 15 * 60 * 1000,
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10) || 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' }
+});
+app.use(globalLimiter);
+
+// Strict auth rate limiter (5 attempts per 15 min)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts, please try again after 15 minutes.' }
+});
 
 // Body parsing - increased limit for bulk uploads
 app.use(express.json({ limit: '10mb' }));
@@ -94,14 +119,12 @@ app.get('/health', async (req, res) => {
     await sequelize.authenticate();
     res.json({
       status: 'healthy',
-      database: 'connected',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
     res.status(503).json({
       status: 'unhealthy',
-      database: 'disconnected',
-      error: error.message
+      timestamp: new Date().toISOString()
     });
   }
 });
@@ -109,7 +132,7 @@ app.get('/health', async (req, res) => {
 // API Routes
 const API_PREFIX = `/api/${process.env.API_VERSION || 'v1'}`;
 
-app.use(`${API_PREFIX}/auth`, authRoutes);
+app.use(`${API_PREFIX}/auth`, authLimiter, authRoutes);
 app.use(`${API_PREFIX}/users`, userRoutes);
 app.use(`${API_PREFIX}/departments`, departmentRoutes);
 app.use(`${API_PREFIX}/sections`, sectionRoutes);
