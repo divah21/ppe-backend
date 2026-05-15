@@ -164,6 +164,54 @@ router.post(
 );
 
 /**
+ * @route   PUT /api/v1/ppe/bulk/replacement-frequency
+ * @desc    Bulk update replacement frequency for all PPE items
+ * @access  Private (Admin, Stores)
+ */
+router.put(
+  '/bulk/replacement-frequency',
+  authenticate,
+  requireRole('admin', 'stores'),
+  [
+    body('replacementFrequency').isInt({ min: 1 }).withMessage('Replacement frequency must be at least 1 month'),
+    body('category').optional().trim(),
+    body('itemIds').optional().isArray().withMessage('itemIds must be an array if provided')
+  ],
+  validate,
+  auditLog('BULK_UPDATE', 'PPEItem'),
+  async (req, res, next) => {
+    try {
+      const { replacementFrequency, category, itemIds } = req.body;
+
+      const where = { isActive: true, itemType: 'PPE' };
+      
+      // Filter by category if provided
+      if (category) {
+        where.category = category;
+      }
+      
+      // Filter by specific item IDs if provided
+      if (itemIds && itemIds.length > 0) {
+        where.id = { [Op.in]: itemIds };
+      }
+
+      const [updatedCount] = await PPEItem.update(
+        { replacementFrequency },
+        { where }
+      );
+
+      res.json({
+        success: true,
+        message: `Replacement frequency updated to ${replacementFrequency} months for ${updatedCount} PPE items`,
+        data: { updatedCount, replacementFrequency }
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+/**
  * @route   PUT /api/v1/ppe/:id
  * @desc    Update PPE item
  * @access  Private (Admin, Stores)

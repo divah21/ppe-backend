@@ -639,7 +639,7 @@ router.put(
     body('isActive').optional().isBoolean()
   ],
   validate,
-  auditLog,
+  auditLog('UPDATE', 'matrix'),
   async (req, res, next) => {
     try {
       const matrixEntry = await JobTitlePPEMatrix.findByPk(req.params.id);

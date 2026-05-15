@@ -1624,9 +1624,9 @@ router.post(
 
 /**
  * @route   GET /api/v1/allocations/bulk-upload/matrix-items
- * @desc    Get PPE items and employees for bulk upload template (by job title or section)
+ * @desc    Get PPE items and employees for bulk upload template (by job title, section, or all employees)
  * @access  Private (Stores, Admin only)
- * @query   mode - 'job_title' or 'section'
+ * @query   mode - 'job_title', 'section', or 'employee'
  * @query   jobTitleId - required if mode is 'job_title'
  * @query   sectionId - required if mode is 'section'
  */
@@ -1634,10 +1634,10 @@ router.get('/bulk-upload/matrix-items', authenticate, requireRole('stores', 'adm
   try {
     const { mode, jobTitleId, sectionId } = req.query;
 
-    if (!mode || !['job_title', 'section'].includes(mode)) {
+    if (!mode || !['job_title', 'section', 'employee'].includes(mode)) {
       return res.status(400).json({
         success: false,
-        message: 'Mode must be either "job_title" or "section"'
+        message: 'Mode must be "job_title", "section", or "employee"'
       });
     }
 
@@ -1746,6 +1746,31 @@ router.get('/bulk-upload/matrix-items', authenticate, requireRole('stores', 'adm
           replacementFrequency: item.ppeItem.replacementFrequency,
           quantityRequired: item.quantityRequired || 1
         }));
+    } else if (mode === 'employee') {
+      contextName = 'All Employees';
+
+      // Get ALL active employees
+      employees = await Employee.findAll({
+        where: { isActive: true },
+        attributes: ['id', 'firstName', 'lastName', 'worksNumber'],
+        order: [['lastName', 'ASC'], ['firstName', 'ASC']]
+      });
+
+      // Get ALL active PPE items
+      const allPPEItems = await PPEItem.findAll({
+        where: { isActive: true, itemType: 'PPE' },
+        attributes: ['id', 'name', 'itemCode', 'category', 'replacementFrequency'],
+        order: [['name', 'ASC']]
+      });
+
+      matrixPPEItems = allPPEItems.map(item => ({
+        id: item.id,
+        name: item.name,
+        itemCode: item.itemCode,
+        category: item.category,
+        replacementFrequency: item.replacementFrequency,
+        quantityRequired: 1
+      }));
     }
 
     // Sort PPE items by name
