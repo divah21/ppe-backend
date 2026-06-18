@@ -80,9 +80,7 @@ const buildAllocationExcel = async (allocations, meta = {}) => {
   const rows = normalizeAllocations(allocations);
   const workbook = new ExcelJS.Workbook();
   workbook.creator = meta.generatedBy || 'PPE Management System';
-  const sheet = workbook.addWorksheet('Allocations', {
-    views: [{ state: 'frozen', ySplit: 0 }]
-  });
+  const sheet = workbook.addWorksheet('Allocations');
 
   const lastCol = COLUMNS.length;
   const lastColLetter = sheet.getColumn(lastCol).letter;
@@ -109,6 +107,11 @@ const buildAllocationExcel = async (allocations, meta = {}) => {
   });
 
   const headerRowNumber = cursor + 1;
+
+  // Freeze the title/filter lines and header row so data scrolls beneath them.
+  // (ySplit must be > 0 — a frozen view with ySplit: 0 produces an invalid
+  // pane element that makes Excel flag the file as corrupt on open.)
+  sheet.views = [{ state: 'frozen', ySplit: headerRowNumber }];
 
   // Header row
   const headerRow = sheet.getRow(headerRowNumber);
