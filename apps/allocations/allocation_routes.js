@@ -7,6 +7,7 @@ const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../database/db');
 const { sendBudgetThresholdWarning, sendLowStockAlert, sendPPEReadyForCollection, sendTemplatedEmail } = require('../../helpers/email_helper');
+const { buildAllocationExcel, buildAllocationPdf } = require('../../helpers/allocation_report_helper');
 
 /**
  * @route   GET /api/v1/allocations/summaries
@@ -89,6 +90,129 @@ router.get('/summaries', authenticate, async (req, res, next) => {
       success: true,
       data: summaries
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/allocations/report
+ * @desc    Export the Employee Allocations Report as Excel or PDF.
+ *          Shows which employee was allocated which item, their section/department,
+ *          and the date assigned. Supports filtering by employee, section/department
+ *          and a date period (fromDate/toDate).
+ * @query   format=excel|pdf, employeeId, sectionId, departmentId, fromDate, toDate, status
+ * @access  Private (Stores, Admin)
+ */
+router.get('/report', authenticate, requireRole('stores', 'admin'), async (req, res, next) => {
+  try {
+    const {
+      format = 'excel',
+      employeeId,
+      sectionId,
+      departmentId,
+      fromDate,
+      toDate,
+      status
+    } = req.query;
+
+    const reportFormat = String(format).toLowerCase();
+    if (!['excel', 'pdf'].includes(reportFormat)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid format. Use 'excel' or 'pdf'."
+      });
+    }
+
+    // Build allocation filter (mirrors GET / filtering)
+    const where = {};
+    const includeEmployeeWhere = {};
+    const includeSectionWhere = {};
+
+    if (employeeId) where.employeeId = employeeId;
+    if (status) where.status = status;
+    if (fromDate) where.issueDate = { [Op.gte]: new Date(fromDate) };
+    if (toDate) {
+      where.issueDate = {
+        ...where.issueDate,
+        [Op.lte]: new Date(toDate)
+      };
+    }
+    if (sectionId) includeEmployeeWhere.sectionId = sectionId;
+    if (departmentId) includeSectionWhere.departmentId = departmentId;
+
+    const hasEmployeeFilter = Object.keys(includeEmployeeWhere).length > 0;
+    const hasSectionFilter = Object.keys(includeSectionWhere).length > 0;
+    const needsEmployeeFilter = hasEmployeeFilter || hasSectionFilter;
+
+    const allocations = await Allocation.findAll({
+      where,
+      include: [
+        {
+          model: Employee,
+          as: 'employee',
+          where: hasEmployeeFilter ? includeEmployeeWhere : undefined,
+          required: needsEmployeeFilter,
+          include: [
+            {
+              model: Section,
+              as: 'section',
+              where: hasSectionFilter ? includeSectionWhere : undefined,
+              required: hasSectionFilter,
+              include: [{ model: Department, as: 'department' }]
+            }
+          ]
+        },
+        { model: PPEItem, as: 'ppeItem' }
+      ],
+      order: [['issueDate', 'DESC']],
+      subQuery: false
+    });
+
+    // Resolve human-readable filter labels for the report header
+    const filters = { fromDate, toDate };
+    if (employeeId) {
+      const emp = await Employee.findByPk(employeeId, { attributes: ['firstName', 'lastName', 'worksNumber'] });
+      if (emp) filters.employeeName = [emp.firstName, emp.lastName].filter(Boolean).join(' ');
+    }
+    if (sectionId) {
+      const sec = await Section.findByPk(sectionId, { attributes: ['name'] });
+      if (sec) filters.sectionName = sec.name;
+    }
+    if (departmentId) {
+      const dept = await Department.findByPk(departmentId, { attributes: ['name'] });
+      if (dept) filters.departmentName = dept.name;
+    }
+
+    const generatedBy = req.user && req.user.employee
+      ? [req.user.employee.firstName, req.user.employee.lastName].filter(Boolean).join(' ')
+      : (req.user && req.user.username) || 'System';
+
+    const meta = {
+      title: 'Employee Allocations Report',
+      generatedAt: new Date(),
+      generatedBy,
+      filters
+    };
+
+    const safeName = (filters.employeeName || filters.sectionName || filters.departmentName || 'all')
+      .replace(/[^a-z0-9]+/gi, '_')
+      .toLowerCase();
+    const stamp = new Date().toISOString().slice(0, 10);
+
+    if (reportFormat === 'pdf') {
+      const buffer = await buildAllocationPdf(allocations, meta);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="allocations_${safeName}_${stamp}.pdf"`);
+      res.setHeader('Content-Length', buffer.length);
+      return res.end(buffer);
+    }
+
+    const buffer = await buildAllocationExcel(allocations, meta);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="allocations_${safeName}_${stamp}.xlsx"`);
+    res.setHeader('Content-Length', buffer.length);
+    return res.end(buffer);
   } catch (error) {
     next(error);
   }
