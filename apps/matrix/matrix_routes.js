@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { JobTitlePPEMatrix, PPEItem, Employee, JobTitle, Section, Department } = require('../../models');
+const { JobTitlePPEMatrix, SectionPPEMatrix, PPEItem, Employee, JobTitle, Section, Department } = require('../../models');
 const { sequelize } = require('../../database/db');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
@@ -8,8 +8,228 @@ const { auditLog } = require('../../middlewares/audit_middleware');
 const { body, param, query } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
+const { buildTableExcel, buildTablePdf, buildTablesExcel, buildTablesPdf } = require('../../helpers/report_table_helper');
 
 console.log('[MATRIX ROUTES] Module loaded at', new Date().toISOString());
+
+// Column layout shared by the job-title matrix Excel + PDF export
+const JOB_TITLE_MATRIX_COLUMNS = [
+  { header: 'Job Title', key: 'jobTitle', width: 28, w: 0.2 },
+  { header: 'PPE Item', key: 'itemName', width: 30, w: 0.22 },
+  { header: 'Item Code', key: 'itemCode', width: 16, w: 0.12 },
+  { header: 'Category', key: 'category', width: 18, w: 0.16 },
+  { header: 'Qty Required', key: 'quantityRequired', width: 13, w: 0.1, align: 'center' },
+  { header: 'Replacement (months)', key: 'replacementFrequency', width: 20, w: 0.12, align: 'center' },
+  { header: 'Mandatory', key: 'mandatory', width: 12, w: 0.08, align: 'center' }
+];
+
+// Column layout for the section matrix (also used by the combined report)
+const SECTION_MATRIX_COLUMNS = [
+  { header: 'Section', key: 'sectionName', width: 24, w: 0.18 },
+  { header: 'Department', key: 'departmentName', width: 22, w: 0.16 },
+  { header: 'PPE Item', key: 'itemName', width: 30, w: 0.2 },
+  { header: 'Item Code', key: 'itemCode', width: 16, w: 0.12 },
+  { header: 'Category', key: 'category', width: 18, w: 0.14 },
+  { header: 'Qty Required', key: 'quantityRequired', width: 13, w: 0.08, align: 'center' },
+  { header: 'Replacement (months)', key: 'replacementFrequency', width: 20, w: 0.08, align: 'center' },
+  { header: 'Mandatory', key: 'mandatory', width: 12, w: 0.06, align: 'center' }
+];
+
+// Column layout for the employee PPE matrix report (employee -> their matrix)
+const EMPLOYEE_MATRIX_COLUMNS = [
+  { header: 'Employee', key: 'employeeName', width: 26, w: 0.13 },
+  { header: 'Works No.', key: 'worksNumber', width: 13, w: 0.07 },
+  { header: 'Section', key: 'sectionName', width: 20, w: 0.11 },
+  { header: 'Department', key: 'departmentName', width: 20, w: 0.11 },
+  { header: 'Job Title', key: 'jobTitle', width: 20, w: 0.11 },
+  { header: 'PPE Item', key: 'itemName', width: 28, w: 0.16 },
+  { header: 'Item Code', key: 'itemCode', width: 14, w: 0.08 },
+  { header: 'Category', key: 'category', width: 16, w: 0.09 },
+  { header: 'Qty', key: 'quantityRequired', width: 7, w: 0.05, align: 'center' },
+  { header: 'Replacement (months)', key: 'replacementFrequency', width: 20, w: 0.06, align: 'center' },
+  { header: 'Mandatory', key: 'mandatory', width: 11, w: 0.03, align: 'center' }
+];
+
+/**
+ * Build per-employee PPE matrix rows: every employee with their section and the
+ * PPE matrix that applies to them. Eligibility is merged from the Section matrix
+ * (baseline) and the Job Title matrix (override) — mirroring request validation.
+ * Rows are grouped per employee (repeated employee identity is blanked).
+ */
+async function getEmployeeMatrixRows({ sectionId, departmentId } = {}) {
+  // 1. Employees (optionally filtered by section / department)
+  const employeeWhere = { isActive: true };
+  if (sectionId) employeeWhere.sectionId = sectionId;
+  const sectionInclude = {
+    model: Section,
+    as: 'section',
+    required: !!departmentId,
+    where: departmentId ? { departmentId } : undefined,
+    include: [{ model: Department, as: 'department', attributes: ['id', 'name'] }]
+  };
+  const employees = await Employee.findAll({
+    where: employeeWhere,
+    attributes: ['id', 'firstName', 'lastName', 'worksNumber', 'sectionId', 'jobTitleId', 'jobTitle'],
+    include: [
+      sectionInclude,
+      { model: JobTitle, as: 'jobTitleRef', attributes: ['id', 'name', 'ppeCategoryId'], required: false }
+    ]
+  });
+
+  // 2. Matrix sources, grouped into maps (batched — no N+1)
+  const sectionEntries = await SectionPPEMatrix.findAll({
+    where: { isActive: true },
+    include: [{ model: PPEItem, as: 'ppeItem', attributes: ['id', 'name', 'itemCode', 'itemRefCode', 'category'] }]
+  });
+  const jobTitleEntries = await JobTitlePPEMatrix.findAll({
+    where: { isActive: true },
+    include: [{ model: PPEItem, as: 'ppeItem', attributes: ['id', 'name', 'itemCode', 'itemRefCode', 'category'] }]
+  });
+
+  const sectionMap = new Map(); // sectionId -> entries[]
+  for (const e of sectionEntries) {
+    const k = e.sectionId;
+    if (!sectionMap.has(k)) sectionMap.set(k, []);
+    sectionMap.get(k).push(e.toJSON());
+  }
+  const jobTitleMap = new Map(); // jobTitleId -> entries[]
+  for (const e of jobTitleEntries) {
+    if (!e.jobTitleId) continue;
+    const k = e.jobTitleId;
+    if (!jobTitleMap.has(k)) jobTitleMap.set(k, []);
+    jobTitleMap.get(k).push(e.toJSON());
+  }
+
+  // 3. Sort employees by section then name so each person's rows are contiguous
+  const sortedEmployees = employees
+    .map((e) => e.toJSON())
+    .sort((a, b) => {
+      const sa = (a.section && a.section.name) || '';
+      const sb = (b.section && b.section.name) || '';
+      if (sa !== sb) return sa.localeCompare(sb);
+      const na = `${a.firstName || ''} ${a.lastName || ''}`;
+      const nb = `${b.firstName || ''} ${b.lastName || ''}`;
+      return na.localeCompare(nb);
+    });
+
+  const rows = [];
+  for (const emp of sortedEmployees) {
+    const section = emp.section || {};
+    const department = section.department || {};
+    const fullName = [emp.firstName, emp.lastName].filter(Boolean).join(' ') || 'Unknown';
+    const jobTitleName = (emp.jobTitleRef && emp.jobTitleRef.name) || emp.jobTitle || '';
+
+    // Merge: section baseline, then job title override (by ppeItemId)
+    const matrixJobTitleId = (emp.jobTitleRef && emp.jobTitleRef.ppeCategoryId) || emp.jobTitleId;
+    const merged = new Map();
+    for (const entry of sectionMap.get(emp.sectionId) || []) {
+      merged.set(entry.ppeItemId, entry);
+    }
+    for (const entry of jobTitleMap.get(matrixJobTitleId) || []) {
+      merged.set(entry.ppeItemId, entry);
+    }
+
+    const items = Array.from(merged.values()).sort((a, b) => {
+      const ca = a.category || (a.ppeItem && a.ppeItem.category) || '';
+      const cb = b.category || (b.ppeItem && b.ppeItem.category) || '';
+      if (ca !== cb) return ca.localeCompare(cb);
+      const na = (a.ppeItem && a.ppeItem.name) || '';
+      const nb = (b.ppeItem && b.ppeItem.name) || '';
+      return na.localeCompare(nb);
+    });
+
+    const identity = {
+      employeeName: fullName,
+      worksNumber: emp.worksNumber || '',
+      sectionName: section.name || '',
+      departmentName: department.name || '',
+      jobTitle: jobTitleName
+    };
+
+    if (items.length === 0) {
+      rows.push({
+        ...identity,
+        itemName: '— No PPE matrix defined —',
+        itemCode: '',
+        category: '',
+        quantityRequired: '',
+        replacementFrequency: '',
+        mandatory: ''
+      });
+      continue;
+    }
+
+    items.forEach((entry, idx) => {
+      const ppeItem = entry.ppeItem || {};
+      rows.push({
+        // Blank repeated identity within the employee group for visual grouping
+        employeeName: idx === 0 ? identity.employeeName : '',
+        worksNumber: idx === 0 ? identity.worksNumber : '',
+        sectionName: idx === 0 ? identity.sectionName : '',
+        departmentName: idx === 0 ? identity.departmentName : '',
+        jobTitle: idx === 0 ? identity.jobTitle : '',
+        itemName: ppeItem.name || 'Unknown Item',
+        itemCode: ppeItem.itemCode || ppeItem.itemRefCode || '',
+        category: entry.category || ppeItem.category || '',
+        quantityRequired: entry.quantityRequired != null ? entry.quantityRequired : '',
+        replacementFrequency: entry.replacementFrequency != null ? entry.replacementFrequency : '',
+        mandatory: entry.isMandatory ? 'Yes' : 'No'
+      });
+    });
+  }
+
+  return { rows, employeeCount: sortedEmployees.length };
+}
+
+// Fetch + normalize all job-title matrix rows (optionally filtered)
+async function getJobTitleMatrixRows(where = {}) {
+  const entries = await JobTitlePPEMatrix.findAll({
+    where: { isActive: true, ...where },
+    include: [
+      { model: PPEItem, as: 'ppeItem', attributes: ['id', 'name', 'itemCode', 'itemRefCode', 'category'] },
+      { model: JobTitle, as: 'jobTitleRef', attributes: ['name'], required: false }
+    ],
+    order: [['jobTitle', 'ASC'], ['category', 'ASC']]
+  });
+  return entries.map((e) => {
+    const obj = e.toJSON();
+    return {
+      jobTitle: (obj.jobTitleRef && obj.jobTitleRef.name) || obj.jobTitle || '',
+      itemName: (obj.ppeItem && obj.ppeItem.name) || 'Unknown Item',
+      itemCode: (obj.ppeItem && (obj.ppeItem.itemCode || obj.ppeItem.itemRefCode)) || '',
+      category: obj.category || (obj.ppeItem && obj.ppeItem.category) || '',
+      quantityRequired: obj.quantityRequired != null ? obj.quantityRequired : '',
+      replacementFrequency: obj.replacementFrequency != null ? obj.replacementFrequency : '',
+      mandatory: obj.isMandatory ? 'Yes' : 'No'
+    };
+  });
+}
+
+// Fetch + normalize all section matrix rows
+async function getSectionMatrixRows() {
+  const entries = await SectionPPEMatrix.findAll({
+    where: { isActive: true },
+    include: [
+      { model: Section, as: 'section', include: [{ model: Department, as: 'department', attributes: ['id', 'name'] }] },
+      { model: PPEItem, as: 'ppeItem', attributes: ['id', 'name', 'itemCode', 'itemRefCode', 'category'] }
+    ],
+    order: [[{ model: Section, as: 'section' }, 'name', 'ASC']]
+  });
+  return entries.map((e) => {
+    const obj = e.toJSON();
+    const section = obj.section || {};
+    return {
+      sectionName: section.name || '',
+      departmentName: (section.department && section.department.name) || '',
+      itemName: (obj.ppeItem && obj.ppeItem.name) || 'Unknown Item',
+      itemCode: (obj.ppeItem && (obj.ppeItem.itemCode || obj.ppeItem.itemRefCode)) || '',
+      category: (obj.ppeItem && obj.ppeItem.category) || '',
+      quantityRequired: obj.quantityRequired != null ? obj.quantityRequired : '',
+      replacementFrequency: obj.replacementFrequency != null ? obj.replacementFrequency : '',
+      mandatory: obj.isMandatory ? 'Yes' : 'No'
+    };
+  });
+}
 
 // Conditional debug logger
 const logDebug = (...args) => {
@@ -261,6 +481,220 @@ router.get('/bulk-upload-template', authenticate, async (req, res, next) => {
     });
   } catch (error) {
     console.error('[MATRIX TEMPLATE] Error fetching template data:', error);
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/matrix/:id
+ * @route   GET /api/v1/matrix/employee-report
+ * @desc    Export the per-employee PPE matrix: every employee with their section
+ *          and the PPE matrix that applies to them (merged from section + job
+ *          title eligibility). Supports filtering by section / department.
+ * @query   format=excel|pdf, sectionId, departmentId
+ * @access  Private (Stores, Admin, SHEQ)
+ */
+router.get('/employee-report', authenticate, requireRole('stores', 'admin', 'sheq'), async (req, res, next) => {
+  try {
+    const { format = 'excel', sectionId, departmentId } = req.query;
+    const reportFormat = String(format).toLowerCase();
+    if (!['excel', 'pdf'].includes(reportFormat)) {
+      return res.status(400).json({ success: false, message: "Invalid format. Use 'excel' or 'pdf'." });
+    }
+
+    const { rows, employeeCount } = await getEmployeeMatrixRows({ sectionId, departmentId });
+
+    const infoLines = [];
+    if (sectionId) {
+      const sec = await Section.findByPk(sectionId, { attributes: ['name'] });
+      if (sec) infoLines.push(`Section: ${sec.name}`);
+    }
+    if (departmentId) {
+      const dept = await Department.findByPk(departmentId, { attributes: ['name'] });
+      if (dept) infoLines.push(`Department: ${dept.name}`);
+    }
+
+    const generatedBy = req.user && req.user.employee
+      ? [req.user.employee.firstName, req.user.employee.lastName].filter(Boolean).join(' ')
+      : (req.user && req.user.username) || 'System';
+
+    const meta = {
+      title: 'Employee PPE Matrix Report',
+      infoLines,
+      generatedAt: new Date(),
+      generatedBy,
+      totalLabel: `Total employees: ${employeeCount}   |   Matrix line items: ${rows.length}`
+    };
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    if (reportFormat === 'pdf') {
+      const buffer = await buildTablePdf({ columns: EMPLOYEE_MATRIX_COLUMNS, rows, meta });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="employee_ppe_matrix_${stamp}.pdf"`);
+      res.setHeader('Content-Length', buffer.length);
+      return res.end(buffer);
+    }
+    const buffer = await buildTableExcel({ sheetName: 'Employee PPE Matrix', columns: EMPLOYEE_MATRIX_COLUMNS, rows, meta });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="employee_ppe_matrix_${stamp}.xlsx"`);
+    res.setHeader('Content-Length', buffer.length);
+    return res.end(buffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/matrix/report/combined
+ * @desc    Export the FULL PPE Eligibility Matrix (Job Title + Section) in one
+ *          file. Excel = two sheets; PDF = two sections.
+ * @query   format=excel|pdf
+ * @access  Private (Stores, Admin, SHEQ)
+ */
+router.get('/report/combined', authenticate, requireRole('stores', 'admin', 'sheq'), async (req, res, next) => {
+  try {
+    const reportFormat = String(req.query.format || 'excel').toLowerCase();
+    if (!['excel', 'pdf'].includes(reportFormat)) {
+      return res.status(400).json({ success: false, message: "Invalid format. Use 'excel' or 'pdf'." });
+    }
+
+    const [jobTitleRows, sectionRows] = await Promise.all([
+      getJobTitleMatrixRows(),
+      getSectionMatrixRows()
+    ]);
+
+    const generatedBy = req.user && req.user.employee
+      ? [req.user.employee.firstName, req.user.employee.lastName].filter(Boolean).join(' ')
+      : (req.user && req.user.username) || 'System';
+    const generatedAt = new Date();
+
+    const jobTitleTable = {
+      sheetName: 'Job Title Matrix',
+      columns: JOB_TITLE_MATRIX_COLUMNS,
+      rows: jobTitleRows,
+      meta: {
+        title: 'PPE Eligibility Matrix — By Job Title',
+        generatedAt,
+        generatedBy,
+        totalLabel: `Total matrix entries: ${jobTitleRows.length}`
+      }
+    };
+    const sectionTable = {
+      sheetName: 'Section Matrix',
+      columns: SECTION_MATRIX_COLUMNS,
+      rows: sectionRows,
+      meta: {
+        title: 'PPE Eligibility Matrix — By Section',
+        generatedAt,
+        generatedBy,
+        totalLabel: `Total matrix entries: ${sectionRows.length}`
+      }
+    };
+
+    const stamp = generatedAt.toISOString().slice(0, 10);
+    if (reportFormat === 'pdf') {
+      const buffer = await buildTablesPdf({ tables: [jobTitleTable, sectionTable] });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="ppe_matrix_full_${stamp}.pdf"`);
+      res.setHeader('Content-Length', buffer.length);
+      return res.end(buffer);
+    }
+    const buffer = await buildTablesExcel({ tables: [jobTitleTable, sectionTable], creator: generatedBy });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="ppe_matrix_full_${stamp}.xlsx"`);
+    res.setHeader('Content-Length', buffer.length);
+    return res.end(buffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/matrix/report
+ * @desc    Export the Job Title PPE Eligibility Matrix as Excel or PDF.
+ *          Shows the required PPE per job title (item, category, quantity,
+ *          replacement frequency, mandatory). Supports filtering by job title,
+ *          category and department.
+ * @query   format=excel|pdf, jobTitle, jobTitleId, category, departmentId
+ * @access  Private (Stores, Admin, SHEQ)
+ */
+router.get('/report', authenticate, requireRole('stores', 'admin', 'sheq'), async (req, res, next) => {
+  try {
+    const { format = 'excel', jobTitle, jobTitleId, category, departmentId } = req.query;
+
+    const reportFormat = String(format).toLowerCase();
+    if (!['excel', 'pdf'].includes(reportFormat)) {
+      return res.status(400).json({ success: false, message: "Invalid format. Use 'excel' or 'pdf'." });
+    }
+
+    const where = { isActive: true };
+    if (jobTitle) where.jobTitle = { [Op.iLike]: `%${jobTitle}%` };
+    if (jobTitleId) where.jobTitleId = jobTitleId;
+    if (category) where.category = category;
+
+    // Optionally narrow to job titles within a department (via their section)
+    const infoLines = [];
+    if (departmentId) {
+      const jobTitleRecords = await JobTitle.findAll({
+        attributes: ['name'],
+        include: [{ model: Section, as: 'section', where: { departmentId }, attributes: [] }]
+      });
+      const names = [...new Set(jobTitleRecords.map((jt) => jt.name).filter(Boolean))];
+      where.jobTitle = { [Op.in]: names.length ? names : ['__none__'] };
+      const dept = await Department.findByPk(departmentId, { attributes: ['name'] });
+      if (dept) infoLines.push(`Department: ${dept.name}`);
+    }
+    if (jobTitle) infoLines.push(`Job Title: ${jobTitle}`);
+    if (category) infoLines.push(`Category: ${category}`);
+
+    const entries = await JobTitlePPEMatrix.findAll({
+      where,
+      include: [
+        { model: PPEItem, as: 'ppeItem', attributes: ['id', 'name', 'itemCode', 'itemRefCode', 'category'] },
+        { model: JobTitle, as: 'jobTitleRef', attributes: ['name'], required: false }
+      ],
+      order: [['jobTitle', 'ASC'], ['category', 'ASC']]
+    });
+
+    const rows = entries.map((e) => {
+      const obj = e.toJSON();
+      return {
+        jobTitle: (obj.jobTitleRef && obj.jobTitleRef.name) || obj.jobTitle || '',
+        itemName: (obj.ppeItem && obj.ppeItem.name) || 'Unknown Item',
+        itemCode: (obj.ppeItem && (obj.ppeItem.itemCode || obj.ppeItem.itemRefCode)) || '',
+        category: obj.category || (obj.ppeItem && obj.ppeItem.category) || '',
+        quantityRequired: obj.quantityRequired != null ? obj.quantityRequired : '',
+        replacementFrequency: obj.replacementFrequency != null ? obj.replacementFrequency : '',
+        mandatory: obj.isMandatory ? 'Yes' : 'No'
+      };
+    });
+
+    const generatedBy = req.user && req.user.employee
+      ? [req.user.employee.firstName, req.user.employee.lastName].filter(Boolean).join(' ')
+      : (req.user && req.user.username) || 'System';
+
+    const meta = {
+      title: 'PPE Eligibility Matrix — By Job Title',
+      infoLines,
+      generatedAt: new Date(),
+      generatedBy,
+      totalLabel: `Total matrix entries: ${rows.length}`
+    };
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    if (reportFormat === 'pdf') {
+      const buffer = await buildTablePdf({ columns: JOB_TITLE_MATRIX_COLUMNS, rows, meta });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="job_title_matrix_${stamp}.pdf"`);
+      res.setHeader('Content-Length', buffer.length);
+      return res.end(buffer);
+    }
+    const buffer = await buildTableExcel({ sheetName: 'Job Title Matrix', columns: JOB_TITLE_MATRIX_COLUMNS, rows, meta });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="job_title_matrix_${stamp}.xlsx"`);
+    res.setHeader('Content-Length', buffer.length);
+    return res.end(buffer);
+  } catch (error) {
     next(error);
   }
 });

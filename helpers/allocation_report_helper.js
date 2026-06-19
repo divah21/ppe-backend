@@ -23,8 +23,33 @@ const COLUMNS = [
   { header: 'Qty', key: 'quantity', width: 7 },
   { header: 'Size', key: 'size', width: 9 },
   { header: 'Status', key: 'status', width: 12 },
-  { header: 'Date Assigned', key: 'issueDate', width: 16 }
+  { header: 'Date Assigned', key: 'issueDate', width: 16 },
+  { header: 'Next Renewal', key: 'nextRenewalDate', width: 16 }
 ];
+
+/**
+ * Compute the next renewal date from issueDate + ppeItem.replacementFrequency
+ * (in months), falling back to the stored nextRenewalDate / expiryDate.
+ * Mirrors the calculation used by the allocations API.
+ */
+const computeRenewalDate = (obj, ppeItem) => {
+  try {
+    const freq = ppeItem && ppeItem.replacementFrequency ? parseInt(ppeItem.replacementFrequency) : null;
+    if (obj.issueDate && freq && !isNaN(freq)) {
+      const d = new Date(obj.issueDate);
+      d.setMonth(d.getMonth() + freq);
+      return d;
+    }
+  } catch (e) {
+    // fall through to stored values
+  }
+  const fallback = obj.nextRenewalDate || obj.expiryDate;
+  if (fallback) {
+    const d = new Date(fallback);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+};
 
 const formatDate = (value) => {
   if (!value) return '';
@@ -38,6 +63,10 @@ const formatDate = (value) => {
  * Flatten Sequelize allocation instances/plain objects into report rows.
  */
 const normalizeAllocations = (allocations) => {
+  // Allocations arrive pre-sorted so each employee's rows are contiguous.
+  // Blank the repeated employee identity within a group so the report reads
+  // as grouped per person for easy identification.
+  let prevKey = null;
   return (allocations || []).map((a) => {
     const obj = typeof a.toJSON === 'function' ? a.toJSON() : a;
     const employee = obj.employee || {};
@@ -45,17 +74,24 @@ const normalizeAllocations = (allocations) => {
     const department = section.department || {};
     const ppeItem = obj.ppeItem || {};
 
+    const fullName = [employee.firstName, employee.lastName].filter(Boolean).join(' ') || 'Unknown';
+    const worksNumber = employee.worksNumber || '';
+    const groupKey = `${employee.id || ''}|${worksNumber}|${fullName}`;
+    const isSameGroup = groupKey === prevKey;
+    prevKey = groupKey;
+
     return {
-      employeeName: [employee.firstName, employee.lastName].filter(Boolean).join(' ') || 'Unknown',
-      worksNumber: employee.worksNumber || '',
+      employeeName: isSameGroup ? '' : fullName,
+      worksNumber: isSameGroup ? '' : worksNumber,
       itemName: ppeItem.name || 'Unknown Item',
       itemCode: ppeItem.itemCode || '',
-      sectionName: section.name || '',
-      departmentName: department.name || '',
+      sectionName: isSameGroup ? '' : section.name || '',
+      departmentName: isSameGroup ? '' : department.name || '',
       quantity: obj.quantity != null ? obj.quantity : '',
       size: obj.size || '',
       status: obj.status || '',
-      issueDate: formatDate(obj.issueDate)
+      issueDate: formatDate(obj.issueDate),
+      nextRenewalDate: formatDate(computeRenewalDate(obj, ppeItem))
     };
   });
 };
@@ -182,16 +218,17 @@ const buildAllocationPdf = (allocations, meta = {}) => {
 
       // Columns sized for landscape A4 (subset of the Excel columns; weighted widths)
       const pdfColumns = [
-        { header: 'Employee', key: 'employeeName', w: 0.16 },
-        { header: 'Works No.', key: 'worksNumber', w: 0.09 },
-        { header: 'Item / Asset', key: 'itemName', w: 0.18 },
-        { header: 'Item Code', key: 'itemCode', w: 0.09 },
-        { header: 'Section', key: 'sectionName', w: 0.13 },
-        { header: 'Department', key: 'departmentName', w: 0.13 },
-        { header: 'Qty', key: 'quantity', w: 0.05 },
-        { header: 'Size', key: 'size', w: 0.05 },
-        { header: 'Status', key: 'status', w: 0.06 },
-        { header: 'Date Assigned', key: 'issueDate', w: 0.06 }
+        { header: 'Employee', key: 'employeeName', w: 0.15 },
+        { header: 'Works No.', key: 'worksNumber', w: 0.08 },
+        { header: 'Item / Asset', key: 'itemName', w: 0.16 },
+        { header: 'Item Code', key: 'itemCode', w: 0.08 },
+        { header: 'Section', key: 'sectionName', w: 0.12 },
+        { header: 'Department', key: 'departmentName', w: 0.12 },
+        { header: 'Qty', key: 'quantity', w: 0.04 },
+        { header: 'Size', key: 'size', w: 0.04 },
+        { header: 'Status', key: 'status', w: 0.07 },
+        { header: 'Date Assigned', key: 'issueDate', w: 0.07 },
+        { header: 'Next Renewal', key: 'nextRenewalDate', w: 0.07 }
       ];
       const colX = [];
       let acc = startX;

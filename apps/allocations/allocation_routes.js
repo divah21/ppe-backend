@@ -165,7 +165,12 @@ router.get('/report', authenticate, requireRole('stores', 'admin'), async (req, 
         },
         { model: PPEItem, as: 'ppeItem' }
       ],
-      order: [['issueDate', 'DESC']],
+      // Group each employee's allocations together (contiguous), newest first within a person
+      order: [
+        [{ model: Employee, as: 'employee' }, 'firstName', 'ASC'],
+        [{ model: Employee, as: 'employee' }, 'lastName', 'ASC'],
+        ['issueDate', 'DESC']
+      ],
       subQuery: false
     });
 

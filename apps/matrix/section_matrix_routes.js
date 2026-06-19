@@ -7,6 +7,19 @@ const { auditLog } = require('../../middlewares/audit_middleware');
 const { body, param, query } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
+const { buildTableExcel, buildTablePdf } = require('../../helpers/report_table_helper');
+
+// Column layout shared by the section matrix Excel + PDF export
+const SECTION_MATRIX_COLUMNS = [
+  { header: 'Section', key: 'sectionName', width: 24, w: 0.18 },
+  { header: 'Department', key: 'departmentName', width: 22, w: 0.16 },
+  { header: 'PPE Item', key: 'itemName', width: 30, w: 0.2 },
+  { header: 'Item Code', key: 'itemCode', width: 16, w: 0.12 },
+  { header: 'Category', key: 'category', width: 18, w: 0.14 },
+  { header: 'Qty Required', key: 'quantityRequired', width: 13, w: 0.08, align: 'center' },
+  { header: 'Replacement (months)', key: 'replacementFrequency', width: 20, w: 0.08, align: 'center' },
+  { header: 'Mandatory', key: 'mandatory', width: 12, w: 0.06, align: 'center' }
+];
 
 /**
  * @route   GET /api/v1/section-matrix
@@ -98,6 +111,100 @@ router.get('/by-section/:sectionId', authenticate, async (req, res, next) => {
         totalItems: requirements.length
       }
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @route   GET /api/v1/section-matrix/report
+ * @desc    Export the Section PPE Eligibility Matrix as Excel or PDF.
+ *          Shows the required PPE per section (item, category, quantity,
+ *          replacement frequency, mandatory). Supports filtering by section
+ *          and department.
+ * @query   format=excel|pdf, sectionId, departmentId
+ * @access  Private (Stores, Admin, SHEQ)
+ */
+router.get('/report', authenticate, requireRole('stores', 'admin', 'sheq'), async (req, res, next) => {
+  try {
+    const { format = 'excel', sectionId, departmentId } = req.query;
+
+    const reportFormat = String(format).toLowerCase();
+    if (!['excel', 'pdf'].includes(reportFormat)) {
+      return res.status(400).json({ success: false, message: "Invalid format. Use 'excel' or 'pdf'." });
+    }
+
+    const where = { isActive: true };
+    const sectionWhere = {};
+    if (sectionId) where.sectionId = sectionId;
+    if (departmentId) sectionWhere.departmentId = departmentId;
+
+    const entries = await SectionPPEMatrix.findAll({
+      where,
+      include: [
+        {
+          model: Section,
+          as: 'section',
+          where: Object.keys(sectionWhere).length ? sectionWhere : undefined,
+          required: Object.keys(sectionWhere).length > 0,
+          include: [{ model: Department, as: 'department', attributes: ['id', 'name'] }]
+        },
+        { model: PPEItem, as: 'ppeItem', attributes: ['id', 'name', 'itemCode', 'itemRefCode', 'category'] }
+      ],
+      order: [[{ model: Section, as: 'section' }, 'name', 'ASC']]
+    });
+
+    const rows = entries.map((e) => {
+      const obj = e.toJSON();
+      const section = obj.section || {};
+      return {
+        sectionName: section.name || '',
+        departmentName: (section.department && section.department.name) || '',
+        itemName: (obj.ppeItem && obj.ppeItem.name) || 'Unknown Item',
+        itemCode: (obj.ppeItem && (obj.ppeItem.itemCode || obj.ppeItem.itemRefCode)) || '',
+        category: (obj.ppeItem && obj.ppeItem.category) || '',
+        quantityRequired: obj.quantityRequired != null ? obj.quantityRequired : '',
+        replacementFrequency: obj.replacementFrequency != null ? obj.replacementFrequency : '',
+        mandatory: obj.isMandatory ? 'Yes' : 'No'
+      };
+    });
+
+    // Resolve filter labels for the header
+    const infoLines = [];
+    if (sectionId) {
+      const sec = await Section.findByPk(sectionId, { attributes: ['name'] });
+      if (sec) infoLines.push(`Section: ${sec.name}`);
+    }
+    if (departmentId) {
+      const dept = await Department.findByPk(departmentId, { attributes: ['name'] });
+      if (dept) infoLines.push(`Department: ${dept.name}`);
+    }
+
+    const generatedBy = req.user && req.user.employee
+      ? [req.user.employee.firstName, req.user.employee.lastName].filter(Boolean).join(' ')
+      : (req.user && req.user.username) || 'System';
+
+    const meta = {
+      title: 'PPE Eligibility Matrix — By Section',
+      infoLines,
+      generatedAt: new Date(),
+      generatedBy,
+      totalLabel: `Total matrix entries: ${rows.length}`
+    };
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    if (reportFormat === 'pdf') {
+      const buffer = await buildTablePdf({ columns: SECTION_MATRIX_COLUMNS, rows, meta });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="section_matrix_${stamp}.pdf"`);
+      res.setHeader('Content-Length', buffer.length);
+      return res.end(buffer);
+    }
+    const buffer = await buildTableExcel({ sheetName: 'Section Matrix', columns: SECTION_MATRIX_COLUMNS, rows, meta });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="section_matrix_${stamp}.xlsx"`);
+    res.setHeader('Content-Length', buffer.length);
+    return res.end(buffer);
   } catch (error) {
     next(error);
   }
