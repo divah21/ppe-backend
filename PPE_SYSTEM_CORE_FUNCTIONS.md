@@ -1,4 +1,4 @@
-# Chengeto — PPE Management System
+# PPE Management System
 
 ### Core Functions & Capabilities Overview
 
@@ -6,11 +6,11 @@
 
 ---
 
-## 1. What Chengeto Does
+## 1. What the PPE Management System Does
 
-Chengeto is a complete, web-based platform that controls the entire lifecycle of Personal Protective Equipment (PPE) — from defining who is entitled to what, through procurement, stock control, issue to employees, renewals, and failure investigation. It replaces error-prone spreadsheets and paper registers with a single, auditable system that enforces safety policy, controls cost, and gives every level of the organisation the visibility it needs.
+The PPE Management System is a complete, web-based platform that controls the entire lifecycle of Personal Protective Equipment (PPE) — from defining who is entitled to what, through procurement, stock control, issue to employees, renewals, and failure investigation. It replaces error-prone spreadsheets and paper registers with a single, auditable system that enforces safety policy, controls cost, and gives every level of the organisation the visibility it needs.
 
-Built for mining and heavy-industry environments where PPE compliance is a legal and life-safety requirement, Chengeto ensures **the right equipment reaches the right employee, at the right time, within budget — with a complete record of every transaction.**
+Built for mining and heavy-industry environments where PPE compliance is a legal and life-safety requirement, the system ensures **the right equipment reaches the right employee, at the right time, within budget — with a complete record of every transaction.**
 
 **Technology:** Modern web application (Next.js / React front end, Node.js + PostgreSQL back end). Secure, multi-user, cloud-hosted or on-premise.
 
@@ -18,7 +18,7 @@ Built for mining and heavy-industry environments where PPE compliance is a legal
 
 ## 2. The Problem It Solves
 
-| Without Chengeto | With Chengeto |
+| Without this system | With this system |
 |---|---|
 | PPE entitlements live in people's heads or scattered spreadsheets | A central **PPE Matrix** defines entitlements per job title and section |
 | No control over who issues what — easy over-issue and theft | Multi-level **approval workflow** before any item leaves stores |
@@ -133,9 +133,9 @@ Role-specific dashboards and exportable reports, including:
 
 ## 4. Role-Based Access (built for the whole organisation)
 
-Chengeto recognises that PPE management involves many stakeholders, and gives each a tailored experience and the right permissions:
+The system recognises that PPE management involves many stakeholders, and gives each a tailored experience and the right permissions:
 
-| Role | What they do in Chengeto |
+| Role | What they do in the system |
 |---|---|
 | **Admin** | Full configuration, user management, master data, system settings |
 | **Stores** | Manage stock, fulfil approved requests, issue allocations, valuation |
@@ -184,4 +184,4 @@ Each role logs into a dedicated dashboard showing only what is relevant to them.
 
 ---
 
-*Chengeto PPE System — keeping your people protected, your stores controlled, and your compliance provable.*
+*PPE Management System — keeping your people protected, your stores controlled, and your compliance provable.*

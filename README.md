@@ -312,7 +312,26 @@ JWT_REFRESH_SECRET=your_refresh_secret
 JWT_REFRESH_EXPIRE=30d
 
 # CORS
+# Comma-separated. Production: https://ppesystem.earekasystems.biz
 ALLOWED_ORIGINS=http://localhost:3000
+
+# Frontend base URL used to build links in outgoing emails.
+# Production: https://ppesystem.earekasystems.biz
+FRONTEND_URL=http://localhost:3000
+
+# Email (Gmail SMTP)
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_SECURE=false
+EMAIL_USER=your_account@gmail.com
+# Must be a Google App Password (16 chars, 2FA required) - a normal
+# account password is rejected by Gmail SMTP.
+EMAIL_PASSWORD=your_16_char_app_password
+
+# Optional. Defaults to "PPE Management System" <EMAIL_USER>.
+# Gmail rejects any From address that is not EMAIL_USER (or a verified
+# "Send mail as" alias) with: 553 ... not owned by user.
+# EMAIL_FROM="PPE Management System" <your_account@gmail.com>
 
 # Rate Limiting
 RATE_LIMIT_WINDOW_MS=900000

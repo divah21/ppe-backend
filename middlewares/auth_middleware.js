@@ -2,6 +2,21 @@ const { verifyToken } = require('../helpers/jwt_helpers');
 const { User, Role, Employee, Section, Department, JobTitle, CostCenter } = require('../models');
 
 /**
+ * Routes a user is still allowed to reach while their password is flagged as
+ * temporary. Anything else is blocked until they set a real password, so the
+ * forced change cannot be skipped by navigating straight to another page.
+ */
+const PASSWORD_CHANGE_ALLOWED_PATHS = [
+  '/auth/change-password',
+  '/auth/profile'
+];
+
+const isPasswordChangeAllowedPath = (req) => {
+  const path = `${req.baseUrl || ''}${req.path || ''}`;
+  return PASSWORD_CHANGE_ALLOWED_PATHS.some((allowed) => path.endsWith(allowed));
+};
+
+/**
  * Middleware to verify JWT token and attach user to request
  * User data now comes from linked Employee record
  */
@@ -77,12 +92,22 @@ const authenticate = async (req, res, next) => {
     req.user = user;
     req.userId = user.id;
     req.userRole = user.role.name;
-    
+
     // Convenience properties from employee (for role-based filtering)
     if (user.employee) {
       req.user.sectionId = user.employee.sectionId;
       req.user.departmentId = user.employee.section?.departmentId;
       req.user.employeeId = user.employeeId;
+    }
+
+    // Still on an admin-issued temporary password - lock everything except
+    // changing it, so the forced change cannot be bypassed.
+    if (user.mustChangePassword && !isPasswordChangeAllowedPath(req)) {
+      return res.status(403).json({
+        success: false,
+        code: 'PASSWORD_CHANGE_REQUIRED',
+        message: 'You must change your temporary password before continuing.'
+      });
     }
 
     next();

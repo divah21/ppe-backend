@@ -221,8 +221,20 @@ router.put('/change-password', authenticate, changePasswordValidation, validate,
       });
     }
 
-    // Update password
-    await user.update({ passwordHash: newPassword }); // Will be hashed by hook
+    // Reject reusing the same password - otherwise a forced change could be
+    // satisfied by re-submitting the temporary password.
+    if (await user.verifyPassword(newPassword)) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from your current password'
+      });
+    }
+
+    // Update password and clear the forced-change flag in one write
+    await user.update({
+      passwordHash: newPassword, // Will be hashed by hook
+      mustChangePassword: false
+    });
 
     // Create audit log
     await createAuditLog(
@@ -234,11 +246,6 @@ router.put('/change-password', authenticate, changePasswordValidation, validate,
       { action: 'password_change' },
       req
     );
-
-    // Clear mustChangePassword flag after successful password change
-    if (req.user.mustChangePassword) {
-      await user.update({ mustChangePassword: false });
-    }
 
     res.json({
       success: true,

@@ -72,6 +72,12 @@ const User = sequelize.define('User', {
     type: DataTypes.BOOLEAN,
     defaultValue: true
   },
+  mustChangePassword: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+    comment: 'True when the current password was set by an admin (onboarding/reset) and must be replaced on next login'
+  },
   lastLogin: {
     type: DataTypes.DATE,
     allowNull: true
