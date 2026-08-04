@@ -1,7 +1,7 @@
 const nodemailer = require('nodemailer');
 
 /**
- * Nodemailer transport configuration for Chengeto PPE System
+ * Nodemailer transport configuration for the PPE Management System
  * Uses environment variables for secure credential management
  */
 const transporter = nodemailer.createTransport({

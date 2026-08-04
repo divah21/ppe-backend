@@ -425,7 +425,8 @@ router.post(
         passwordHash: password,
         roleId,
         employeeId: employeeId || null,
-        isActive: true
+        isActive: true,
+        mustChangePassword: true // Admin-set password is temporary
       });
 
       // Fetch complete user data with associations
@@ -721,11 +722,14 @@ router.put(
         });
       }
 
-      await user.update({ passwordHash: newPassword }); // Will be hashed by hook
+      await user.update({
+        passwordHash: newPassword, // Will be hashed by hook
+        mustChangePassword: true // Temporary - user must set their own on next login
+      });
 
       res.json({
         success: true,
-        message: 'Password reset successfully'
+        message: 'Password reset successfully. The user must change this password on next login.'
       });
     } catch (error) {
       next(error);

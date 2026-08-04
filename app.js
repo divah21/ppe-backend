@@ -70,20 +70,49 @@ app.use(cors({
   credentials: true
 }));
 
+// NOTE ON RATE-LIMIT KEYS
+// Staff all sit behind a single site NAT/proxy, so they share one public IP.
+// Any limiter keyed on IP alone is therefore a *company-wide* bucket: one
+// person mistyping their password would lock out every other user. Credential
+// checks are keyed per account instead, and the IP-keyed limiters below are
+// sized as flood guards for a whole office rather than a single person.
+const clientIp = (req) => req.ip || req.socket?.remoteAddress || 'unknown';
+
 // Global API rate limiter (protects against scraping and brute force floods)
 const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 300,
+  max: 1200,
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many requests, slow down.' }
 });
 app.use(globalLimiter);
 
-// Stricter limiter on auth endpoints (login brute-force, password reset abuse)
-const authLimiter = rateLimit({
+// Per-account limiter for endpoints that verify credentials. Keyed by
+// username + IP so failed attempts are charged to the account being targeted
+// and can never lock out other users.
+const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => {
+    const username = String(req.body?.username || '').trim().toLowerCase();
+    return `login:${clientIp(req)}:${username || 'anonymous'}`;
+  },
+  message: {
+    success: false,
+    message: 'Too many failed attempts for this account. Please try again in 15 minutes.'
+  }
+});
+
+// Flood guard for the auth router as a whole. Only failed responses count
+// (skipSuccessfulRequests), so normal traffic from a busy office never trips
+// it, but a host hammering many accounts still gets cut off.
+const authFloodLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 600,
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: true,
@@ -142,7 +171,15 @@ app.get('/health', async (req, res) => {
 // API Routes
 const API_PREFIX = `/api/${process.env.API_VERSION || 'v1'}`;
 
-app.use(`${API_PREFIX}/auth`, authLimiter, authRoutes);
+// Strict per-account limiting only on the endpoints that check credentials.
+// Mounted before the auth router, and after express.json() so the username is
+// available to the key generator. Deliberately NOT applied to /profile,
+// /refresh or /change-password - throttling those breaks signed-in users and,
+// for /change-password, would trap anyone forced to replace a temp password.
+app.use(`${API_PREFIX}/auth/login`, loginLimiter);
+app.use(`${API_PREFIX}/auth/request-password-reset`, loginLimiter);
+
+app.use(`${API_PREFIX}/auth`, authFloodLimiter, authRoutes);
 app.use(`${API_PREFIX}/users`, userRoutes);
 app.use(`${API_PREFIX}/departments`, departmentRoutes);
 app.use(`${API_PREFIX}/sections`, sectionRoutes);

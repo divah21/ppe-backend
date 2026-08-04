@@ -1,11 +1,20 @@
 const transporter = require('./mailer_transport.js');
 const emailLogger = require('./email_logger.js');
 
-// Chengeto PPE System Branding
+// PPE Management System Branding
 const BRAND_COLOR = '#2563EB'; // Blue theme
 const BRAND_SECONDARY = '#1E40AF';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://chengeto.eurekasystems.biz';
-const SYSTEM_NAME = 'Chengeto PPE System';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://ppesystem.earekasystems.biz';
+const SYSTEM_NAME = 'PPE Management System';
+
+// Single source of truth for the sender shown to recipients.
+//
+// The address MUST be the mailbox we authenticate to SMTP as - Gmail rejects
+// anything else with "553 ... not owned by user" - so it defaults to
+// EMAIL_USER. Only the display name is branded, which is what recipients
+// actually see in their inbox.
+const DEFAULT_FROM = process.env.EMAIL_FROM
+  || (process.env.EMAIL_USER ? `"${SYSTEM_NAME}" <${process.env.EMAIL_USER}>` : SYSTEM_NAME);
 
 /**
  * Get base path based on user role
@@ -43,7 +52,7 @@ const getRecordUrl = (recordType, recordId, role) => {
 };
 
 /**
- * Base email template with Chengeto PPE branding
+ * Base email template with PPE Management System branding
  */
 const getEmailTemplate = (title, content, actionButton = null, footer = null) => {
   return `
@@ -164,10 +173,10 @@ const sendEmployeeOnboardedEmail = async (employee) => {
   `;
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: employee.email,
     subject: `Welcome to ${SYSTEM_NAME} - Employee Onboarding`,
-    html: getEmailTemplate('Welcome to Chengeto PPE System', content),
+    html: getEmailTemplate(`Welcome to ${SYSTEM_NAME}`, content),
   };
 
   return await sendEmail(mailOptions, 'EMPLOYEE_ONBOARDED');
@@ -201,7 +210,7 @@ const sendUserCredentialsEmail = async (user, temporaryPassword, roles) => {
   const actionButton = createActionButton(loginUrl, 'Login to PPE System', '#10B981');
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: user.email,
     subject: `${SYSTEM_NAME} - Your Login Credentials`,
     html: getEmailTemplate('System Access Granted', content, actionButton),
@@ -234,7 +243,7 @@ const sendPasswordResetRequestToAdmin = async (user, adminEmails) => {
   const recipients = Array.isArray(adminEmails) ? adminEmails.join(', ') : adminEmails;
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: recipients,
     subject: `Password Reset Request - ${user.firstName} ${user.lastName}`,
     html: getEmailTemplate('Password Reset Request', content, actionButton),
@@ -267,7 +276,7 @@ const sendPasswordResetEmail = async (user, newPassword) => {
   const actionButton = createActionButton(loginUrl, 'Login Now', '#10B981');
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: user.email,
     subject: `${SYSTEM_NAME} - Password Reset Complete`,
     html: getEmailTemplate('Password Reset Complete', content, actionButton),
@@ -327,7 +336,7 @@ const sendRequestSubmittedToHOD = async (request, employee, hod) => {
   const actionButton = createActionButton(requestUrl, 'Review Request');
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: hod.email,
     subject: `PPE Request Pending Approval - ${employee.firstName} ${employee.lastName}`,
     html: getEmailTemplate('PPE Request Awaiting Approval', content, actionButton),
@@ -385,7 +394,7 @@ const sendRequestApprovedToStores = async (request, employee, approvedBy, stores
   const recipients = Array.isArray(storesEmails) ? storesEmails.join(', ') : storesEmails;
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: recipients,
     subject: `PPE Request Approved - Ready for Processing #${request.requestNumber || request.id}`,
     html: getEmailTemplate('Request Approved - Action Required', content, actionButton),
@@ -441,7 +450,7 @@ const sendPPEReadyForCollection = async (request, employee, allocations) => {
   `;
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: employee.email,
     subject: `Your PPE is Ready for Collection - #${request.requestNumber || request.id}`,
     html: getEmailTemplate('PPE Ready for Collection', content),
@@ -476,7 +485,7 @@ const sendRequestRejectedEmail = async (request, employee, rejectedBy, reason) =
   `;
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: employee.email,
     subject: `PPE Request Rejected - #${request.requestNumber || request.id}`,
     html: getEmailTemplate('PPE Request Rejected', content),
@@ -532,7 +541,7 @@ const sendLowStockAlert = async (items, recipients) => {
   const recipientList = Array.isArray(recipients) ? recipients.join(', ') : recipients;
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: recipientList,
     subject: `🚨 Low Stock Alert - ${items.length} Item(s) Below Minimum Level`,
     html: getEmailTemplate('Low Stock Alert', content, actionButton),
@@ -582,7 +591,7 @@ const sendPendingRequestsReminder = async (requests, recipient) => {
   const actionButton = createActionButton(requestsUrl, 'View Pending Requests', '#F59E0B');
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: recipient.email,
     subject: `${requests.length} Pending PPE Request(s) Require Your Attention`,
     html: getEmailTemplate('Pending Requests Reminder', content, actionButton),
@@ -623,7 +632,7 @@ const sendBudgetAllocatedEmail = async (budget, department, hod) => {
   const actionButton = createActionButton(budgetUrl, 'View Budget Details');
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: hod.email,
     subject: `PPE Budget Allocated - ${department.name} - FY${budget.fiscalYear || new Date().getFullYear()}`,
     html: getEmailTemplate('Budget Allocation Notification', content, actionButton),
@@ -661,7 +670,7 @@ const sendBudgetThresholdWarning = async (budget, department, recipients, percen
   const recipientList = Array.isArray(recipients) ? recipients.join(', ') : recipients;
 
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to: recipientList,
     subject: `⚠️ Budget Alert: ${department.name} at ${percentUsed.toFixed(0)}% - FY${budget.fiscalYear || new Date().getFullYear()}`,
     html: getEmailTemplate('Budget Threshold Warning', content, actionButton),
@@ -677,7 +686,7 @@ const sendBudgetThresholdWarning = async (budget, department, recipients, percen
  */
 const sendGenericEmail = async (to, subject, htmlContent) => {
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to,
     subject,
     html: htmlContent,
@@ -693,7 +702,7 @@ const sendTemplatedEmail = async (to, subject, title, content, actionUrl = null,
   const actionButton = actionUrl ? createActionButton(actionUrl, actionText || 'View Details') : null;
   
   const mailOptions = {
-    from: process.env.EMAIL_FROM || `"${SYSTEM_NAME}" <noreply@chengeto.com>`,
+    from: DEFAULT_FROM,
     to,
     subject,
     html: getEmailTemplate(title, content, actionButton),
