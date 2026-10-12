@@ -4,7 +4,7 @@ const emailLogger = require('./email_logger.js');
 // PPE Management System Branding
 const BRAND_COLOR = '#2563EB'; // Blue theme
 const BRAND_SECONDARY = '#1E40AF';
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://ppesystem.earekasystems.biz';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://ppesystem.eurekasystems.biz';
 const SYSTEM_NAME = 'PPE Management System';
 
 // Single source of truth for the sender shown to recipients.
@@ -741,4 +741,5 @@ module.exports = {
   createActionButton,
   createInfoBox,
   formatDate,
+  FRONTEND_URL,
 };
