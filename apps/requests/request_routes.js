@@ -6,7 +6,7 @@ const { authorize } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../database/db');
-const { adjustStock } = require('../../helpers/stock_helper');
+const { deductStock } = require('../../helpers/stock_helper');
 const { 
   sendRequestSubmittedToHOD, 
   sendRequestApprovedToStores, 
@@ -1020,7 +1020,7 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
       // find stock for this PPE item, prefer highest quantity
       let stock = await Stock.findOne({ where: { ppeItemId: item.ppeItemId }, order: [['quantity', 'DESC']], transaction });
 
-      const remaining = stock ? await adjustStock(stock.id, -Number(item.quantity), { transaction }) : null;
+      const remaining = stock ? await deductStock(stock.id, Number(item.quantity), { transaction }) : null;
       if (remaining === null) {
         pendingItems.push({
           requestItemId: item.id,

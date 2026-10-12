@@ -9,7 +9,7 @@ const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
 const { validateRequestedSize } = require('../../middlewares/size_validation');
-const { adjustStock } = require('../../helpers/stock_helper');
+const { deductStock, restoreStock } = require('../../helpers/stock_helper');
 
 /**
  * @route   GET /api/v1/stock
@@ -634,10 +634,12 @@ router.post(
           updatedData.eligibleSections = eligibleSections;
         }
         
-        await existing.update(updatedData);
-        if (Number(quantity) > 0) {
-          existing.quantity = await adjustStock(existing.id, Number(quantity));
-        }
+        await sequelize.transaction(async (transaction) => {
+          await existing.update(updatedData, { transaction });
+          if (Number(quantity) > 0) {
+            existing.quantity = await restoreStock(existing.id, Number(quantity), { transaction });
+          }
+        });
         stock = existing;
         isUpdate = true;
       } else {
@@ -760,7 +762,9 @@ router.put(
         });
       }
 
-      const newQuantity = adjustment === 0 ? stock.quantity : await adjustStock(stock.id, adjustment);
+      const newQuantity = adjustment === 0 ? stock.quantity
+        : adjustment < 0 ? await deductStock(stock.id, -adjustment)
+        : await restoreStock(stock.id, adjustment);
       if (newQuantity === null) {
         return res.status(400).json({
           success: false,
@@ -1363,7 +1367,11 @@ router.post(
           }
 
           // Update stock quantity
-          const newQuantity = await adjustStock(stock.id, parseInt(quantity));
+          const newQuantity = await restoreStock(stock.id, parseInt(quantity));
+          if (newQuantity === null) {
+            results.notFound.push({ stockId, itemName, size, color, quantity, error: 'Stock quantity could not be updated' });
+            continue;
+          }
           const previousQty = newQuantity - parseInt(quantity);
 
           await stock.update({

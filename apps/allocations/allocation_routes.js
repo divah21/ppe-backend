@@ -8,7 +8,7 @@ const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../database/db');
 const { sendBudgetThresholdWarning, sendLowStockAlert, sendPPEReadyForCollection, sendTemplatedEmail } = require('../../helpers/email_helper');
 const { buildAllocationExcel, buildAllocationPdf } = require('../../helpers/allocation_report_helper');
-const { adjustStock } = require('../../helpers/stock_helper');
+const { deductStock, restoreStock } = require('../../helpers/stock_helper');
 
 /**
  * @route   GET /api/v1/allocations/summaries
@@ -761,15 +761,20 @@ router.post(
           });
         }
 
-        // Cap at what is still outstanding so a repeated fulfil cannot re-issue items
-        const quantity = Number(allocItem.quantity);
-        const outstanding = requestItem.quantity - (requestItem.approvedQuantity || 0);
-        if (!Number.isInteger(quantity) || quantity <= 0 || quantity > outstanding) {
+        const requestedQty = Number(allocItem.quantity);
+        if (!Number.isInteger(requestedQty) || requestedQty <= 0) {
           await transaction.rollback();
           return res.status(400).json({
             success: false,
-            message: `Invalid quantity for ${requestItem.ppeItem?.name || 'item'}: requested ${allocItem.quantity}, outstanding ${outstanding}`
+            message: `Invalid quantity for ${requestItem.ppeItem?.name || 'item'}: ${allocItem.quantity}`
           });
+        }
+
+        // Issue at most what is still outstanding, so a repeated fulfil cannot re-issue items
+        const outstanding = requestItem.quantity - (requestItem.approvedQuantity || 0);
+        const quantity = Math.min(requestedQty, outstanding);
+        if (quantity <= 0) {
+          continue;
         }
 
         // Check stock availability (including size and gender if applicable)
@@ -824,7 +829,7 @@ router.post(
         }
 
         // If insufficient stock for this item, mark as pending and skip allocation
-        const remaining = stock ? await adjustStock(stock.id, -quantity, { transaction }) : null;
+        const remaining = stock ? await deductStock(stock.id, quantity, { transaction }) : null;
         if (remaining === null) {
           // add to pending list for response and continue
           const sizeInfo = requestedSize ? ` (size: ${requestedSize})` : '';
@@ -890,7 +895,7 @@ router.post(
         createdAllocations.push(allocation);
 
         // Queue a low stock alert for the row just deducted (sent after commit)
-        const reorderLevel = stock.reorderPoint || 10;
+        const reorderLevel = stock.reorderPoint ?? stock.minLevel ?? 10;
         if (remaining <= reorderLevel) {
           lowStockItems.push({
             itemName: effectivePPE ? effectivePPE.name : requestItem.ppeItem.name,
@@ -1206,7 +1211,7 @@ router.put(
         });
 
         if (stock) {
-          await adjustStock(stock.id, Number(allocation.quantity), { transaction });
+          await restoreStock(stock.id, Number(allocation.quantity), { transaction });
         }
       }
 
@@ -1290,8 +1295,12 @@ router.put(
       const stock = await Stock.findOne({ where: stockWhere, transaction });
 
       const renewalQty = Number(quantity || oldAllocation.quantity);
+      if (!Number.isInteger(renewalQty) || renewalQty <= 0) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: `Invalid renewal quantity: ${quantity}` });
+      }
 
-      const remaining = stock ? await adjustStock(stock.id, -renewalQty, { transaction }) : null;
+      const remaining = stock ? await deductStock(stock.id, renewalQty, { transaction }) : null;
       if (remaining === null) {
         await transaction.rollback();
         const sizeInfo = renewalSize ? ` (size: ${renewalSize})` : '';

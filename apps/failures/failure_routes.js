@@ -5,7 +5,7 @@ const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { sequelize } = require('../../database/db');
-const { adjustStock } = require('../../helpers/stock_helper');
+const { deductStock } = require('../../helpers/stock_helper');
 const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
@@ -405,7 +405,7 @@ router.post(
 
         let stockDeducted = false;
         if (report.stockId) {
-          stockDeducted = (await adjustStock(report.stockId, -1, { transaction })) !== null;
+          stockDeducted = (await deductStock(report.stockId, 1, { transaction })) !== null;
         }
 
         if (report.allocationId) {
@@ -718,7 +718,7 @@ router.post(
           return { status: 404, message: 'Stock item not found' };
         }
 
-        const newStockQuantity = await adjustStock(stock.id, -quantity, { transaction });
+        const newStockQuantity = await deductStock(stock.id, quantity, { transaction });
         if (newStockQuantity === null) {
           return { status: 400, message: `Insufficient stock. Available: ${stock.quantity}, Requested: ${quantity}` };
         }
