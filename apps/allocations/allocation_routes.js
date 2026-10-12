@@ -417,7 +417,7 @@ router.get('/renewals', authenticate, requireRole('stores', 'admin'), async (req
  * @desc    Get allocations due for renewal for a specific section (calculated from issueDate + replacementFrequency)
  * @access  Private (Section Rep, Dept Rep, HOD, Admin)
  */
-router.get('/section-renewals', authenticate, requireRole('section-rep', 'dept-rep', 'hod', 'admin'), async (req, res, next) => {
+router.get('/section-renewals', authenticate, requireRole('section-rep', 'department-rep', 'hod', 'admin'), async (req, res, next) => {
   try {
     const { sectionId, daysAhead = 90, includeExpired = 'true' } = req.query;
     
