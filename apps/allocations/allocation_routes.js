@@ -434,6 +434,16 @@ router.get('/section-renewals', authenticate, requireRole('section-rep', 'depart
       });
     }
 
+    if (userRole === 'department-rep' || userRole === 'hod') {
+      const section = await Section.findByPk(effectiveSectionId, { attributes: ['departmentId'] });
+      if (!section || !req.user.departmentId || section.departmentId !== req.user.departmentId) {
+        return res.status(403).json({
+          success: false,
+          message: 'You can only view renewals for sections in your department'
+        });
+      }
+    }
+
     // Get all active allocations for the section with PPE item details
     const allocations = await Allocation.findAll({
       where: {
