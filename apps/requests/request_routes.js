@@ -14,6 +14,12 @@ const {
   sendTemplatedEmail
 } = require('../../helpers/email_helper');
 
+// Requires the request to be loaded with the 'createdBy' include
+const isInRequesterSection = (user, request) => {
+  const requesterSectionId = request.createdBy?.sectionId || request.sectionId;
+  return Boolean(requesterSectionId) && user.sectionId === requesterSectionId;
+};
+
 // Helper function to include User with Employee name data
 const userInclude = (alias) => ({
   model: User,
@@ -516,10 +522,7 @@ router.put('/:id/section-rep-approve', authenticate, authorize(['section-rep', '
     // Section rep/supervisor should be able to approve requests from their section
     // The workflow is: Section Rep creates → Section Supervisor approves → HOD/SHEQ
     if (req.user.role.name !== 'admin') {
-      // Check if user is from the same section as the requester
-      const requesterSectionId = request.createdBy?.sectionId || request.sectionId;
-      
-      if (req.user.sectionId !== requesterSectionId) {
+      if (!isInRequesterSection(req.user, request)) {
         return res.status(403).json({
           success: false,
           message: 'You can only approve requests from your section'
@@ -897,15 +900,14 @@ router.put('/:id/stores-approve', authenticate, authorize(['stores', 'admin']), 
 });
 
 // Roles allowed to reject at each stage; admin may reject at any of them.
+// Unlisted stages (approved onward) are not rejectable: stock may already be issued.
 // department-rep at hod-review matches the Dept Rep allocations screen.
 const REJECTORS_BY_STATUS = {
   'pending': ['section-rep'],
   'sheq-review': ['sheq'],
   'dept-rep-review': ['department-rep'],
   'hod-review': ['hod', 'department-rep'],
-  'stores-review': ['stores'],
-  'approved': ['stores'],
-  'partially-fulfilled': ['stores']
+  'stores-review': ['stores']
 };
 
 /**
@@ -944,21 +946,18 @@ router.put('/:id/reject', authenticate, auditLog('UPDATE', 'Request'), async (re
     }
 
     const userRole = req.user.role.name;
-    if (userRole !== 'admin') {
-      if (!allowedRoles.includes(userRole)) {
-        return res.status(403).json({
-          success: false,
-          message: 'You cannot reject a request at this stage'
-        });
-      }
+    if (userRole !== 'admin' && !allowedRoles.includes(userRole)) {
+      return res.status(403).json({
+        success: false,
+        message: 'You cannot reject a request at this stage'
+      });
+    }
 
-      const requesterSectionId = request.createdBy?.sectionId || request.sectionId;
-      if (userRole === 'section-rep' && req.user.sectionId !== requesterSectionId) {
-        return res.status(403).json({
-          success: false,
-          message: 'You can only reject requests from your section'
-        });
-      }
+    if (userRole === 'section-rep' && !isInRequesterSection(req.user, request)) {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only reject requests from your section'
+      });
     }
 
     await request.update({
