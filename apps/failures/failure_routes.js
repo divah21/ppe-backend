@@ -4,6 +4,7 @@ const { FailureReport, Employee, PPEItem, Allocation, Section, Department, Stock
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
+const { deductStock } = require('../../helpers/stock_helper');
 const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
@@ -416,14 +417,9 @@ router.post(
 
       // Deduct from stock if stockId is provided
       if (report.stockId) {
-        const stock = await Stock.findByPk(report.stockId);
-        if (stock) {
-          if (stock.quantity > 0) {
-            await stock.update({
-              quantity: stock.quantity - 1
-            });
-            console.log(`Deducted 1 unit from stock ${stock.id}. New quantity: ${stock.quantity - 1}`);
-          }
+        const newQuantity = await deductStock(report.stockId, 1);
+        if (newQuantity !== null) {
+          console.log(`Deducted 1 unit from stock ${report.stockId}. New quantity: ${newQuantity}`);
         }
       }
 
@@ -752,7 +748,8 @@ router.post(
         });
       }
 
-      if (stock.quantity < quantity) {
+      const newStockQuantity = await deductStock(stock.id, Number(quantity));
+      if (newStockQuantity === null) {
         return res.status(400).json({
           success: false,
           message: `Insufficient stock. Available: ${stock.quantity}, Requested: ${quantity}`
@@ -783,11 +780,6 @@ router.post(
         status: 'active',
         replacementFrequency,
         notes: notes || `Replacement due to ${report.failureType} - Failure Report #${report.id.substring(0, 8)}`
-      });
-
-      // Deduct from stock
-      await stock.update({
-        quantity: stock.quantity - quantity
       });
 
       // Mark old allocation as replaced if exists
@@ -832,7 +824,7 @@ router.post(
           failureReport: updatedReport,
           allocation: newAllocation,
           stockDeducted: quantity,
-          newStockQuantity: stock.quantity - quantity
+          newStockQuantity
         }
       });
     } catch (error) {

@@ -8,6 +8,7 @@ const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../database/db');
 const { sendBudgetThresholdWarning, sendLowStockAlert, sendPPEReadyForCollection, sendTemplatedEmail } = require('../../helpers/email_helper');
 const { buildAllocationExcel, buildAllocationPdf } = require('../../helpers/allocation_report_helper');
+const { deductStock, restoreStock } = require('../../helpers/stock_helper');
 
 /**
  * @route   GET /api/v1/allocations/summaries
@@ -711,8 +712,9 @@ router.post(
       const { requestId } = req.params;
       const { allocations: allocationData } = req.body;
 
-      // Get request with items
-      const request = await Request.findByPk(requestId, {
+      // Lock the request row so concurrent fulfils are serialised
+      const locked = await Request.findByPk(requestId, { transaction, lock: transaction.LOCK.UPDATE });
+      const request = locked && await Request.findByPk(requestId, {
         include: [
           { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section' }] },
           {
@@ -720,7 +722,8 @@ router.post(
             as: 'items',
             include: [{ model: PPEItem, as: 'ppeItem' }]
           }
-        ]
+        ],
+        transaction
       });
 
       if (!request) {
@@ -807,7 +810,7 @@ router.post(
         }
 
         // If insufficient stock for this item, mark as pending and skip allocation
-        if (!stock || stock.quantity < allocItem.quantity) {
+        if (!stock || (await deductStock(stock.id, Number(allocItem.quantity), { transaction })) === null) {
           // add to pending list for response and continue
           const sizeInfo = requestedSize ? ` (size: ${requestedSize})` : '';
           const genderInfo = requestedGender ? ` (gender: ${requestedGender})` : '';
@@ -862,11 +865,6 @@ router.post(
           status: 'active',
           totalCost: (parseFloat(stock.unitPriceUSD) || 0) * allocItem.quantity,
           notes: allocationNotes
-        }, { transaction });
-
-        // Update stock
-        await stock.update({
-          quantity: stock.quantity - allocItem.quantity
         }, { transaction });
 
         // Update request item approved quantity (increment by allocated amount)
@@ -1162,7 +1160,7 @@ router.put(
     try {
       const { returnReason, condition } = req.body;
 
-      const allocation = await Allocation.findByPk(req.params.id);
+      const allocation = await Allocation.findByPk(req.params.id, { transaction, lock: transaction.LOCK.UPDATE });
 
       if (!allocation) {
         await transaction.rollback();
@@ -1191,13 +1189,12 @@ router.put(
       // If returned in good condition, add back to stock
       if (condition === 'good' || condition === 'fair') {
         const stock = await Stock.findOne({
-          where: { ppeItemId: allocation.ppeItemId }
+          where: { ppeItemId: allocation.ppeItemId },
+          transaction
         });
 
         if (stock) {
-          await stock.update({
-            quantity: stock.quantity + allocation.quantity
-          }, { transaction });
+          await restoreStock(stock.id, Number(allocation.quantity), { transaction });
         }
       }
 
@@ -1246,8 +1243,10 @@ router.put(
     try {
       const { quantity, size } = req.body;
 
-      const oldAllocation = await Allocation.findByPk(req.params.id, {
-        include: [{ model: PPEItem, as: 'ppeItem' }]
+      const locked = await Allocation.findByPk(req.params.id, { transaction, lock: transaction.LOCK.UPDATE });
+      const oldAllocation = locked && await Allocation.findByPk(req.params.id, {
+        include: [{ model: PPEItem, as: 'ppeItem' }],
+        transaction
       });
 
       if (!oldAllocation) {
@@ -1255,6 +1254,14 @@ router.put(
         return res.status(404).json({
           success: false,
           message: 'Allocation not found'
+        });
+      }
+
+      if (['replaced', 'returned'].includes(oldAllocation.status)) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Cannot renew an allocation that is already ${oldAllocation.status}`
         });
       }
 
@@ -1268,11 +1275,11 @@ router.put(
         stockWhere.size = null;
       }
       
-      const stock = await Stock.findOne({ where: stockWhere });
+      const stock = await Stock.findOne({ where: stockWhere, transaction });
 
-      const renewalQty = quantity || oldAllocation.quantity;
+      const renewalQty = Number(quantity || oldAllocation.quantity);
 
-      if (!stock || stock.quantity < renewalQty) {
+      if (!stock || (await deductStock(stock.id, renewalQty, { transaction })) === null) {
         await transaction.rollback();
         const sizeInfo = renewalSize ? ` (size: ${renewalSize})` : '';
         return res.status(400).json({
@@ -1303,11 +1310,6 @@ router.put(
         nextRenewalDate,
         status: 'active',
         totalCost: (parseFloat(stock.unitPriceUSD) || 0) * renewalQty
-      }, { transaction });
-
-      // Update stock
-      await stock.update({
-        quantity: stock.quantity - renewalQty
       }, { transaction });
 
       await transaction.commit();

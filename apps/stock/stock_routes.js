@@ -9,6 +9,7 @@ const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
 const { validateRequestedSize } = require('../../middlewares/size_validation');
+const { deductStock, restoreStock } = require('../../helpers/stock_helper');
 
 /**
  * @route   GET /api/v1/stock
@@ -743,7 +744,8 @@ router.put(
   auditLog('UPDATE', 'Stock'),
   async (req, res, next) => {
     try {
-      const { adjustment, reason } = req.body;
+      const { reason } = req.body;
+      const adjustment = Number(req.body.adjustment);
 
       const stock = await Stock.findByPk(req.params.id, {
         include: [{ model: PPEItem, as: 'ppeItem' }]
@@ -756,16 +758,16 @@ router.put(
         });
       }
 
-      const newQuantity = stock.quantity + adjustment;
-
-      if (newQuantity < 0) {
+      if (adjustment < 0 && (await deductStock(stock.id, -adjustment)) === null) {
         return res.status(400).json({
           success: false,
           message: 'Adjustment would result in negative stock'
         });
       }
-
-      await stock.update({ quantity: newQuantity });
+      if (adjustment > 0) {
+        await restoreStock(stock.id, adjustment);
+      }
+      await stock.reload();
 
       res.json({
         success: true,
