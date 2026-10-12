@@ -104,7 +104,7 @@ cp .env.example .env
 ### 3. Create PostgreSQL Database
 
 ```sql
-CREATE DATABASE ppe_system;
+CREATE DATABASE ppe;
 ```
 
 ### 4. Sync Database Tables
@@ -292,9 +292,9 @@ curl -X POST http://localhost:5000/api/v1/auth/login \
 
 ## 📝 Environment Variables
 
-Every variable the code reads is listed, with comments, in [`.env.example`](.env.example). Copy it to `.env` and fill in the blanks.
+See [`.env.example`](.env.example) for every variable the code reads, with comments.
 
-In production set `ALLOWED_ORIGINS` and `FRONTEND_URL` to the deployed frontend URL, and keep `ENABLE_CRON=true` on exactly one process.
+In production set `ALLOWED_ORIGINS` and `FRONTEND_URL` to the deployed frontend URL.
 
 ## 🛠️ Next Steps
 
