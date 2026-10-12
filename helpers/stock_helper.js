@@ -1,38 +1,29 @@
 const { sequelize } = require('../database/db');
+const { Stock } = require('../models');
 
-const assertPositiveInt = (quantity) => {
-  if (!Number.isInteger(quantity) || quantity <= 0) {
-    throw new RangeError(`Invalid stock quantity: ${quantity}`);
+/**
+ * Atomically changes a stock quantity by `delta` (negative to issue, positive
+ * to receive). The update only applies if the result stays >= 0, so concurrent
+ * issues cannot oversell. Returns the new quantity, or null when it would go
+ * negative or the row does not exist.
+ */
+const adjustStock = async (stockId, delta, { transaction } = {}) => {
+  if (!Number.isInteger(delta) || delta === 0) {
+    throw new RangeError(`Invalid stock adjustment: ${delta}`);
   }
-};
+  const q = (name) => sequelize.getQueryInterface().quoteIdentifier(name);
+  const table = q(Stock.getTableName());
+  const quantity = q(Stock.rawAttributes.quantity.field);
+  const updatedAt = q(Stock.rawAttributes.updatedAt.field);
+  const id = q(Stock.rawAttributes.id.field);
 
-/**
- * Atomically deducts stock only when enough is left, so concurrent issues
- * cannot oversell. Returns the new quantity, or null when stock is insufficient.
- */
-const deductStock = async (stockId, quantity, { transaction } = {}) => {
-  assertPositiveInt(quantity);
   const [rows] = await sequelize.query(
-    `UPDATE stocks SET quantity = quantity - :quantity, updated_at = NOW()
-     WHERE id = :stockId AND quantity >= :quantity
-     RETURNING quantity`,
-    { replacements: { stockId, quantity }, transaction }
+    `UPDATE ${table} SET ${quantity} = ${quantity} + :delta, ${updatedAt} = NOW()
+     WHERE ${id} = :stockId AND ${quantity} + :delta >= 0
+     RETURNING ${quantity} AS quantity`,
+    { replacements: { stockId, delta }, transaction }
   );
   return rows.length ? rows[0].quantity : null;
 };
 
-/**
- * Atomically returns stock. Returns the new quantity, or null if the row is gone.
- */
-const restoreStock = async (stockId, quantity, { transaction } = {}) => {
-  assertPositiveInt(quantity);
-  const [rows] = await sequelize.query(
-    `UPDATE stocks SET quantity = quantity + :quantity, updated_at = NOW()
-     WHERE id = :stockId
-     RETURNING quantity`,
-    { replacements: { stockId, quantity }, transaction }
-  );
-  return rows.length ? rows[0].quantity : null;
-};
-
-module.exports = { deductStock, restoreStock };
+module.exports = { adjustStock };

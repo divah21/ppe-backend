@@ -8,7 +8,7 @@ const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../database/db');
 const { sendBudgetThresholdWarning, sendLowStockAlert, sendPPEReadyForCollection, sendTemplatedEmail } = require('../../helpers/email_helper');
 const { buildAllocationExcel, buildAllocationPdf } = require('../../helpers/allocation_report_helper');
-const { deductStock, restoreStock } = require('../../helpers/stock_helper');
+const { adjustStock } = require('../../helpers/stock_helper');
 
 /**
  * @route   GET /api/v1/allocations/summaries
@@ -713,8 +713,7 @@ router.post(
       const { allocations: allocationData } = req.body;
 
       // Lock the request row so concurrent fulfils are serialised
-      const locked = await Request.findByPk(requestId, { transaction, lock: transaction.LOCK.UPDATE });
-      const request = locked && await Request.findByPk(requestId, {
+      const request = await Request.findByPk(requestId, {
         include: [
           { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section' }] },
           {
@@ -723,7 +722,8 @@ router.post(
             include: [{ model: PPEItem, as: 'ppeItem' }]
           }
         ],
-        transaction
+        transaction,
+        lock: { level: transaction.LOCK.UPDATE, of: Request }
       });
 
       if (!request) {
@@ -761,6 +761,17 @@ router.post(
           });
         }
 
+        // Cap at what is still outstanding so a repeated fulfil cannot re-issue items
+        const quantity = Number(allocItem.quantity);
+        const outstanding = requestItem.quantity - (requestItem.approvedQuantity || 0);
+        if (!Number.isInteger(quantity) || quantity <= 0 || quantity > outstanding) {
+          await transaction.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Invalid quantity for ${requestItem.ppeItem?.name || 'item'}: requested ${allocItem.quantity}, outstanding ${outstanding}`
+          });
+        }
+
         // Check stock availability (including size and gender if applicable)
         // Support replacing the requested PPE item with another PPE (replacement flow)
         const effectivePPEItemId = allocItem.ppeItemId || requestItem.ppeItemId;
@@ -786,14 +797,16 @@ router.post(
         // Find stock, prioritizing exact size match, then any available stock
         let stock = await Stock.findOne({ 
           where: stockWhere,
-          order: [['quantity', 'DESC']] // Get the stock with most quantity first
+          order: [['quantity', 'DESC']], // Get the stock with most quantity first
+          transaction
         });
         
         // If no stock found and the effective PPE does not have size variants, try without size filter
         if (!stock && !(effectivePPE && effectivePPE.hasSizeVariants)) {
           stock = await Stock.findOne({ 
             where: { ppeItemId: effectivePPEItemId },
-            order: [['quantity', 'DESC']]
+            order: [['quantity', 'DESC']],
+            transaction
           });
         }
         
@@ -805,12 +818,14 @@ router.post(
           }
           stock = await Stock.findOne({ 
             where: relaxedWhere,
-            order: [['quantity', 'DESC']]
+            order: [['quantity', 'DESC']],
+            transaction
           });
         }
 
         // If insufficient stock for this item, mark as pending and skip allocation
-        if (!stock || (await deductStock(stock.id, Number(allocItem.quantity), { transaction })) === null) {
+        const remaining = stock ? await adjustStock(stock.id, -quantity, { transaction }) : null;
+        if (remaining === null) {
           // add to pending list for response and continue
           const sizeInfo = requestedSize ? ` (size: ${requestedSize})` : '';
           const genderInfo = requestedGender ? ` (gender: ${requestedGender})` : '';
@@ -858,35 +873,30 @@ router.post(
           requestItemId: requestItem.id,
           requestId: request.id,
           issuedById: req.user.id,
-          quantity: allocItem.quantity,
+          quantity,
           size: stock.size || allocItem.size || requestItem.size, // Use actual stock size
           issueDate,
           nextRenewalDate,
           status: 'active',
-          totalCost: (parseFloat(stock.unitPriceUSD) || 0) * allocItem.quantity,
+          totalCost: (parseFloat(stock.unitPriceUSD) || 0) * quantity,
           notes: allocationNotes
         }, { transaction });
 
         // Update request item approved quantity (increment by allocated amount)
         await requestItem.update({
-          approvedQuantity: (requestItem.approvedQuantity || 0) + allocItem.quantity
+          approvedQuantity: (requestItem.approvedQuantity || 0) + quantity
         }, { transaction });
 
         createdAllocations.push(allocation);
 
-        // Check low stock after deduction and queue alert if needed
-        const updatedStock = await Stock.findOne({ 
-          where: { ppeItemId: effectivePPEItemId },
-          transaction 
-        });
-        
-        if (updatedStock && updatedStock.quantity <= (updatedStock.reorderLevel || 10)) {
-          // Queue low stock alert (will be sent after transaction commits)
+        // Queue a low stock alert for the row just deducted (sent after commit)
+        const reorderLevel = stock.reorderPoint || 10;
+        if (remaining <= reorderLevel) {
           lowStockItems.push({
             itemName: effectivePPE ? effectivePPE.name : requestItem.ppeItem.name,
-            currentStock: updatedStock.quantity,
-            reorderLevel: updatedStock.reorderLevel || 10,
-            size: updatedStock.size || null
+            currentStock: remaining,
+            reorderLevel,
+            size: stock.size || null
           });
         }
       }
@@ -1170,11 +1180,11 @@ router.put(
         });
       }
 
-      if (allocation.status === 'returned') {
+      if (['returned', 'replaced'].includes(allocation.status)) {
         await transaction.rollback();
         return res.status(400).json({
           success: false,
-          message: 'Allocation already returned'
+          message: `Allocation already ${allocation.status}`
         });
       }
 
@@ -1188,13 +1198,15 @@ router.put(
 
       // If returned in good condition, add back to stock
       if (condition === 'good' || condition === 'fair') {
+        // Prefer the row matching the returned size, else any row for the item
         const stock = await Stock.findOne({
           where: { ppeItemId: allocation.ppeItemId },
+          order: [[literal('size IS NOT DISTINCT FROM ' + db.sequelize.escape(allocation.size ?? null)), 'DESC']],
           transaction
         });
 
         if (stock) {
-          await restoreStock(stock.id, Number(allocation.quantity), { transaction });
+          await adjustStock(stock.id, Number(allocation.quantity), { transaction });
         }
       }
 
@@ -1243,10 +1255,10 @@ router.put(
     try {
       const { quantity, size } = req.body;
 
-      const locked = await Allocation.findByPk(req.params.id, { transaction, lock: transaction.LOCK.UPDATE });
-      const oldAllocation = locked && await Allocation.findByPk(req.params.id, {
+      const oldAllocation = await Allocation.findByPk(req.params.id, {
         include: [{ model: PPEItem, as: 'ppeItem' }],
-        transaction
+        transaction,
+        lock: { level: transaction.LOCK.UPDATE, of: Allocation }
       });
 
       if (!oldAllocation) {
@@ -1279,7 +1291,8 @@ router.put(
 
       const renewalQty = Number(quantity || oldAllocation.quantity);
 
-      if (!stock || (await deductStock(stock.id, renewalQty, { transaction })) === null) {
+      const remaining = stock ? await adjustStock(stock.id, -renewalQty, { transaction }) : null;
+      if (remaining === null) {
         await transaction.rollback();
         const sizeInfo = renewalSize ? ` (size: ${renewalSize})` : '';
         return res.status(400).json({

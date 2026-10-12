@@ -9,7 +9,7 @@ const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
 const { validateRequestedSize } = require('../../middlewares/size_validation');
-const { deductStock, restoreStock } = require('../../helpers/stock_helper');
+const { adjustStock } = require('../../helpers/stock_helper');
 
 /**
  * @route   GET /api/v1/stock
@@ -597,7 +597,6 @@ router.post(
         // Add quantity to existing stock entry
         // If new price differs from existing, update to new price (FIFO or weighted average can be implemented later)
         const updatedData = {
-          quantity: existing.quantity + quantity,
           minLevel: minLevel || existing.minLevel,
           maxLevel: maxLevel || existing.maxLevel,
           reorderPoint: reorderPoint || existing.reorderPoint,
@@ -636,6 +635,9 @@ router.post(
         }
         
         await existing.update(updatedData);
+        if (Number(quantity) > 0) {
+          existing.quantity = await adjustStock(existing.id, Number(quantity));
+        }
         stock = existing;
         isUpdate = true;
       } else {
@@ -758,16 +760,14 @@ router.put(
         });
       }
 
-      if (adjustment < 0 && (await deductStock(stock.id, -adjustment)) === null) {
+      const newQuantity = adjustment === 0 ? stock.quantity : await adjustStock(stock.id, adjustment);
+      if (newQuantity === null) {
         return res.status(400).json({
           success: false,
           message: 'Adjustment would result in negative stock'
         });
       }
-      if (adjustment > 0) {
-        await restoreStock(stock.id, adjustment);
-      }
-      await stock.reload();
+      stock.quantity = newQuantity;
 
       res.json({
         success: true,
@@ -1363,11 +1363,10 @@ router.post(
           }
 
           // Update stock quantity
-          const previousQty = stock.quantity || 0;
-          const newQuantity = previousQty + parseInt(quantity);
+          const newQuantity = await adjustStock(stock.id, parseInt(quantity));
+          const previousQty = newQuantity - parseInt(quantity);
 
           await stock.update({
-            quantity: newQuantity,
             lastRestocked: new Date(),
             notes: stock.notes 
               ? `${stock.notes}\n[${new Date().toISOString().split('T')[0]}] ${reason}: +${quantity}`

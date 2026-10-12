@@ -6,7 +6,7 @@ const { authorize } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../database/db');
-const { deductStock } = require('../../helpers/stock_helper');
+const { adjustStock } = require('../../helpers/stock_helper');
 const { 
   sendRequestSubmittedToHOD, 
   sendRequestApprovedToStores, 
@@ -987,13 +987,13 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
     const { fulfillmentNote } = req.body;
 
     // Lock the request row so two concurrent fulfils cannot both see 'approved'
-    const locked = await Request.findByPk(req.params.id, { transaction, lock: transaction.LOCK.UPDATE });
-    const request = locked && await Request.findByPk(req.params.id, {
+    const request = await Request.findByPk(req.params.id, {
       include: [
         { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section' }] },
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
       ],
-      transaction
+      transaction,
+      lock: { level: transaction.LOCK.UPDATE, of: Request }
     });
 
     if (!request) {
@@ -1020,7 +1020,8 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
       // find stock for this PPE item, prefer highest quantity
       let stock = await Stock.findOne({ where: { ppeItemId: item.ppeItemId }, order: [['quantity', 'DESC']], transaction });
 
-      if (!stock || (await deductStock(stock.id, Number(item.quantity), { transaction })) === null) {
+      const remaining = stock ? await adjustStock(stock.id, -Number(item.quantity), { transaction }) : null;
+      if (remaining === null) {
         pendingItems.push({
           requestItemId: item.id,
           name: item.ppeItem?.name,
