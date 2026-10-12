@@ -321,7 +321,7 @@ function scheduleBackup(time = '18:00', options = {}) {
     }
   }, {
     scheduled: true,
-    timezone: process.env.TZ || 'Africa/Johannesburg'
+    timezone: process.env.TIMEZONE || 'Africa/Harare'
   });
 
   return scheduledBackupJob;
