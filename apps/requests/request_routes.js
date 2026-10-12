@@ -896,10 +896,22 @@ router.put('/:id/stores-approve', authenticate, authorize(['stores', 'admin']), 
   }
 });
 
+// Roles allowed to reject at each stage; admin may reject at any of them.
+// department-rep at hod-review matches the Dept Rep allocations screen.
+const REJECTORS_BY_STATUS = {
+  'pending': ['section-rep'],
+  'sheq-review': ['sheq'],
+  'dept-rep-review': ['department-rep'],
+  'hod-review': ['hod', 'department-rep'],
+  'stores-review': ['stores'],
+  'approved': ['stores'],
+  'partially-fulfilled': ['stores']
+};
+
 /**
  * @route   PUT /api/v1/requests/:id/reject
  * @desc    Reject request (at any approval stage)
- * @access  Private
+ * @access  Private (approver for the request's current stage, or Admin)
  */
 router.put('/:id/reject', authenticate, auditLog('UPDATE', 'Request'), async (req, res) => {
   try {
@@ -912,8 +924,10 @@ router.put('/:id/reject', authenticate, auditLog('UPDATE', 'Request'), async (re
       });
     }
 
-    const request = await Request.findByPk(req.params.id);
-    
+    const request = await Request.findByPk(req.params.id, {
+      include: [{ model: User, as: 'createdBy', attributes: ['id', 'sectionId'] }]
+    });
+
     if (!request) {
       return res.status(404).json({
         success: false,
@@ -921,11 +935,30 @@ router.put('/:id/reject', authenticate, auditLog('UPDATE', 'Request'), async (re
       });
     }
 
-    if (['rejected', 'fulfilled', 'cancelled'].includes(request.status)) {
+    const allowedRoles = REJECTORS_BY_STATUS[request.status];
+    if (!allowedRoles) {
       return res.status(400).json({
         success: false,
         message: `Cannot reject request with status: ${request.status}`
       });
+    }
+
+    const userRole = req.user.role.name;
+    if (userRole !== 'admin') {
+      if (!allowedRoles.includes(userRole)) {
+        return res.status(403).json({
+          success: false,
+          message: 'You cannot reject a request at this stage'
+        });
+      }
+
+      const requesterSectionId = request.createdBy?.sectionId || request.sectionId;
+      if (userRole === 'section-rep' && req.user.sectionId !== requesterSectionId) {
+        return res.status(403).json({
+          success: false,
+          message: 'You can only reject requests from your section'
+        });
+      }
     }
 
     await request.update({
