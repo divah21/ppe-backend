@@ -417,7 +417,7 @@ router.get('/renewals', authenticate, requireRole('stores', 'admin'), async (req
  * @desc    Get allocations due for renewal for a specific section (calculated from issueDate + replacementFrequency)
  * @access  Private (Section Rep, Dept Rep, HOD, Admin)
  */
-router.get('/section-renewals', authenticate, requireRole('section-rep', 'dept-rep', 'hod', 'admin'), async (req, res, next) => {
+router.get('/section-renewals', authenticate, requireRole('section-rep', 'department-rep', 'hod', 'admin'), async (req, res, next) => {
   try {
     const { sectionId, daysAhead = 90, includeExpired = 'true' } = req.query;
     
@@ -432,6 +432,16 @@ router.get('/section-renewals', authenticate, requireRole('section-rep', 'dept-r
         success: false,
         message: 'Section ID is required. Ensure the user is linked to an employee with a section.'
       });
+    }
+
+    if (userRole === 'department-rep' || userRole === 'hod') {
+      const section = await Section.findByPk(effectiveSectionId, { attributes: ['departmentId'] });
+      if (!section || !req.user.departmentId || section.departmentId !== req.user.departmentId) {
+        return res.status(403).json({
+          success: false,
+          message: 'You can only view renewals for sections in your department'
+        });
+      }
     }
 
     // Get all active allocations for the section with PPE item details

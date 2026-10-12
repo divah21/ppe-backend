@@ -55,7 +55,7 @@ ppe-backend/
 
 ### Core Models Created:
 
-1. **Role** - User roles (admin, stores, section-rep, dept-rep, hod-hos, sheq)
+1. **Role** - User roles (admin, stores, section-rep, department-rep, hod, sheq)
 2. **User** - System users with authentication
 3. **Department** - Organizational departments
 4. **Section** - Department sections
