@@ -6,6 +6,7 @@ const { authorize } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../database/db');
+const { deductStock } = require('../../helpers/stock_helper');
 const { 
   sendRequestSubmittedToHOD, 
   sendRequestApprovedToStores, 
@@ -985,13 +986,16 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
   try {
     const { fulfillmentNote } = req.body;
 
+    // Lock the request row so two concurrent fulfils cannot both see 'approved'
     const request = await Request.findByPk(req.params.id, {
       include: [
         { model: Employee, as: 'targetEmployee', include: [{ model: Section, as: 'section' }] },
         { model: RequestItem, as: 'items', include: [{ model: PPEItem, as: 'ppeItem' }] }
-      ]
+      ],
+      transaction,
+      lock: { level: transaction.LOCK.UPDATE, of: Request }
     });
-    
+
     if (!request) {
       await transaction.rollback();
       return res.status(404).json({
@@ -1016,7 +1020,8 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
       // find stock for this PPE item, prefer highest quantity
       let stock = await Stock.findOne({ where: { ppeItemId: item.ppeItemId }, order: [['quantity', 'DESC']], transaction });
 
-      if (!stock || stock.quantity < item.quantity) {
+      const remaining = stock ? await deductStock(stock.id, Number(item.quantity), { transaction }) : null;
+      if (remaining === null) {
         pendingItems.push({
           requestItemId: item.id,
           name: item.ppeItem?.name,
@@ -1047,9 +1052,6 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
         totalCost: (parseFloat(stock.unitPriceUSD) || 0) * item.quantity,
         notes: `Allocated from request #${request.id.slice(0,8)}`
       }, { transaction });
-
-      // deduct stock
-      await stock.update({ quantity: stock.quantity - item.quantity }, { transaction });
 
       // update request item approvedQuantity
       await RequestItem.update({ approvedQuantity: item.quantity }, { where: { id: item.id }, transaction });
