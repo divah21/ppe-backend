@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { models } from '../src/core/db';
+import { onboardingEmail } from '../src/modules/employees/service';
 import { prepareV2 } from '../src/v2';
 import { employeeWorld, type EmployeeWorld } from './employees.fixtures';
 import { app, createFixtures, write } from './helpers';
@@ -185,6 +186,20 @@ describe('POST /employees', () => {
       jobTitle: { id: w.jobTitle.id },
     });
     expect(res.body.data.dateJoined).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('escapes rep-entered values before they reach the onboarding email', async () => {
+    const res = await write(w.agents.sectionRep, 'post', URL).send(
+      body({ firstName: '<a href="x">Win</a>', email: 'phish@example.com', jobType: "O'Neil & <b>" })
+    );
+    expect(res.status).toBe(201);
+    fx.track('Employee', res.body.data.id);
+    expect(onboardingEmail(res.body.data)).toMatchObject({
+      firstName: '&lt;a href=&quot;x&quot;&gt;Win&lt;/a&gt;',
+      email: 'phish@example.com',
+      section: w.mine.section.name,
+      jobTitle: 'O&#39;NEIL &amp; &lt;B&gt;',
+    });
   });
 
   it('lets a department rep add to any section of their department', async () => {

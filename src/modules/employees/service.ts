@@ -313,19 +313,25 @@ const assertWorksNumberFree = async (worksNumber: string, exceptId: string | nul
   if (existing && existing.id !== exceptId) throw duplicateWorksNumber(worksNumber);
 };
 
+// The v1 template interpolates values into HTML as-is, and reps choose both the names and the recipient
+const escapeHtml = (v: string | null | undefined) =>
+  v ? v.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!) : undefined;
+
+export const onboardingEmail = (employee: EmployeeDto) => ({
+  firstName: escapeHtml(employee.firstName),
+  lastName: escapeHtml(employee.lastName),
+  email: employee.email,
+  worksNumber: escapeHtml(employee.worksNumber),
+  department: escapeHtml(employee.department?.name),
+  section: escapeHtml(employee.section?.name),
+  jobTitle: escapeHtml(employee.jobTitle?.name ?? employee.jobType),
+});
+
 const sendOnboarding = (employee: EmployeeDto) => {
   if (!employee.email || config.env === 'test') return;
-  Promise.resolve(
-    sendEmployeeOnboardedEmail({
-      firstName: employee.firstName,
-      lastName: employee.lastName,
-      email: employee.email,
-      worksNumber: employee.worksNumber,
-      department: employee.department?.name,
-      section: employee.section?.name,
-      jobTitle: employee.jobTitle?.name ?? employee.jobType,
-    })
-  ).catch((err: unknown) => logger.warn({ err }, 'Employee onboarding email failed'));
+  Promise.resolve(sendEmployeeOnboardedEmail(onboardingEmail(employee))).catch((err: unknown) =>
+    logger.warn({ err }, 'Employee onboarding email failed')
+  );
 };
 
 export const createEmployee = async (auth: AuthContext, input: EmployeeInput) => {
