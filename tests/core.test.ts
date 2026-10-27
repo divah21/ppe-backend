@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import request from 'supertest';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryTypes } from 'sequelize';
@@ -7,10 +10,12 @@ import { createSession, isSessionActive, purgeStaleSessions } from '../src/core/
 import { spendByDepartment } from '../src/modules/budgets/spend';
 import { prepareV2 } from '../src/v2';
 import { allocate, pricedItem } from './finance.fixtures';
-import { app, createFixtures } from './helpers';
+import { app, createFixtures, signIn } from './helpers';
 
 /* eslint-disable-next-line @typescript-eslint/no-require-imports */
 const { errorHandler } = require('../middlewares/error_handler');
+/* eslint-disable-next-line @typescript-eslint/no-require-imports */
+const { flushAccessLog, rotateAccessLog } = require('../middlewares/audit_middleware');
 
 const fakeRes = () => {
   const res = { statusCode: 0, body: undefined as unknown, status: vi.fn(), json: vi.fn() };
@@ -97,5 +102,39 @@ describe('auth session purge', () => {
     expect(await isSessionActive(live.sessionId)).toBe(true);
     const [left] = await sequelize.query(`SELECT 1 FROM auth_sessions WHERE id = :id`, { replacements: { id: old.sessionId } });
     expect(left).toHaveLength(0);
+  });
+});
+
+describe('access log', () => {
+  const fx = createFixtures();
+  afterAll(() => fx.cleanup());
+
+  it('appends without blocking the event loop', async () => {
+    const admin = await fx.user('admin');
+    const agent = await signIn(admin.username);
+    const sync = vi.spyOn(fs, 'appendFileSync');
+    expect((await agent.get('/api/v2/auth/me')).status).toBe(200);
+    await new Promise((r) => setImmediate(r));
+    await flushAccessLog();
+    expect(sync).not.toHaveBeenCalled();
+    const lines = fs.readFileSync(path.join(process.cwd(), 'logs', 'access.log'), 'utf8').trim().split('\n');
+    expect(lines.at(-1)).toContain(admin.username);
+  });
+
+  it('rolls the file over at the size cap and keeps a bounded number of archives', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ppe-access-'));
+    const file = path.join(dir, 'access.log');
+    try {
+      for (const ts of [1, 2, 3]) fs.writeFileSync(path.join(dir, `access_100000000000${ts}.log`), 'old');
+      fs.writeFileSync(file, 'x'.repeat(20));
+      expect(await rotateAccessLog({ file, dir, maxBytes: 100, keep: 2 })).toBe(false);
+      expect(await rotateAccessLog({ file, dir, maxBytes: 10, keep: 2 })).toBe(true);
+      expect(fs.existsSync(file)).toBe(false);
+      const archives = fs.readdirSync(dir).sort();
+      expect(archives).toHaveLength(2);
+      expect(archives).not.toContain('access_1000000000001.log');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

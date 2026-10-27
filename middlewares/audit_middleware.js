@@ -9,6 +9,45 @@ if (!fs.existsSync(LOGS_DIR)) {
 }
 
 const ACCESS_LOG_FILE = path.join(LOGS_DIR, 'access.log');
+const ACCESS_LOG_MAX_BYTES = 50 * 1024 * 1024;
+const ACCESS_LOG_ARCHIVES = 10;
+const ROTATE_CHECK_EVERY = 500;
+
+/**
+ * Size-based rollover. The live file keeps its fixed name because the v1 access-log viewer
+ * reads it; archives use the same access_<ms>.log names as its manual "clear" action.
+ */
+const rotateAccessLog = async ({
+  file = ACCESS_LOG_FILE,
+  dir = LOGS_DIR,
+  maxBytes = ACCESS_LOG_MAX_BYTES,
+  keep = ACCESS_LOG_ARCHIVES
+} = {}) => {
+  const size = await fs.promises.stat(file).then((s) => s.size, () => 0);
+  if (size < maxBytes) return false;
+  await fs.promises.rename(file, path.join(dir, `access_${Date.now()}.log`));
+  const archives = (await fs.promises.readdir(dir)).filter((f) => /^access_\d+\.log$/.test(f)).sort();
+  for (const old of archives.slice(0, -keep)) {
+    await fs.promises.unlink(path.join(dir, old)).catch(() => undefined);
+  }
+  return true;
+};
+
+// Appends run in order off the event loop; a sync write per GET stalled every request
+let accessQueue = Promise.resolve();
+let writesSinceCheck = 0;
+const appendAccessLine = (line) => {
+  accessQueue = accessQueue
+    .then(async () => {
+      await fs.promises.appendFile(ACCESS_LOG_FILE, line);
+      if (++writesSinceCheck >= ROTATE_CHECK_EVERY) {
+        writesSinceCheck = 0;
+        await rotateAccessLog();
+      }
+    })
+    .catch((error) => console.error('Failed to write access log:', error.message));
+  return accessQueue;
+};
 
 /**
  * Create audit log entry in database (for POST, PUT, DELETE)
@@ -48,8 +87,7 @@ const logAccessToFile = (req, responseTime = 0) => {
       query: Object.keys(req.query).length > 0 ? req.query : undefined
     };
 
-    // Append to file
-    fs.appendFileSync(ACCESS_LOG_FILE, JSON.stringify(logEntry) + '\n');
+    appendAccessLine(JSON.stringify(logEntry) + '\n');
   } catch (error) {
     console.error('Failed to write access log:', error);
   }
@@ -221,5 +259,7 @@ module.exports = {
   auditLog,
   accessLogger,
   autoAuditLog,
-  logAccessToFile
+  logAccessToFile,
+  rotateAccessLog,
+  flushAccessLog: () => accessQueue
 };
