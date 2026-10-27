@@ -155,6 +155,15 @@ describe('cost centre writes', () => {
     expect(res.body.error.message).toMatch(/still has 1 employee\./);
   });
 
+  it('keeps a department that still has cost centres from being deleted', async () => {
+    const dept = await fx.make('Department', { name: `${fx.tag}-cc-only` });
+    const centre = await fx.make('CostCenter', { code: `${fx.tag}-500`, name: 'Kept', departmentId: dept.id });
+    const res = await write(w.agents.admin, 'delete', `/api/v2/departments/${dept.id}`);
+    expect(res.status).toBe(409);
+    expect(res.body.error.details).toEqual({ costCentres: 1 });
+    expect((await w.agents.admin.get(`${URL}/${centre.id}`)).body.data.departmentId).toBe(dept.id);
+  });
+
   it('returns 404 for unknown cost centres', async () => {
     const missing = '00000000-0000-4000-8000-000000000000';
     expect((await w.agents.admin.get(`${URL}/${missing}`)).status).toBe(404);
