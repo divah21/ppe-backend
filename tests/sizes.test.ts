@@ -118,6 +118,16 @@ describe('creating and editing scales', () => {
     expect((await models.PPEItem.findByPk(item.id))?.sizeScale).toBe(cat.code('ren2'));
   });
 
+  it('keeps a legacy code as it is when only the details change', async () => {
+    const legacy = await fx.make('SizeScale', { code: cat.code('legacy').toLowerCase(), name: 'Legacy', isActive: true });
+    await fx.make('Size', { scaleId: legacy.id, value: 'A', sortOrder: 1 });
+    const item = await cat.item('legacy-item', { hasSizeVariants: true, sizeScale: legacy.code });
+    const res = await write(stores, 'put', `${URL}/${legacy.id}`).send({ code: legacy.code, name: 'Legacy renamed' });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ code: legacy.code, name: 'Legacy renamed', itemCount: 1 });
+    expect((await models.PPEItem.findByPk(item.id))?.sizeScale).toBe(legacy.code);
+  });
+
   it('returns 404 for an unknown scale', async () => {
     const res = await write(admin, 'put', `${URL}/00000000-0000-4000-8000-000000000000`).send({ code: 'X1', name: 'Nope' });
     expect(res.status).toBe(404);
@@ -173,6 +183,15 @@ describe('PUT /size-scales/:id/sizes', () => {
     const [, m] = (await admin.get(`${URL}/${scale.id}`)).body.data.sizes;
     const renamed = await write(admin, 'put', `${URL}/${scale.id}/sizes`).send({ sizes: [{ value: 'S' }, { id: m.id, value: 'Medium' }] });
     expect(renamed.status).toBe(409);
+  });
+
+  it('matches sizes recorded on stock regardless of case', async () => {
+    const scale = await cat.scale('STKCASE', ['S', 'M']);
+    const item = await cat.item('stkcase', { hasSizeVariants: true, sizeScale: scale.code });
+    await cat.stock(item.id, 'm', 2);
+    const removed = await write(admin, 'put', `${URL}/${scale.id}/sizes`).send({ sizes: [{ value: 'S' }] });
+    expect(removed.status).toBe(409);
+    expect(removed.body.error.details.values).toEqual(['m']);
   });
 
   it('rejects stale size ids and invalid rows', async () => {

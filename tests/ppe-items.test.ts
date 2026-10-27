@@ -223,6 +223,22 @@ describe('creating and updating items', () => {
     expect(res.body.error.details.fieldErrors.itemCode).toBeDefined();
   });
 
+  it('lets only one of two concurrent saves of the same code in different case through', async () => {
+    const code = cat.code('race');
+    const results = await Promise.all([
+      write(admin, 'post', URL).send(body('race', { itemCode: code })),
+      write(stores, 'post', URL).send(body('race', { itemCode: code.toLowerCase() })),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([201, 409]);
+  });
+
+  it('refuses a size scale that has no sizes yet', async () => {
+    const empty = await cat.scale('EMPTY', []);
+    const res = await write(admin, 'post', URL).send(body('empty', { hasSizeVariants: true, sizeScale: empty.code }));
+    expect(res.status).toBe(422);
+    expect(res.body.error.details.fieldErrors.sizeScale[0]).toMatch(/no sizes yet/);
+  });
+
   it('forbids department roles and sheq from writing', async () => {
     expect((await write(hod, 'post', URL).send(body('hod'))).status).toBe(403);
     expect((await write(sheq, 'put', `${URL}/${glasses.id}`).send(body('glasses'))).status).toBe(403);

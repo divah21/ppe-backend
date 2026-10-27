@@ -50,7 +50,10 @@ export const listSizeScales = async (auth: AuthContext, q: z.infer<typeof sizeSc
   const { rows, count } = await models.SizeScale.findAndCountAll({
     where: { [Op.and]: where },
     attributes: { include: [[SIZE_COUNT, 'sizeCount'], [ITEM_COUNT, 'itemCount']] },
-    order: [[q.sort ?? 'name', q.sort ? q.order.toUpperCase() : 'ASC']],
+    order: [
+      [q.sort ?? 'name', q.sort ? q.order.toUpperCase() : 'ASC'],
+      ['id', 'ASC'],
+    ],
     ...pageWindow(q),
   });
   return { rows: rows.map(toSizeScale), count };
@@ -82,7 +85,12 @@ export const getSizeScale = async (auth: AuthContext, id: string) => {
   return { ...toSizeScale(row), sizes: await sizesOfScale(id) };
 };
 
+/** The unique index on code is case-sensitive; serialise the case-insensitive check below. */
+const lockScaleCodes = (transaction: Transaction) =>
+  sequelize.query(`SELECT pg_advisory_xact_lock(hashtext('size_scales.code'))`, { transaction });
+
 const codeTaken = async (code: string, exceptId: string | null, transaction: Transaction) => {
+  await lockScaleCodes(transaction);
   const clash = await models.SizeScale.findOne({
     where: {
       [Op.and]: [sqlWhere(fn('upper', col('code')), code), ...(exceptId ? [{ id: { [Op.ne]: exceptId } }] : [])],
@@ -127,6 +135,9 @@ export const updateSizeScale = async (auth: AuthContext, id: string, input: Upda
   await inTransaction(async (t) => {
     const row = await lockScale(id, t);
     const oldCode = row.code as string;
+    // Codes are saved in capitals, but legacy scales may not be: saving their details must not
+    // silently rename them (and every item pointing at them) when only the case differs.
+    if (input.code.toUpperCase() === oldCode.toUpperCase()) input = { ...input, code: oldCode };
     if (input.code !== oldCode) {
       await codeTaken(input.code, id, t);
       // Items reference their scale by code, so a renamed code follows through to them
@@ -160,9 +171,9 @@ const valuesInUse = async (code: string, values: string[], t: Transaction) => {
        UNION ALL SELECT size, ppe_item_id FROM request_items
        UNION ALL SELECT size, ppe_item_id FROM allocations
      ) u JOIN ppe_items p ON p.id = u.ppe_item_id
-     WHERE p.size_scale = :code AND u.size IN (:values)
+     WHERE p.size_scale = :code AND LOWER(u.size) IN (:values)
      ORDER BY u.size`,
-    { replacements: { code, values }, type: QueryTypes.SELECT, transaction: t }
+    { replacements: { code, values: values.map((v) => v.toLowerCase()) }, type: QueryTypes.SELECT, transaction: t }
   );
   return rows.map((r) => r.size);
 };

@@ -211,7 +211,15 @@ export const ppeItemSizes = async (auth: AuthContext, id: string) => {
 const invalid = (field: string, message: string) =>
   new AppError('VALIDATION_FAILED', 'Some fields are invalid', { fieldErrors: { [field]: [message] } });
 
+/**
+ * The unique indexes on item codes are case-sensitive, so concurrent saves of "ab-1" and "AB-1"
+ * would both pass the check below. Serialise code checks for the length of the transaction.
+ */
+const lockItemCodes = (t: Transaction) =>
+  sequelize.query(`SELECT pg_advisory_xact_lock(hashtext('ppe_items.item_code'))`, { transaction: t });
+
 const assertCodesFree = async (input: PpeItemInput, exceptId: string | null, t: Transaction) => {
+  await lockItemCodes(t);
   const not = exceptId ? [{ id: { [Op.ne]: exceptId } }] : [];
   const sameCode = await models.PPEItem.findOne({
     where: { [Op.and]: [sqlWhere(fn('lower', col('item_code')), input.itemCode.toLowerCase()), ...not] },
@@ -252,6 +260,10 @@ const resolveScale = async (input: PpeItemInput, currentCode: string | null, t: 
   const values = (await models.Size.findAll({ where: { scaleId: scale.id }, attributes: ['value'], transaction: t })).map(
     (s) => s.value as string
   );
+  // An item on an empty scale offers no size at all, so nobody could request it
+  if (!values.length && scale.code !== currentCode) {
+    throw invalid('sizeScale', `The ${scale.name} scale has no sizes yet. Add its sizes first.`);
+  }
   const canonical = new Map(values.map((v) => [v.toLowerCase(), v]));
   let availableSizes: string[] | null = null;
   if (input.availableSizes) {
