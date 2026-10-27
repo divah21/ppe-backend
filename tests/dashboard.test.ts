@@ -104,3 +104,59 @@ describe('GET /api/v2/dashboard/summary', () => {
     expect((await request(app).get(URL)).status).toBe(401);
   });
 });
+
+describe('dashboard consistency', () => {
+  it('counts a request for its employee’s department, not the department stored by its creator', async () => {
+    const otherHod = await w.agent(await w.fx.user('hod', { departmentId: w.other.department.id }));
+    const before = (await otherHod.get(URL)).body.data.kpis;
+    await w.fx.make('Request', {
+      employeeId: w.employees.empB.id,
+      requestedById: w.users.sectionRep.id,
+      departmentId: w.mine.department.id,
+      sectionId: w.mine.section.id,
+      status: 'hod-review',
+      requestType: 'replacement',
+    });
+
+    const mine = (await (await w.agent(w.users.hod)).get(URL)).body.data;
+    expect(mine.kpis).toMatchObject({ awaitingMyAction: 1, openRequests: 2 });
+    expect(mine.requestsPerWeek.at(-1).count).toBe(2);
+
+    const theirs = (await otherHod.get(URL)).body.data;
+    expect(theirs.kpis.awaitingMyAction).toBe(before.awaitingMyAction + 1);
+    expect(theirs.kpis.openRequests).toBe(before.openRequests + 1);
+  });
+
+  it('counts low stock per line, as the Stock page does', async () => {
+    const item = await w.fx.make('PPEItem', { name: `${w.fx.tag}-sized`, itemCode: `${w.fx.tag}-SZ`, category: w.category });
+    // One size out while another is well stocked: low, though the item total is not
+    const out = await w.fx.make('Stock', { ppeItemId: item.id, size: 'S', quantity: 0, minLevel: 1_000_000, location: `${w.fx.tag}-store` });
+    await w.fx.make('Stock', { ppeItemId: item.id, size: 'L', quantity: 2_000_000, minLevel: 5, location: `${w.fx.tag}-store` });
+
+    const stores = await w.agent(w.users.stores);
+    const [d, summary] = await Promise.all([stores.get(URL), stores.get('/api/v2/stock/summary')]);
+    expect(d.body.data.kpis.lowStock).toBe(summary.body.data.lowStockCount);
+    expect(d.body.data.lowStock[0]).toMatchObject({ stockId: out.id, ppeItemId: item.id, size: 'S', quantity: 0, minLevel: 1_000_000 });
+  });
+
+  it('prices unpriced issues at the average stock price, as the budget pages do', async () => {
+    const org = await w.fx.org();
+    const emp = await w.fx.employee(org.section.id);
+    const item = await w.fx.make('PPEItem', { name: `${w.fx.tag}-unpriced`, itemCode: `${w.fx.tag}-UP`, category: w.category });
+    await w.fx.make('Stock', { ppeItemId: item.id, quantity: 50, minLevel: 0, location: `${w.fx.tag}-store`, unitPriceUSD: 7 });
+    await w.fx.make('Allocation', {
+      employeeId: emp.id,
+      ppeItemId: item.id,
+      issuedById: w.users.stores.id,
+      quantity: 3,
+      issueDate: new Date(),
+      unitCost: 0,
+      totalCost: 0,
+      status: 'active',
+    });
+    const rep = await w.agent(await w.fx.user('section-rep', { sectionId: org.section.id }));
+    const d = (await rep.get(URL)).body.data;
+    expect(d.kpis.spendThisPeriod).toBe(21);
+    expect(d.spendBreakdown.rows).toEqual([{ id: null, name: w.category, amount: 21 }]);
+  });
+});
