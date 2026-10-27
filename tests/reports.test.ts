@@ -81,9 +81,13 @@ describe('report exports', () => {
   it('never widens a HOD beyond their department', async () => {
     const [own] = await download(hod, 'allocations');
     expect(own!.text).toContain(`${w.fx.tag}-Alice`);
+    expect(own!.text).toContain(`Scope: ${w.mine.department.name}`);
     expect(own!.text).not.toContain(`${w.fx.tag}-Bob`);
-    const [foreign] = await download(hod, 'allocations', { departmentId: w.other.department.id });
+    const [foreign] = await download(hod, 'allocations', { departmentId: w.other.department.id, sectionId: w.other.section.id });
     expect(foreign!.text).toContain('Total allocations: 0');
+    expect(foreign!.text).not.toContain(w.other.department.name);
+    expect(foreign!.text).not.toContain(w.other.section.name);
+    expect(foreign!.text).toContain('Department: Outside your scope');
   });
 
   it('filters allocations by period and search', async () => {

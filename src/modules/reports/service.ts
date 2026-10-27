@@ -3,7 +3,7 @@ import { ROLES, type AuthContext, type Role } from '../../core/auth';
 import { sequelize } from '../../core/db';
 import { badRequest } from '../../core/errors';
 import { likeTerm } from '../../core/http';
-import { COST_SQL, RENEWAL_SQL, filterSql, scopeOf, type Scope } from '../dashboard/scope';
+import { COST_SQL, RENEWAL_SQL, filterSql, scopeOf, scopeSql, type Scope } from '../dashboard/scope';
 import type {
   AllocationsReportQuery,
   MatrixReportQuery,
@@ -99,8 +99,18 @@ const describe = async (
   f: { departmentId?: string; sectionId?: string; from?: string; to?: string; extra?: string[] }
 ) => {
   const lines: string[] = [];
+  // Names are looked up within the caller's scope, so a filter id from elsewhere never reveals one
+  const inDepartment = scopeSql(scope, 'sec.id', 'd.id');
+  const inSection = scopeSql(scope, 'sec.id', 'sec.department_id');
   const nameOf = async (table: 'departments' | 'sections', id: string) =>
-    (await select<{ name: string }>(`SELECT name FROM ${table} WHERE id = :id`, { id }))[0]?.name ?? 'Unknown';
+    (
+      await select<{ name: string }>(
+        table === 'departments'
+          ? `SELECT d.name FROM departments d LEFT JOIN sections sec ON sec.department_id = d.id WHERE d.id = :id AND ${inDepartment.sql} LIMIT 1`
+          : `SELECT sec.name FROM sections sec WHERE sec.id = :id AND ${inSection.sql}`,
+        { ...inDepartment.replacements, id }
+      )
+    )[0]?.name ?? 'Outside your scope';
   if (scope.kind !== 'mine') lines.push(`Scope: ${await nameOf(scope.kind === 'department' ? 'departments' : 'sections', scope.id)}`);
   if (f.departmentId) lines.push(`Department: ${await nameOf('departments', f.departmentId)}`);
   if (f.sectionId) lines.push(`Section: ${await nameOf('sections', f.sectionId)}`);
