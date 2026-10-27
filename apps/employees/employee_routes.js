@@ -8,7 +8,7 @@ const { auditLog } = require('../../middlewares/audit_middleware');
 const { createEmployeeValidation, updateEmployeeValidation, bulkUploadEmployeeValidation } = require('../../validations/employee_validation');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../database/db');
-const { sendEmployeeOnboardedEmail } = require('../../helpers/email_helper');
+const { sendEmployeeOnboardedEmail, escapeHtml } = require('../../helpers/email_helper');
 
 /**
  * @route   GET /api/v1/employees
@@ -530,13 +530,13 @@ router.post(
       if (createdEmployee.email) {
         try {
           await sendEmployeeOnboardedEmail({
-            firstName: createdEmployee.firstName,
-            lastName: createdEmployee.lastName,
+            firstName: escapeHtml(createdEmployee.firstName),
+            lastName: escapeHtml(createdEmployee.lastName),
             email: createdEmployee.email,
-            worksNumber: createdEmployee.worksNumber,
-            department: createdEmployee.section?.department?.name,
-            section: createdEmployee.section?.name,
-            jobTitle: createdEmployee.jobTitleRef?.name || createdEmployee.jobType
+            worksNumber: escapeHtml(createdEmployee.worksNumber),
+            department: escapeHtml(createdEmployee.section?.department?.name),
+            section: escapeHtml(createdEmployee.section?.name),
+            jobTitle: escapeHtml(createdEmployee.jobTitleRef?.name || createdEmployee.jobType)
           });
         } catch (emailError) {
           console.error('Failed to send onboarding email:', emailError.message);
@@ -895,13 +895,13 @@ router.post(
 
               if (employee?.email) {
                 await sendEmployeeOnboardedEmail({
-                  firstName: employee.firstName,
-                  lastName: employee.lastName,
+                  firstName: escapeHtml(employee.firstName),
+                  lastName: escapeHtml(employee.lastName),
                   email: employee.email,
-                  worksNumber: employee.worksNumber,
-                  department: employee.section?.department?.name,
-                  section: employee.section?.name,
-                  jobTitle: employee.jobTitleRef?.name || employee.jobType
+                  worksNumber: escapeHtml(employee.worksNumber),
+                  department: escapeHtml(employee.section?.department?.name),
+                  section: escapeHtml(employee.section?.name),
+                  jobTitle: escapeHtml(employee.jobTitleRef?.name || employee.jobType)
                 });
                 emailsSent++;
               }

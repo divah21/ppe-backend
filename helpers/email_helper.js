@@ -103,6 +103,26 @@ const getEmailTemplate = (title, content, actionButton = null, footer = null) =>
 /**
  * Create action button HTML
  */
+/**
+ * Encodes user-typed text for the HTML templates below. The templates take values as raw
+ * HTML (v2 pre-escapes in requests/notify.ts), so v1 callers escape free text themselves.
+ */
+const escapeHtml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+/** Name fields escaped for a template; the address is left as is for the To header. */
+const toEmailRecipient = (person) =>
+  person && {
+    firstName: escapeHtml(person.firstName),
+    lastName: escapeHtml(person.lastName),
+    email: person.email
+  };
+
 const createActionButton = (url, text, color = BRAND_COLOR) => {
   return `<a href="${url}" style="background-color: ${color}; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: 600; display: inline-block; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">${text}</a>`;
 };
@@ -712,6 +732,8 @@ const sendTemplatedEmail = async (to, subject, title, content, actionUrl = null,
 };
 
 module.exports = {
+  escapeHtml,
+  toEmailRecipient,
   // Employee Onboarding
   sendEmployeeOnboardedEmail,
   sendUserCredentialsEmail,
