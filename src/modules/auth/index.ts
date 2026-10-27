@@ -34,8 +34,23 @@ const loginLimiter = rateLimit({
     }),
 });
 
+// Per-IP cap on failures across all accounts, so one host cannot spray passwords; sized like v1 for the shared site NAT
+const authFloodLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => `v2-auth-flood:${req.ip}`,
+  handler: (_req, res) =>
+    res.status(429).json({
+      error: { code: 'RATE_LIMITED', message: 'Too many sign-in attempts from this network. Try again later.' },
+    }),
+});
+
 router.post(
   '/login',
+  authFloodLimiter,
   loginLimiter,
   route(async (req, res) => {
     const { username, password } = parse(loginBody, req.body);
@@ -94,6 +109,7 @@ router.get(
 router.post(
   '/change-password',
   authenticate,
+  authFloodLimiter,
   route(async (req, res) => {
     const { currentPassword, newPassword } = parse(changePasswordBody, req.body);
     const auth = getAuth(req);
