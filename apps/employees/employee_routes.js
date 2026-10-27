@@ -9,6 +9,10 @@ const { createEmployeeValidation, updateEmployeeValidation, bulkUploadEmployeeVa
 const { Op } = require('sequelize');
 const { sequelize } = require('../../database/db');
 const { sendEmployeeOnboardedEmail, escapeHtml } = require('../../helpers/email_helper');
+const { employeeScopeWhere, requireEmployeeParamInScope, sectionInScope } = require('../../middlewares/scope_middleware');
+
+const outOfScopeSection = (res) =>
+  res.status(403).json({ success: false, message: 'You can only manage employees in your own section or department' });
 
 /**
  * @route   GET /api/v1/employees
@@ -20,12 +24,7 @@ router.get('/', authenticate, async (req, res, next) => {
     const { page = 1, limit = 500, search, sectionId, departmentId, isActive, jobType } = req.query;
 
     const where = {};
-    
-    // ROLE-BASED FILTERING: Section Rep can only see employees in their section
-    if (req.userRole === 'section-rep' && req.user.sectionId) {
-      where.sectionId = req.user.sectionId;
-    }
-    
+
     if (search) {
       where[Op.or] = [
         { worksNumber: { [Op.iLike]: `%${search}%` } },
@@ -58,15 +57,13 @@ router.get('/', authenticate, async (req, res, next) => {
     // Filter by department through section
     if (departmentId) {
       include[0].where = { departmentId };
-    } else if (req.userRole === 'department-rep' && req.user.departmentId) {
-      // Department Rep sees only their department
-      include[0].where = { departmentId: req.user.departmentId };
     }
 
     const offset = (page - 1) * limit;
 
+    // Query filters only narrow; the caller's role scope always applies on top
     const { count, rows: employees } = await Employee.findAndCountAll({
-      where,
+      where: { [Op.and]: [where, employeeScopeWhere(req)] },
       include,
       limit: parseInt(limit),
       offset,
@@ -93,7 +90,7 @@ router.get('/', authenticate, async (req, res, next) => {
  * @desc    Get employee by ID
  * @access  Private
  */
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get('/:id', authenticate, requireEmployeeParamInScope, async (req, res, next) => {
   try {
     const employee = await Employee.findByPk(req.params.id, {
       include: [
@@ -134,7 +131,7 @@ router.get('/:id', authenticate, async (req, res, next) => {
  * @desc    Get employee allocation history
  * @access  Private
  */
-router.get('/:id/allocations', authenticate, async (req, res, next) => {
+router.get('/:id/allocations', authenticate, requireEmployeeParamInScope, async (req, res, next) => {
   try {
     const { status, fromDate, toDate } = req.query;
 
@@ -175,7 +172,7 @@ router.get('/:id/allocations', authenticate, async (req, res, next) => {
  * @desc    Get employee request history
  * @access  Private
  */
-router.get('/:id/requests', authenticate, async (req, res, next) => {
+router.get('/:id/requests', authenticate, requireEmployeeParamInScope, async (req, res, next) => {
   try {
     const { status } = req.query;
 
@@ -184,7 +181,12 @@ router.get('/:id/requests', authenticate, async (req, res, next) => {
 
     const requests = await Request.findAll({
       where,
-      include: ['requestedBy', 'hodApprover', 'deptRepApprover', 'storesApprover'],
+      // Explicit attributes: a bare association include would return users' password hashes
+      include: ['createdBy', 'hodApprover', 'deptRepApprover', 'storesApprover'].map((as) => ({
+        model: User,
+        as,
+        attributes: ['id', 'username']
+      })),
       order: [['createdAt', 'DESC']]
     });
 
@@ -203,7 +205,7 @@ router.get('/:id/requests', authenticate, async (req, res, next) => {
  *          Combines BOTH Job Title PPE Matrix AND Section PPE Matrix
  * @access  Private
  */
-router.get('/:id/ppe-eligibility', authenticate, async (req, res, next) => {
+router.get('/:id/ppe-eligibility', authenticate, requireEmployeeParamInScope, async (req, res, next) => {
   try {
     const employee = await Employee.findByPk(req.params.id, {
       include: [
@@ -467,6 +469,8 @@ router.post(
         dateJoined
       } = req.body;
 
+      if (!(await sectionInScope(req, sectionId))) return outOfScopeSection(res);
+
       // Check if works number exists
       const existing = await Employee.findOne({ where: { worksNumber } });
       if (existing) {
@@ -564,11 +568,16 @@ router.put(
   '/:id',
   authenticate,
   requireRole('admin', 'section-rep', 'department-rep'),
+  requireEmployeeParamInScope,
   updateEmployeeValidation,
   validate,
   auditLog('UPDATE', 'Employee'),
   async (req, res, next) => {
     try {
+      if (req.body.sectionId !== undefined && !(await sectionInScope(req, req.body.sectionId))) {
+        return outOfScopeSection(res);
+      }
+
       const employee = await Employee.findByPk(req.params.id);
 
       if (!employee) {

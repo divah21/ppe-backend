@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { Request, RequestItem, Employee, User, PPEItem, Section, Department, Allocation, Stock, JobTitlePPEMatrix, SectionPPEMatrix, JobTitle, Role } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
+const { requestScopeWhere } = require('../../middlewares/scope_middleware');
 const { authorize } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op } = require('sequelize');
@@ -154,7 +155,8 @@ router.get('/', authenticate, async (req, res) => {
     }
 
     const { count, rows: requests } = await Request.findAndCountAll({
-      where,
+      // Query and role filters only narrow; the caller's record scope always applies on top
+      where: { [Op.and]: [where, requestScopeWhere(req)] },
       include: include.map(inc => {
         // Add where clause to items include if filtering by PPE item
         if (inc.as === 'items' && ppeItemId) {
@@ -195,7 +197,8 @@ router.get('/', authenticate, async (req, res) => {
  */
 router.get('/:id', authenticate, async (req, res) => {
   try {
-    const request = await Request.findByPk(req.params.id, {
+    const request = await Request.findOne({
+      where: { [Op.and]: [{ id: req.params.id }, requestScopeWhere(req)] },
       include: [
         {
           model: Employee,

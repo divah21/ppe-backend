@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { Allocation, Employee, PPEItem, User, Request, RequestItem, Stock, Section, Department, Budget, Role, JobTitlePPEMatrix, SectionPPEMatrix, JobTitle } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
+const { ownedByEmployeeInScope } = require('../../middlewares/scope_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op, fn, col, literal } = require('sequelize');
@@ -291,7 +292,8 @@ router.get('/', authenticate, async (req, res, next) => {
     const needsEmployeeFilter = hasEmployeeFilter || hasSectionFilter;
 
     const { count, rows: allocations } = await Allocation.findAndCountAll({
-      where,
+      // Query filters only narrow; the caller's role scope always applies on top
+      where: { [Op.and]: [where, ownedByEmployeeInScope(req)] },
       include: [
         { 
           model: Employee, 

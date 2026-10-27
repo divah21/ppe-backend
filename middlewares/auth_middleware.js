@@ -102,12 +102,11 @@ const authenticate = async (req, res, next) => {
     req.userId = user.id;
     req.userRole = user.role.name;
 
-    // Convenience properties from employee (for role-based filtering)
-    if (user.employee) {
-      req.user.sectionId = user.employee.sectionId;
-      req.user.departmentId = user.employee.section?.departmentId;
-      req.user.employeeId = user.employeeId;
-    }
+    // Scope for role-based filtering, with the same precedence as v2 (src/core/auth.ts
+    // toAuthContext): the user's own scope columns first, then the linked employee's.
+    req.user.sectionId = user.sectionId ?? user.employee?.sectionId ?? null;
+    req.user.departmentId = user.departmentId ?? user.employee?.section?.departmentId ?? null;
+    if (user.employee) req.user.employeeId = user.employeeId;
 
     // Still on an admin-issued temporary password - lock everything except
     // changing it, so the forced change cannot be bypassed.
