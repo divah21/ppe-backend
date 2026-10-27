@@ -3,6 +3,7 @@ import type { AuthContext } from '../../core/auth';
 import { models, sequelize, type Row } from '../../core/db';
 import { notFound } from '../../core/errors';
 import { likeTerm } from '../../core/http';
+import { dueSql } from '../allocations/rules';
 import { computeEligibility } from '../matrix/service';
 import { employeeScope } from './policy';
 
@@ -30,11 +31,7 @@ export const matrixFor = async (employeeId: string) => {
   return map;
 };
 
-/*
- * Same rule as the renewals screen (allocations dueSql): issue date plus the item's current
- * frequency, else the allocation's, else the stored renewal date, else 12 months.
- */
-const DUE_SQL = `COALESCE(a.issue_date + make_interval(months => COALESCE(NULLIF(p.replacement_frequency, 0), NULLIF(a.replacement_frequency, 0))), a.next_renewal_date, a.issue_date + interval '12 months')`;
+const DUE_SQL = dueSql('a', 'p');
 
 /** Latest renewal due date of the employee's active allocations, per PPE item (absent = never issued). */
 export const dueDates = async (employeeId: string, ppeItemIds?: string[]) => {

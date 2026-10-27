@@ -106,7 +106,9 @@ describe('GET /api/v2/allocations', () => {
     expect(ids(await q({ ppeItemId: item2.id }))).toEqual(sorted(a2, a4));
     expect(ids(await q({ departmentId: deptB.id }))).toEqual(sorted(a3));
     expect(ids(await q({ sectionId: secA2.id }))).toEqual(sorted(a2));
-    const today = new Date().toISOString().slice(0, 10);
+    // The API reads dates as local calendar days; a UTC date is yesterday shortly after midnight in Harare
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     expect(ids(await q({ from: monthsAgo(4).toISOString().slice(0, 10), to: today }))).toEqual(sorted(a3, a4));
   });
 

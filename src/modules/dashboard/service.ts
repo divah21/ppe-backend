@@ -3,6 +3,7 @@ import { ROLES, type AuthContext, type Role } from '../../core/auth';
 import { sequelize } from '../../core/db';
 import { PRICE_CTE, allocationCost } from '../budgets/spend';
 import type { DashboardQuery } from './schemas';
+import { newerHolding } from '../allocations/rules';
 import { CLOSED_REQUEST_STATUSES, RENEWAL_SQL, REQUEST_DEPARTMENT, REQUEST_SECTION, scopeOf, scopeSql, type Scope } from './scope';
 
 /** Request stages each role acts on (v1 approval chain: section rep, dept rep, HOD, stores; SHEQ for replacements). */
@@ -40,8 +41,9 @@ const allocationScope = (scope: Scope) => scopeSql(scope, 'sec.id', 'sec.departm
 const COST = allocationCost('a', 'pr');
 const JOIN_PRICE = 'LEFT JOIN price pr ON pr.ppe_item_id = a.ppe_item_id';
 
-const RENEWAL_DUE = `a.status = 'active' AND e."isActive" IS NOT FALSE
-  AND ${RENEWAL_SQL('a', 'p')} >= NOW() AND ${RENEWAL_SQL('a', 'p')} < NOW() + make_interval(days => :renewalDays)`;
+// Matches the renewals screen: still held, latest issue of the item only, due within the window
+const RENEWAL_DUE = `a.status IN ('active', 'expired') AND e."isActive" IS NOT FALSE AND NOT ${newerHolding('a')}
+  AND ${RENEWAL_SQL('a', 'p')} >= NOW() AND ${RENEWAL_SQL('a', 'p')} <= NOW() + make_interval(days => :renewalDays)`;
 
 const select = <T extends object>(sql: string, replacements: Record<string, unknown>) =>
   sequelize.query<T>(sql, { replacements, type: QueryTypes.SELECT });

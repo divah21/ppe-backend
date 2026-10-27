@@ -11,10 +11,13 @@ module.exports = {
       instances: 1,
       max_memory_restart: '700M',
       kill_timeout: 10000,
+      // Windows cannot deliver SIGINT; PM2 sends a 'shutdown' message that app.js handles
+      shutdown_with_message: true,
       time: true,
       env_production: {
         NODE_ENV: 'production',
         PORT: 5000,
+        HOST: '127.0.0.1',
         // Day bounds, budget years and CR- numbers use local time; pin it whatever the host zone
         TZ: 'Africa/Harare',
       },

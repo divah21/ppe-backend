@@ -1,4 +1,5 @@
 import { ROLES, type AuthContext } from '../../core/auth';
+import { dueSql } from '../allocations/rules';
 
 const NIL = '00000000-0000-0000-0000-000000000000';
 
@@ -58,13 +59,8 @@ export const filterSql = (
   return { sql: parts.join(' AND '), replacements };
 };
 
-/**
- * Renewal date of an allocation: issue date plus the item's replacement frequency, else the
- * stored next renewal or expiry date (the rule v1 uses for allocations and reports).
- */
-export const RENEWAL_SQL = (a: string, p: string) => `COALESCE(
-  CASE WHEN ${p}.replacement_frequency > 0 THEN ${a}.issue_date + make_interval(months => ${p}.replacement_frequency) END,
-  ${a}.next_renewal_date, ${a}.expiry_date)`;
+/** Renewal date of an allocation, the same rule as the renewals screen. */
+export const RENEWAL_SQL = dueSql;
 
 /** Cost of an allocation line: stored total, else unit cost times quantity. */
 export const COST_SQL = (a: string) => `COALESCE(${a}.total_cost, ${a}.unit_cost * ${a}.quantity, 0)`;

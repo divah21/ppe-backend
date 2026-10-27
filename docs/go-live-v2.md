@@ -41,7 +41,13 @@ The API script:
 
 The web script runs `npm ci`, the v2 typecheck and `next build` in place, so the site serves errors for the few minutes the build takes. If any of those fail, it rebuilds the previous commit and reloads `ppe-web`.
 
-On first start the API creates the `auth_sessions` table. That is the only schema change.
+On first start the API:
+- Creates the `auth_sessions` table.
+- Adds 18 secondary indexes (`database/indexes.js`). They are built with `CREATE INDEX CONCURRENTLY`, so tables stay writable. On a large database, the first start can take a few minutes before all of them exist; the API serves requests meanwhile.
+
+These are the only schema changes.
+
+**Firewall:** the API listens on 127.0.0.1 only (`HOST` in `ecosystem.config.cjs`) and Next on 127.0.0.1:3000, so only nginx can reach them. Confirm from another machine that ports 5000 and 3000 do not answer, and keep a Windows Firewall inbound block on both as a second guard.
 
 **nginx:**
 - Compare `deploy/nginx/ppesystem.conf` with the live config.
@@ -101,7 +107,7 @@ pm2 delete ppe-web
 pm2 save
 ```
 
-If data must be restored (not expected, since v2 only adds `auth_sessions`):
+If data must be restored (not expected, since v2 only adds `auth_sessions` and indexes):
 
 ```powershell
 pg_restore -c -d <db> <backup.dump>
