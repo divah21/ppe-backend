@@ -41,6 +41,8 @@ export const stockCreateBody = z
     expiryDate: z.coerce.date().nullish(),
     stockAccount: optionalText(50),
     notes: optionalText(2000),
+    // The quantity the client showed for the matching line (0 when none); guards against a resubmitted receipt
+    expectedQuantity: z.number().int().min(0).optional(),
   })
   .refine((v) => v.maxLevel == null || v.minLevel == null || v.maxLevel >= v.minLevel, {
     path: ['maxLevel'],
@@ -66,6 +68,7 @@ export const bulkTopupBody = z.object({
       z.object({
         stockId: z.string().uuid(),
         quantity: z.number().int('Enter a whole number').min(1, 'Enter at least 1').max(1_000_000),
+        expectedQuantity: z.number().int().min(0).optional(),
       })
     )
     .min(1, 'Choose at least one stock line')
