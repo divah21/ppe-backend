@@ -15,6 +15,8 @@ module.exports = {
       env_production: {
         NODE_ENV: 'production',
         PORT: 5000,
+        // Day bounds, budget years and CR- numbers use local time; pin it whatever the host zone
+        TZ: 'Africa/Harare',
       },
     },
   ],
