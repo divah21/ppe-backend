@@ -12,7 +12,7 @@ export const failureFixtures = (fx: Fixtures) => {
     fx.make('PPEItem', { name: `${fx.tag} item ${next()}`, itemCode: next(), replacementFrequency: 6, ...extra });
 
   const stock = (ppeItemId: string, quantity: number, extra: Record<string, unknown> = {}) =>
-    fx.make('Stock', { ppeItemId, quantity, size: 'L', unitCost: 12.5, location: 'Main store', batchNumber: next(), ...extra });
+    fx.make('Stock', { ppeItemId, quantity, size: 'L', unitCost: 12.5, unitPriceUSD: 4.25, location: 'Main store', batchNumber: next(), ...extra });
 
   const allocation = (employee: Row, ppeItemId: string, stockId: string | null, extra: Record<string, unknown> = {}) =>
     fx.make('Allocation', {

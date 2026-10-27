@@ -340,7 +340,8 @@ export const replaceFailure = (auth: AuthContext, id: string, input: ReplaceInpu
     }
 
     const now = new Date();
-    const unitCost = Number(stock.unitCost ?? 0);
+    // Allocation costs are USD everywhere (budgets, dashboard); stock.unitCost is local currency.
+    const unitCost = stock.unitPriceUSD === null || stock.unitPriceUSD === undefined ? null : Number(stock.unitPriceUSD);
     const replacementFrequency = Number(stock.ppeItem?.replacementFrequency) || 12;
     const tag = referenceTag(row.id);
 
@@ -353,7 +354,7 @@ export const replaceFailure = (auth: AuthContext, id: string, input: ReplaceInpu
         quantity: input.quantity,
         size: stock.size || input.size || null,
         unitCost,
-        totalCost: Math.round(unitCost * input.quantity * 100) / 100,
+        totalCost: unitCost === null ? null : Math.round(unitCost * input.quantity * 100) / 100,
         issueDate: now,
         nextRenewalDate: addMonths(now, replacementFrequency),
         allocationType: 'replacement',
