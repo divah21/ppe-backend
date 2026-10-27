@@ -27,6 +27,13 @@ foreach ($key in 'DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'JWT_SECRET', '
   if (-not $vars[$key]) { throw "$key is not set in .env" }
 }
 if ($vars['JWT_SECRET'].Length -lt 32) { throw 'JWT_SECRET must be at least 32 characters (v2 refuses to serve otherwise)' }
+# Not fatal: v1 falls back to JWT_SECRET for refresh tokens, and the token type claim already stops swapping them
+if (-not $vars['JWT_REFRESH_SECRET'] -or $vars['JWT_REFRESH_SECRET'] -eq $vars['JWT_SECRET']) {
+  Write-Warning 'Set JWT_REFRESH_SECRET to its own random value of 32+ characters (changing it signs v1 users out once).'
+}
+if (-not $vars['JWT_EXPIRE'] -or $vars['JWT_EXPIRE'] -match 'd$') {
+  Write-Warning 'Set JWT_EXPIRE=1h so classic (v1) access tokens are short-lived.'
+}
 
 $previous = (git rev-parse HEAD).Trim()
 # Before v2, main ran `node app.js` with no build step and no ecosystem file
