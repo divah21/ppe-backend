@@ -57,7 +57,8 @@ describe('GET /api/v2/audit-logs', () => {
   });
 
   it('filters by entity type, search and date range', async () => {
-    const today = new Date().toISOString().slice(0, 10);
+    // The server reads from/to as local days, so today must be the local date, not the UTC one
+    const today = new Date().toLocaleDateString('en-CA');
     const res = await adminAgent.get(URL).query({ entityType: `${fx.tag}-THING`, q: `${fx.tag}-cre`, from: today, to: today });
     expect(res.body.data.map((r: { action: string }) => r.action)).toEqual([`${fx.tag}-CREATE`]);
     const past = await adminAgent.get(URL).query({ entityType: `${fx.tag}-THING`, to: '2020-01-01' });
