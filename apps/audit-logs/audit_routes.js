@@ -9,7 +9,7 @@ const path = require('path');
 const readline = require('readline');
 
 // Logs directory for GET request logs
-const LOGS_DIR = path.join(__dirname, '../../logs');
+const LOGS_DIR = path.join(process.cwd(), 'logs');
 const ACCESS_LOG_FILE = path.join(LOGS_DIR, 'access.log');
 
 /**

@@ -65,7 +65,7 @@ app.use(cors({
   origin: (origin, cb) => {
     if (!origin) return cb(null, true); // server-to-server, curl, same-origin
     if (allowedOrigins.includes(origin)) return cb(null, true);
-    return cb(new Error(`CORS blocked: ${origin}`));
+    return cb(Object.assign(new Error(`CORS blocked: ${origin}`), { status: 403 }));
   },
   credentials: true
 }));
@@ -201,6 +201,10 @@ app.use(`${API_PREFIX}/settings`, settingsRoutes);
 app.use(`${API_PREFIX}/backup`, backupRoutes);
 app.use(`${API_PREFIX}/consumables`, consumableRoutes);
 
+// v2 API (TypeScript, cookie sessions). Has its own 404 and error envelope.
+const { createV2Router, prepareV2 } = require('./src/v2');
+app.use('/api/v2', createV2Router());
+
 // 404 Handler
 app.use(notFound);
 
@@ -215,7 +219,8 @@ const startServer = async () => {
   try {
     // Test database connection
     await testConnection();
-    
+    await prepareV2();
+
     // Initialize scheduled backup at 6:00 PM
     try {
       const { Setting } = require('./models');
@@ -265,6 +270,7 @@ const startServer = async () => {
   }
 };
 
-startServer();
+// Tests import the app without opening a port or starting schedulers
+if (process.env.NODE_ENV !== 'test') startServer();
 
 module.exports = app;

@@ -40,3 +40,6 @@ module.exports = {
     // }
   }
 };
+
+// Tests use the local development database; tests/setup.ts refuses any non-local host
+module.exports.test = module.exports.development;
