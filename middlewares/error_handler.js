@@ -53,7 +53,10 @@ const errorHandler = (err, req, res, next) => {
 
   // Default error
   const status = err.status || err.statusCode || 500;
-  const message = err.message || 'Internal server error';
+  // Unexpected errors can carry SQL or connection details; keep those in the server log
+  const message = status >= 500 && process.env.NODE_ENV === 'production'
+    ? 'Internal server error'
+    : (err.message || 'Internal server error');
 
   res.status(status).json({
     success: false,
