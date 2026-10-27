@@ -1,4 +1,4 @@
-const { verifyToken } = require('../helpers/jwt_helpers');
+const { verifyToken, matchesPasswordVersion } = require('../helpers/jwt_helpers');
 const { User, Role, Employee, Section, Department, JobTitle, CostCenter } = require('../models');
 
 /**
@@ -70,14 +70,23 @@ const authenticate = async (req, res, next) => {
             { model: CostCenter, as: 'costCenter', required: false }
           ]
         }
-      ],
-      attributes: { exclude: ['passwordHash'] }
+      ]
     });
 
     if (!user) {
       return res.status(401).json({
         success: false,
         message: 'User not found'
+      });
+    }
+
+    // Issued before the last password change (or a pre-`pv` token): signed out
+    const current = matchesPasswordVersion(decoded, user.passwordHash);
+    delete user.dataValues.passwordHash;
+    if (!current) {
+      return res.status(401).json({
+        success: false,
+        message: 'Session expired, please sign in again'
       });
     }
 
@@ -115,8 +124,7 @@ const authenticate = async (req, res, next) => {
     console.error('Authentication error:', error);
     return res.status(500).json({
       success: false,
-      message: 'Authentication failed',
-      error: error.message
+      message: 'Authentication failed'
     });
   }
 };
@@ -137,11 +145,12 @@ const optionalAuth = async (req, res, next) => {
     
     if (decoded) {
       const user = await User.findByPk(decoded.userId, {
-        include: [{ model: Role, as: 'role' }],
-        attributes: { exclude: ['passwordHash'] }
+        include: [{ model: Role, as: 'role' }]
       });
-      
-      if (user && user.isActive) {
+      const current = user && matchesPasswordVersion(decoded, user.passwordHash);
+      if (user) delete user.dataValues.passwordHash;
+
+      if (user && current && user.isActive) {
         req.user = user;
         req.userId = user.id;
         req.userRole = user.role.name;
