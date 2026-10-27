@@ -1,6 +1,6 @@
-import { Op, Sequelize, type Transaction, type WhereOptions } from 'sequelize';
+import { Op, Sequelize, literal, type Transaction, type WhereOptions } from 'sequelize';
 import { ROLES, type AuthContext } from '../../core/auth';
-import { inTransaction, models, type Row } from '../../core/db';
+import { inTransaction, models, sequelize, type Row } from '../../core/db';
 import { AppError, forbidden, notFound } from '../../core/errors';
 import { pageWindow } from '../../core/http';
 import { dueDates, matrixFor } from './eligibility';
@@ -169,13 +169,21 @@ export const listRequests = async (auth: AuthContext, q: RequestListQuery) => {
   return { rows: rows.map((r) => toRequestSummary(r, auth)), count };
 };
 
+/** Every view's count in one pass over the filtered requests (one conditional aggregate per view). */
 export const countRequests = async (auth: AuthContext, q: RequestCountsQuery) => {
-  const where = baseWhere(auth, q);
-  const include = [{ ...employeeInclude(), attributes: [], include: [] }];
-  const counts = await Promise.all(
-    VIEWS.map((view) => models.Request.count({ where: withView(auth, where, view), include }))
-  );
-  return Object.fromEntries(VIEWS.map((v, i) => [v, counts[i]!])) as Record<View, number>;
+  const countFor = (view: View) => {
+    const statuses = viewStatuses(view, auth.role);
+    if (!statuses) return 'COUNT(*)';
+    if (statuses.length === 0) return '0';
+    return `COUNT(*) FILTER (WHERE "Request"."status" IN (${statuses.map((st) => sequelize.escape(st)).join(', ')}))`;
+  };
+  const row = (await models.Request.findOne({
+    where: { [Op.and]: baseWhere(auth, q) },
+    attributes: VIEWS.map((view) => [literal(countFor(view)), view]),
+    include: [{ ...employeeInclude(), attributes: [], include: [] }],
+    raw: true,
+  })) as Record<View, string | number> | null;
+  return Object.fromEntries(VIEWS.map((v) => [v, Number(row?.[v] ?? 0)])) as Record<View, number>;
 };
 
 const loadActors = async (ids: Array<string | null | undefined>) => {
@@ -351,7 +359,6 @@ export const createRequest = async (auth: AuthContext, input: CreateRequestInput
     where: { [Op.and]: [employeeScope(auth), { id: input.employeeId }] },
     include: [
       { model: models.Section, as: 'section', attributes: ['id', 'departmentId'] },
-      { model: models.JobTitle, as: 'jobTitleRef', required: false },
     ],
   });
   if (!employee) throw notFound('Employee');
@@ -372,7 +379,7 @@ export const createRequest = async (auth: AuthContext, input: CreateRequestInput
   // v1 eligibility: annual and replacement items must be in the job-title or section matrix,
   // and an annual issue only once the last issue is due for renewal
   if (input.requestType === 'annual' || input.requestType === 'replacement') {
-    const matrix = await matrixFor(employee);
+    const matrix = await matrixFor(employee.id);
     const outside = input.items.find((i) => !matrix.has(i.ppeItemId));
     if (outside) {
       throw invalid('items', `${byId.get(outside.ppeItemId)!.name} is not in this employee's PPE matrix`);
