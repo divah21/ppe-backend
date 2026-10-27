@@ -128,6 +128,25 @@ describe('legacy SHEQ and department rep stages', () => {
   });
 });
 
+describe("legacy rows that stored the creator's section", () => {
+  it("are scoped by the employee's section, not the stored one", async () => {
+    // v1 stored the creator's own section, e.g. an admin's, rather than the employee's
+    const r = await w.insertRequest('hod-review', w.employees.empA1, [{ ppeItemId: w.ppe.gloves.id, quantity: 1 }], {
+      sectionId: w.b.section.id,
+      departmentId: w.b.department.id,
+    });
+    expect((await w.agents.hodB.get(`${URL}/${r.id}`)).status).toBe(404);
+    expect((await act(w.agents.hodB, r.id, 'approve')).status).toBe(404);
+    const list = await w.agents.hodB.get(URL).query({ view: 'all', pageSize: 100 });
+    expect(list.body.data.map((x: { id: string }) => x.id)).not.toContain(r.id);
+
+    const mine = await w.agents.hod.get(`${URL}/${r.id}`);
+    expect(mine.status).toBe(200);
+    expect(mine.body.data).toMatchObject({ section: { id: w.a.section.id }, department: { id: w.a.department.id } });
+    expect((await act(w.agents.hod, r.id, 'approve')).status).toBe(200);
+  });
+});
+
 describe('reject', () => {
   it('requires a reason (422)', async () => {
     const { id } = await raise();
@@ -324,6 +343,39 @@ describe('fulfil', () => {
     expect(results.map((x) => x.status).sort()).toEqual([200, 409]);
     expect(await stockQty(w.stock.gloves)).toBe(before - 3);
     expect(await models.Allocation.count({ where: { requestId: r.id } })).toBe(1);
+  });
+
+  it('still issues, and records the spend, when the department is over budget', async () => {
+    const r = await approved([{ ppeItemId: w.ppe.gloves.id, quantity: 2 }]);
+    const original = await models.Budget.findByPk(w.budget.id);
+    await models.Budget.update({ allocatedAmount: 1, totalSpent: 500 }, { where: { id: w.budget.id }, validate: false, hooks: false });
+    try {
+      const res = await act(w.agents.stores, r.id, 'fulfil', {
+        items: [{ requestItemId: r.item(w.ppe.gloves.id), stockId: w.stock.gloves.id, quantity: 2 }],
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.data.status).toBe('fulfilled');
+      const budget = (await models.Budget.findByPk(w.budget.id))!;
+      expect(Number(budget.totalSpent)).toBe(505);
+      expect(Number(budget.remainingBudget)).toBe(0);
+    } finally {
+      await models.Budget.update(
+        { allocatedAmount: original!.allocatedAmount, totalSpent: original!.totalSpent },
+        { where: { id: w.budget.id }, validate: false, hooks: false }
+      );
+    }
+  });
+
+  it("charges the employee's department budget even when the stored section is another department's", async () => {
+    const r = await w.insertRequest('approved', w.employees.empA1, [{ ppeItemId: w.ppe.gloves.id, quantity: 1 }], {
+      sectionId: w.b.section.id,
+      departmentId: w.b.department.id,
+    });
+    const item = (await models.RequestItem.findOne({ where: { requestId: r.id } }))!;
+    const before = Number((await models.Budget.findByPk(w.budget.id))!.totalSpent);
+    const res = await act(w.agents.stores, r.id, 'fulfil', { items: [{ requestItemId: item.id, stockId: w.stock.gloves.id, quantity: 1 }] });
+    expect(res.status).toBe(200);
+    expect(Number((await models.Budget.findByPk(w.budget.id))!.totalSpent)).toBe(before + 2.5);
   });
 
   it('serves stock options to stores, matching sizes first', async () => {

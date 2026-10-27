@@ -148,12 +148,19 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
     };
   });
 
-/** v1 adds the issue cost to the department's budget for the current fiscal year. */
+/**
+ * v1 adds the issue cost to the department's budget for the current fiscal year (the department of
+ * the employee's section). Overspending is recorded, never a reason to refuse the issue: the model's
+ * min(0) rule on the legacy remainingBudget column would otherwise reject the save and roll back the
+ * whole issue, so validation is skipped and the legacy columns are written here, floored at 0.
+ */
 const spendBudget = async (request: Row, amount: number, t: Parameters<typeof lockRequest>[2]) => {
   if (amount <= 0) return;
-  const section = request.sectionId
-    ? await models.Section.findByPk(request.sectionId, { attributes: ['departmentId'], transaction: t })
+  const employee = request.employeeId
+    ? await models.Employee.findByPk(request.employeeId, { attributes: ['sectionId'], transaction: t })
     : null;
+  const sectionId = employee?.sectionId ?? request.sectionId;
+  const section = sectionId ? await models.Section.findByPk(sectionId, { attributes: ['departmentId'], transaction: t }) : null;
   const departmentId = section?.departmentId ?? request.departmentId;
   if (!departmentId) return;
   const budget = await models.Budget.findOne({
@@ -163,10 +170,11 @@ const spendBudget = async (request: Row, amount: number, t: Parameters<typeof lo
     lock: t.LOCK.UPDATE,
   });
   if (!budget) return;
-  const spent = (parseFloat(budget.totalSpent) || 0) + amount;
+  const allocated = parseFloat(budget.allocatedAmount) || 0;
+  const spent = Math.round(((parseFloat(budget.totalSpent) || 0) + amount) * 100) / 100;
   await budget.update(
-    { totalSpent: spent, remainingBudget: (parseFloat(budget.allocatedAmount) || 0) - spent },
-    { transaction: t }
+    { totalSpent: spent, totalBudget: allocated, allocatedBudget: spent, remainingBudget: Math.max(0, allocated - spent) },
+    { transaction: t, validate: false }
   );
 };
 

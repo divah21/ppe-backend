@@ -88,7 +88,7 @@ router.post(
     const { comment } = parse(approveBody, req.body);
     const step = await approveRequest(auth, id, comment);
     await audit(req, 'REQUEST_APPROVED', 'Request', id, { ...step, comment });
-    if (step.from === 'pending') notifyHods(id);
+    if (step.to === 'hod-review') notifyHods(id);
     if (step.to === 'stores-review') notifyStores(id, auth.userId);
     return ok(res, await getRequest(auth, id));
   })

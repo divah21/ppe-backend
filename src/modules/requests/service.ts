@@ -87,7 +87,7 @@ const ITEM_QUANTITY = Sequelize.literal(
 
 const placement = (r: Row) => {
   const employeeSection = r.targetEmployee?.section;
-  const section = r.section ?? employeeSection ?? null;
+  const section = employeeSection ?? r.section ?? null;
   const department = employeeSection?.department ?? r.department ?? null;
   return { section: ref(section), department: ref(department) };
 };

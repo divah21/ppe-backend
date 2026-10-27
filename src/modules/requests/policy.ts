@@ -6,10 +6,11 @@ const NO_MATCH = '00000000-0000-0000-0000-000000000000';
 const WHOLE_MINE = new Set<string>([ROLES.ADMIN, ROLES.SHEQ, ROLES.STORES]);
 
 /*
- * v1 stored the creator's section/department on a request (department is often null for section reps),
- * so the effective section falls back to the employee's, and the department comes from that section.
+ * v1 stored the creator's section/department on a request (an admin's own section, and department is
+ * often null for section reps), so the effective section is the employee's, falling back to the stored
+ * one only for visitor requests; the department comes from that section.
  */
-const SECTION_SQL = `COALESCE("Request"."section_id", (SELECT e."sectionId" FROM employees e WHERE e.id = "Request"."employee_id"))`;
+const SECTION_SQL = `COALESCE((SELECT e."sectionId" FROM employees e WHERE e.id = "Request"."employee_id"), "Request"."section_id")`;
 const DEPARTMENT_SQL = `COALESCE((SELECT s.department_id FROM sections s WHERE s.id = ${SECTION_SQL}), "Request"."department_id")`;
 
 export const inSection = (sectionId: string): WhereOptions => Sequelize.where(literal(SECTION_SQL), Op.eq, sectionId);
