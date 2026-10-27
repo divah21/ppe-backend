@@ -196,9 +196,14 @@ const autoAuditLog = () => {
  */
 const sanitizeBody = (body) => {
   if (!body) return null;
-  
-  return redact(body);
+
+  const clean = redact(body);
+  // Bulk imports post thousands of rows; keep the audit row small and point at the size instead
+  const size = JSON.stringify(clean).length;
+  return size > MAX_AUDIT_BODY ? { truncated: true, bytes: size, keys: Object.keys(clean) } : clean;
 };
+
+const MAX_AUDIT_BODY = 20000;
 
 // Any key that looks like a credential, at any depth (currentPassword, newPassword, refreshToken...)
 const SENSITIVE_KEY = /pass(word)?|token|secret|api[-_]?key|otp/i;
