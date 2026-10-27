@@ -205,7 +205,7 @@ app.use(`${API_PREFIX}/backup`, backupRoutes);
 app.use(`${API_PREFIX}/consumables`, consumableRoutes);
 
 // v2 API (TypeScript, cookie sessions). Has its own 404 and error envelope.
-const { createV2Router, prepareV2 } = require('./src/v2');
+const { createV2Router, prepareV2, startV2Maintenance } = require('./src/v2');
 app.use('/api/v2', createV2Router());
 
 // 404 Handler
@@ -223,6 +223,7 @@ const startServer = async () => {
     // Test database connection
     await testConnection();
     await prepareV2();
+    startV2Maintenance();
 
     // Initialize scheduled backup at 6:00 PM
     try {

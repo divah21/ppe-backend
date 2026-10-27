@@ -113,3 +113,10 @@ export const isSessionActive = async (sessionId: string) => {
   );
   return rows.length > 0;
 };
+
+/** Ended sessions are kept a week for audit, then deleted so the table does not grow per login forever. */
+export const purgeStaleSessions = () =>
+  sequelize.query(
+    `DELETE FROM auth_sessions
+     WHERE expires_at < NOW() - INTERVAL '7 days' OR revoked_at < NOW() - INTERVAL '7 days'`
+  );

@@ -3,6 +3,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { QueryTypes } from 'sequelize';
 import { INDEXES } from '../database/indexes';
 import { sequelize } from '../src/core/db';
+import { createSession, isSessionActive, purgeStaleSessions } from '../src/core/sessions';
 import { spendByDepartment } from '../src/modules/budgets/spend';
 import { prepareV2 } from '../src/v2';
 import { allocate, pricedItem } from './finance.fixtures';
@@ -78,5 +79,23 @@ describe('v2 bootstrap indexes', () => {
     );
     expect(rows.map((r) => r.relname).sort()).toEqual(INDEXES.map(([name]) => name).sort());
     expect(rows.every((r) => r.valid)).toBe(true);
+  });
+});
+
+describe('auth session purge', () => {
+  const fx = createFixtures();
+  afterAll(() => fx.cleanup());
+
+  it('deletes sessions that ended over a week ago and keeps live ones', async () => {
+    const user = await fx.user('stores');
+    const live = await createSession(user.id, {});
+    const old = await createSession(user.id, {});
+    await sequelize.query(`UPDATE auth_sessions SET revoked_at = NOW() - INTERVAL '8 days' WHERE id = :id`, {
+      replacements: { id: old.sessionId },
+    });
+    await purgeStaleSessions();
+    expect(await isSessionActive(live.sessionId)).toBe(true);
+    const [left] = await sequelize.query(`SELECT 1 FROM auth_sessions WHERE id = :id`, { replacements: { id: old.sessionId } });
+    expect(left).toHaveLength(0);
   });
 });

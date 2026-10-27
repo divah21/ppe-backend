@@ -8,7 +8,7 @@ import { errorHandler, notFoundHandler } from './core/errors';
 import { sequelize } from './core/db';
 import { logger } from './core/logger';
 import type { V2Module } from './core/module';
-import { ensureSessionTable } from './core/sessions';
+import { ensureSessionTable, purgeStaleSessions } from './core/sessions';
 
 // Cross-site requests never reach this router: the app-level CORS allowlist rejects any
 // Origin it does not know (403), and the session cookies are SameSite=Lax.
@@ -57,4 +57,14 @@ export const prepareV2 = async () => {
   if (configError) return;
   await ensureSessionTable();
   await ensureIndexes(sequelize);
+  await purgeStaleSessions();
+};
+
+/** Periodic upkeep for the long-running server (the API is a single PM2 fork). */
+export const startV2Maintenance = () => {
+  if (configError) return;
+  setInterval(
+    () => purgeStaleSessions().catch((err) => logger.error({ err }, 'auth session purge failed')),
+    6 * 60 * 60 * 1000
+  ).unref();
 };
