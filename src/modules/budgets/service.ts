@@ -26,7 +26,11 @@ import {
 } from './spend';
 
 /* eslint-disable-next-line @typescript-eslint/no-require-imports */
-const { sendBudgetAllocatedEmail } = require('../../../helpers/email_helper');
+const emailHelper = require('../../../helpers/email_helper');
+
+// The email template interpolates these raw, and reps can edit HOD employee names
+const escapeHtml = (s: string) =>
+  s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -291,16 +295,20 @@ const notifyHods = async (budget: BudgetDto) => {
     if (!hodRole) return;
     const hods = await models.User.findAll({
       where: { roleId: hodRole.id, departmentId: budget.department.id, isActive: true },
-      attributes: ['id', 'username', 'email'],
+      attributes: ['id', 'username'],
       include: [{ model: models.Employee, as: 'employee', attributes: ['firstName', 'lastName', 'email'] }],
     });
     for (const u of hods) {
-      const email = u.employee?.email || u.email;
+      const email = u.employee?.email;
       if (!email) continue;
-      await sendBudgetAllocatedEmail(
+      await emailHelper.sendBudgetAllocatedEmail(
         { fiscalYear: budget.fiscalYear, allocatedAmount: budget.allocatedAmount, startDate: budget.startDate },
-        { name: budget.department.name },
-        { firstName: u.employee?.firstName ?? u.username, lastName: u.employee?.lastName ?? '', email }
+        { name: escapeHtml(budget.department.name) },
+        {
+          firstName: escapeHtml(u.employee?.firstName ?? u.username),
+          lastName: escapeHtml(u.employee?.lastName ?? ''),
+          email,
+        }
       );
     }
   } catch (err) {
