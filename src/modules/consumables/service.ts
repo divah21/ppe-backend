@@ -21,6 +21,7 @@ import { changeConsumableStock, fromCents, lockStockRow, num, toCents } from './
 const { ConsumableItem: Item, ConsumableStock: Stock, ConsumableAllocation: Allocation } = models;
 
 const LOW_STOCK_DEFAULT = 5;
+const DEFAULT_STOCK_ACCOUNT = '710019';
 
 // ---------------------------------------------------------------- items
 
@@ -106,7 +107,7 @@ const findByCode = (productCode: string, transaction?: Transaction) =>
 
 export const createItem = async (input: ItemCreateInput) => {
   if (await findByCode(input.productCode)) throw conflict(`An item with product code ${input.productCode} already exists`);
-  const row = await Item.create(input);
+  const row = await Item.create({ ...input, stockAccount: input.stockAccount ?? DEFAULT_STOCK_ACCOUNT });
   return getItem(row.id);
 };
 
@@ -152,7 +153,7 @@ export const bulkImportItems = ({ items, updateExisting }: BulkItemsInput) =>
             unit: it.unit || 'EA',
             unitPrice: it.unitPrice,
             unitPriceUSD: it.unitPriceUSD,
-            stockAccount: it.stockAccount || '710019',
+            stockAccount: it.stockAccount || DEFAULT_STOCK_ACCOUNT,
           },
           { transaction: t }
         );
