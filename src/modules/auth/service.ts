@@ -1,3 +1,4 @@
+import bcrypt from 'bcryptjs';
 import type { Row } from '../../core/db';
 import { models } from '../../core/db';
 
@@ -32,8 +33,14 @@ export const toMe = (user: Row) => {
 export type Me = ReturnType<typeof toMe>;
 
 /** Returns the user only when the password matches; no hint about which part was wrong. */
+// Unknown usernames still pay for a bcrypt compare, so response time does not reveal which accounts exist
+const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 10);
+
 export const verifyCredentials = async (username: string, password: string): Promise<Row | null> => {
   const user = await models.User.findOne({ where: { username } });
-  if (!user) return null;
+  if (!user) {
+    await bcrypt.compare(password, DUMMY_HASH);
+    return null;
+  }
   return (await user.verifyPassword(password)) ? user : null;
 };
