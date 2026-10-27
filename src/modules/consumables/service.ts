@@ -325,6 +325,14 @@ export const adjustStock = (id: string, input: AdjustStockInput) =>
     const stock = await Stock.findByPk(id, { lock: t.LOCK.UPDATE, transaction: t });
     if (!stock) throw notFound('Stock record');
     const current = toCents(stock.quantity);
+    // The client sends the quantity it showed; a retried or stale adjustment must not apply on top of newer stock
+    if (input.expectedQuantity !== undefined && toCents(input.expectedQuantity) !== current) {
+      throw new AppError(
+        'CONFLICT',
+        `Stock changed to ${fromCents(current)} while you were adjusting it. Check the new quantity and try again.`,
+        { quantity: Number(fromCents(current)) }
+      );
+    }
     const amount = toCents(input.quantity);
     const delta = input.type === 'add' ? amount : input.type === 'remove' ? -amount : amount - current;
 

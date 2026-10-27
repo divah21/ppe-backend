@@ -140,6 +140,7 @@ export const adjustStockBody = z
     type: z.enum(['add', 'remove', 'set']),
     quantity: amount('nonnegative'),
     reason: z.string().trim().min(3, 'Say why the stock is being adjusted').max(500),
+    expectedQuantity: amount('nonnegative').optional(),
   })
   .refine((v) => v.type === 'set' || v.quantity > 0, { message: 'Must be more than 0', path: ['quantity'] });
 
