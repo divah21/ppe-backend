@@ -229,7 +229,8 @@ describe('replacement', () => {
   });
 
   it('issues a replacement, deducts stock and closes the old issue', async () => {
-    const id = await approved(a1, { allocationId: allocation.id });
+    const issued = await ff.allocation(a1, item.id, stock.id);
+    const id = await approved(a1, { allocationId: issued.id });
     expect((await stores.get(`${URL}/${id}`)).body.data.allowedActions).toEqual(['process', 'replace', 'resolve']);
 
     const options = await stores.get(`${URL}/${id}/stock-options`);
@@ -253,11 +254,42 @@ describe('replacement', () => {
     expect(created).toMatchObject({ allocationType: 'replacement', status: 'active', employeeId: a1.id, ppeItemId: item.id });
     expect(Number(created!.totalCost)).toBe(12.5);
     expect(created!.notes).toMatch(/Swapped at the store/);
-    expect((await models.Allocation.findByPk(allocation.id))!.status).toBe('replaced');
+    expect((await models.Allocation.findByPk(issued.id))!.status).toBe('replaced');
 
     const again = await write(stores, 'post', `${URL}/${id}/replace`).send({ stockId: stock.id });
     expect(again.status).toBe(409);
     expect(await stockQty(stock.id)).toBe(before - 1);
+
+    const reportAgain = await report(sectionRep, a1, { allocationId: issued.id });
+    expect(reportAgain.status).toBe(422);
+    expect(reportAgain.body.error.details.fieldErrors.allocationId[0]).toMatch(/already replaced/);
+  });
+
+  it('refuses a second open report for the same issue', async () => {
+    const issued = await ff.allocation(a1, item.id, stock.id);
+    const first = await report(sectionRep, a1, { allocationId: issued.id });
+    expect(first.status).toBe(201);
+    const second = await report(admin, a1, { allocationId: issued.id });
+    expect(second.status).toBe(409);
+    expect(second.body.error.message).toMatch(new RegExp(`#${first.body.data.reference}`));
+
+    await write(sheq, 'post', `${URL}/${first.body.data.id}/review`).send({ decision: 'reject', comment: 'Normal wear' });
+    expect((await report(sectionRep, a1, { allocationId: issued.id })).status).toBe(201);
+  });
+
+  it('uses the stock size, and the typed size only when the stock has none', async () => {
+    const sized = await approved();
+    const r1 = await write(stores, 'post', `${URL}/${sized}/replace`).send({ stockId: stock.id, size: 'XS' });
+    expect(r1.status).toBe(200);
+    fx.track('Allocation', r1.body.data.allocationId);
+    expect((await models.Allocation.findByPk(r1.body.data.allocationId))!.size).toBe('L');
+
+    const unsized = await ff.stock(item.id, 2, { size: null });
+    const plain = await approved();
+    const r2 = await write(stores, 'post', `${URL}/${plain}/replace`).send({ stockId: unsized.id, size: '42' });
+    expect(r2.status).toBe(200);
+    fx.track('Allocation', r2.body.data.allocationId);
+    expect((await models.Allocation.findByPk(r2.body.data.allocationId))!.size).toBe('42');
   });
 
   it('applies once when two replacements race', async () => {

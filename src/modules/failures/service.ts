@@ -1,7 +1,7 @@
 import { Op, col, fn, type Transaction, type WhereOptions } from 'sequelize';
 import type { AuthContext } from '../../core/auth';
 import { inTransaction, models, type Row } from '../../core/db';
-import { AppError, notFound } from '../../core/errors';
+import { AppError, conflict, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { allowedActions, canDo, employeeScope, scopedEmployee, sectionInclude, type FailureAction } from './policy';
 import type { FailureInput, FailureListQuery, FailureStatus, ReplaceInput, ResolveInput, ReviewInput } from './schemas';
@@ -12,6 +12,8 @@ const { deductStock } = require('../../../helpers/stock_helper') as {
 };
 
 const REJECTED = 'Rejected by SHEQ';
+const OPEN_STATUSES: FailureStatus[] = ['pending-sheq-review', 'sheq-approved', 'stores-processing'];
+const CLOSED_ALLOCATION = new Set(['replaced', 'returned']);
 
 /** The short reference v1 writes into allocation notes, e.g. "Failure Report #1a2b3c4d". */
 const reference = (id: string) => id.substring(0, 8);
@@ -204,12 +206,28 @@ export const createFailure = async (auth: AuthContext, input: FailureInput) =>
 
     let stockId: string | null = null;
     if (input.allocationId) {
-      const allocation = await models.Allocation.findByPk(input.allocationId, { transaction: t });
+      const allocation = await models.Allocation.findByPk(input.allocationId, {
+        transaction: t,
+        lock: { level: t.LOCK.UPDATE, of: models.Allocation },
+      });
       if (!allocation || allocation.employeeId !== employee.id) {
         throw fieldError('allocationId', 'This issue record does not belong to the employee');
       }
       if (allocation.ppeItemId !== input.ppeItemId) {
         throw fieldError('allocationId', 'This issue record is for a different PPE item');
+      }
+      if (CLOSED_ALLOCATION.has(allocation.status)) {
+        throw fieldError('allocationId', `This issue record is already ${allocation.status}, so it cannot be reported again`);
+      }
+      const open = await models.FailureReport.findOne({
+        where: { allocationId: allocation.id, status: { [Op.in]: OPEN_STATUSES } },
+        attributes: ['id'],
+        transaction: t,
+      });
+      if (open) {
+        throw conflict(`This issue is already reported in failure report #${reference(open.id).toUpperCase()}`, {
+          failureReportId: open.id,
+        });
       }
       stockId = allocation.stockId ?? null;
     }
@@ -333,7 +351,7 @@ export const replaceFailure = (auth: AuthContext, id: string, input: ReplaceInpu
         stockId: stock.id,
         issuedById: auth.userId,
         quantity: input.quantity,
-        size: stock.size ?? input.size,
+        size: stock.size || input.size || null,
         unitCost,
         totalCost: Math.round(unitCost * input.quantity * 100) / 100,
         issueDate: now,
