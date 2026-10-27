@@ -26,12 +26,20 @@ export interface FulfilResult extends Transition {
   outstanding: Array<{ requestItemId: string; ppeName: string; quantity: number; size: string | null }>;
 }
 
+// Same default as the renewals screen, so an item without a frequency is not due again at once
+const DEFAULT_RENEWAL_MONTHS = 12;
+
 const nextRenewal = (issueDate: Date, months: number | null) => {
-  if (!months) return null;
   const d = new Date(issueDate);
-  d.setMonth(d.getMonth() + months);
+  d.setMonth(d.getMonth() + (months || DEFAULT_RENEWAL_MONTHS));
   return d;
 };
+
+// Allocation types have no 'new'; v1 records a new request as a new-employee issue
+const allocationType = (requestType: string | null) => (requestType === 'new' ? 'new-employee' : (requestType ?? 'replacement'));
+
+// These issue the employee's next set, so the set they replace is closed out of renewals
+const RENEWING_TYPES = new Set(['annual', 'replacement']);
 
 /**
  * Issues stock against an approved (or partly issued) request, one allocation per line, as the
@@ -54,7 +62,13 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
     });
     const itemById = new Map(items.map((i) => [i.id as string, i]));
     const stockIds = [...new Set(input.items.map((l) => l.stockId))];
-    const stocks = await models.Stock.findAll({ where: { id: stockIds }, transaction: t });
+    // Locked in id order up front so two issues drawing on the same lines cannot deadlock
+    const stocks = await models.Stock.findAll({
+      where: { id: stockIds },
+      order: [['id', 'ASC']],
+      lock: t.LOCK.UPDATE,
+      transaction: t,
+    });
     const stockById = new Map(stocks.map((s) => [s.id as string, s]));
 
     const outstanding = new Map(items.map((i) => [i.id as string, Number(i.quantity) - Number(i.approvedQuantity ?? 0)]));
@@ -62,10 +76,15 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
     const issued: IssuedLine[] = [];
     let totalCost = 0;
     const issueDate = new Date();
+    const renewed = new Set<string>();
 
     for (const line of input.items) {
       const item = itemById.get(line.requestItemId);
       if (!item) throw invalid('One of the items is not on this request');
+      // The client echoes what it saw issued; compared with the value loaded under the request lock
+      if (line.issued !== undefined && line.issued !== Number(item.approvedQuantity ?? 0)) {
+        throw conflict('Items on this request were issued while you were working. Check the request and try again.');
+      }
       const stock = stockById.get(line.stockId);
       if (!stock || stock.ppeItemId !== item.ppeItemId) {
         throw invalid(`Choose a stock line of ${item.ppeItem?.name ?? 'the requested item'}`);
@@ -85,6 +104,11 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
         );
       }
 
+      if (RENEWING_TYPES.has(request.requestType) && !renewed.has(item.ppeItemId)) {
+        renewed.add(item.ppeItemId);
+        await closePrevious(request, item.ppeItemId, issueDate, t);
+      }
+
       const months = item.ppeItem?.replacementFrequency ? parseInt(item.ppeItem.replacementFrequency, 10) : null;
       const cost = (parseFloat(stock.unitPriceUSD) || 0) * quantity;
       const size: string | null = stock.size || item.size || null;
@@ -100,6 +124,7 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
           quantity,
           size,
           issueDate,
+          allocationType: allocationType(request.requestType),
           nextRenewalDate: nextRenewal(issueDate, months && !Number.isNaN(months) ? months : null),
           status: 'active',
           totalCost: cost,
@@ -148,6 +173,20 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
     };
   });
 
+/** Marks the employee's earlier allocations of the item as replaced by this request. */
+const closePrevious = async (request: Row, ppeItemId: string, issueDate: Date, t: Parameters<typeof lockRequest>[2]) => {
+  if (!request.employeeId) return;
+  const prior = await models.Allocation.findAll({
+    where: { employeeId: request.employeeId, ppeItemId, status: ['active', 'expired'], issueDate: { [Op.lt]: issueDate } },
+    transaction: t,
+    lock: t.LOCK.UPDATE,
+  });
+  const note = `Replaced by request #${requestNumber(request.id)}`;
+  for (const p of prior) {
+    await p.update({ status: 'replaced', notes: [p.notes, note].filter(Boolean).join('; ') }, { transaction: t });
+  }
+};
+
 /**
  * v1 adds the issue cost to the department's budget for the current fiscal year (the department of
  * the employee's section). Overspending is recorded, never a reason to refuse the issue: the model's
@@ -178,10 +217,23 @@ const spendBudget = async (request: Row, amount: number, t: Parameters<typeof lo
   );
 };
 
-/** Stock lines stores can issue from, per outstanding item (matching size first). */
+// Employee.gender is MALE/FEMALE/OTHER; stock variants are male/female/unisex
+const stockGender = (g: unknown) => {
+  const v = typeof g === 'string' ? g.toLowerCase() : null;
+  return v === 'male' || v === 'female' ? v : null;
+};
+
+/** Stock lines stores can issue from, per outstanding item (matching size and gender first). */
 export const stockOptions = async (auth: AuthContext, id: string) => {
-  const request = await models.Request.findOne({ where: { [Op.and]: [requestScope(auth), { id }] }, attributes: ['id'] });
+  const request = await models.Request.findOne({
+    where: { [Op.and]: [requestScope(auth), { id }] },
+    attributes: ['id', 'employeeId'],
+  });
   if (!request) throw notFound('Request');
+  const employee = request.employeeId
+    ? await models.Employee.findByPk(request.employeeId, { attributes: ['gender'] })
+    : null;
+  const gender = stockGender(employee?.gender);
   const items = await models.RequestItem.findAll({
     where: { requestId: id },
     include: [{ model: models.PPEItem, as: 'ppeItem', attributes: ['id', 'name'] }],
@@ -205,13 +257,21 @@ export const stockOptions = async (auth: AuthContext, id: string) => {
         location: [s.location, s.binLocation].filter(Boolean).join(' / ') || null,
         quantity: Number(s.quantity),
         unitPriceUSD: s.unitPriceUSD === null ? null : Number(s.unitPriceUSD),
+        gender: (s.gender as string | null) ?? null,
         matchesSize: !size || !s.size || String(s.size).toLowerCase() === size.toLowerCase(),
+        matchesGender: !gender || !stockGender(s.gender) || stockGender(s.gender) === gender,
       }))
-      .sort((a, b) => Number(b.matchesSize) - Number(a.matchesSize) || b.quantity - a.quantity);
+      .sort(
+        (a, b) =>
+          Number(b.matchesSize && b.matchesGender) - Number(a.matchesSize && a.matchesGender) ||
+          Number(b.matchesSize) - Number(a.matchesSize) ||
+          b.quantity - a.quantity
+      );
     return {
       requestItemId: i.id as string,
       ppeItemName: (i.ppeItem?.name as string | undefined) ?? 'PPE item',
       size,
+      issued: Number(i.approvedQuantity ?? 0),
       outstanding: Math.max(0, Number(i.quantity) - Number(i.approvedQuantity ?? 0)),
       stock: lines,
     };

@@ -378,6 +378,82 @@ describe('fulfil', () => {
     expect(Number((await models.Budget.findByPk(w.budget.id))!.totalSpent)).toBe(before + 2.5);
   });
 
+  it('refuses a stale issue when someone else issued on the item meanwhile (409)', async () => {
+    const r = await approved([{ ppeItemId: w.ppe.gloves.id, quantity: 3 }]);
+    const line = { requestItemId: r.item(w.ppe.gloves.id), stockId: w.stock.gloves.id, quantity: 1 };
+    const options = await w.agents.stores.get(`${URL}/${r.id}/stock-options`);
+    expect(options.body.data[0]).toMatchObject({ issued: 0, outstanding: 3 });
+
+    expect((await act(w.agents.stores, r.id, 'fulfil', { items: [{ ...line, issued: 0 }] })).status).toBe(200);
+    const before = await stockQty(w.stock.gloves);
+    const stale = await act(w.agents.admin, r.id, 'fulfil', { items: [{ ...line, issued: 0 }] });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error.code).toBe('CONFLICT');
+    expect(await stockQty(w.stock.gloves)).toBe(before);
+    expect(await models.Allocation.count({ where: { requestId: r.id } })).toBe(1);
+
+    expect((await act(w.agents.admin, r.id, 'fulfil', { items: [{ ...line, issued: 1 }] })).status).toBe(200);
+  });
+
+  it('replaces the earlier allocation on an annual issue and records the allocation type', async () => {
+    const yearAgo = new Date(Date.now() - 366 * 86_400_000);
+    const prior = await w.fx.make('Allocation', {
+      employeeId: w.employees.empA1b.id,
+      ppeItemId: w.ppe.gloves.id,
+      quantity: 1,
+      issueDate: yearAgo,
+      status: 'active',
+      notes: 'Old pair',
+    });
+    const other = await w.fx.make('Allocation', {
+      employeeId: w.employees.empA1b.id,
+      ppeItemId: w.ppe.boots.id,
+      quantity: 1,
+      issueDate: yearAgo,
+      status: 'active',
+    });
+    const r = await w.insertRequest('approved', w.employees.empA1b, [{ ppeItemId: w.ppe.gloves.id, quantity: 2 }], { requestType: 'annual' });
+    const item = (await models.RequestItem.findOne({ where: { requestId: r.id } }))!;
+    const res = await act(w.agents.stores, r.id, 'fulfil', {
+      items: [
+        { requestItemId: item.id, stockId: w.stock.gloves.id, quantity: 1 },
+        { requestItemId: item.id, stockId: w.stock.gloves.id, quantity: 1 },
+      ],
+    });
+    expect(res.status).toBe(200);
+
+    await prior.reload();
+    expect(prior.status).toBe('replaced');
+    expect(prior.notes).toBe(`Old pair; Replaced by request #${res.body.data.number}`);
+    expect((await models.Allocation.findByPk(other.id))!.status).toBe('active');
+    const created = await models.Allocation.findAll({ where: { requestId: r.id } });
+    expect(created).toHaveLength(2);
+    expect(created.every((a) => a.status === 'active' && a.allocationType === 'annual')).toBe(true);
+
+    const fresh = await w.insertRequest('approved', w.employees.empA1b, [{ ppeItemId: w.ppe.gloves.id, quantity: 1 }], { requestType: 'new' });
+    const freshItem = (await models.RequestItem.findOne({ where: { requestId: fresh.id } }))!;
+    expect((await act(w.agents.stores, fresh.id, 'fulfil', { items: [{ requestItemId: freshItem.id, stockId: w.stock.gloves.id, quantity: 1 }] })).status).toBe(200);
+    expect((await models.Allocation.findOne({ where: { requestId: fresh.id } }))!.allocationType).toBe('new-employee');
+    expect(await models.Allocation.count({ where: { requestId: r.id, status: 'active' } })).toBe(2);
+  });
+
+  it("offers stock in the employee's gender first and never ranks the other gender as a match", async () => {
+    const male = await w.fx.make('Stock', { ppeItemId: w.ppe.boots.id, quantity: 50, size: '10', gender: 'male', unitPriceUSD: 40 });
+    const female = await w.fx.make('Stock', { ppeItemId: w.ppe.boots.id, quantity: 5, size: '10', gender: 'female', unitPriceUSD: 40 });
+    await models.Employee.update({ gender: 'FEMALE' }, { where: { id: w.employees.empA1b.id } });
+    try {
+      const r = await w.insertRequest('approved', w.employees.empA1b, [{ ppeItemId: w.ppe.boots.id, quantity: 1, size: '10' }]);
+      const res = await w.agents.stores.get(`${URL}/${r.id}/stock-options`);
+      expect(res.status).toBe(200);
+      const lines = res.body.data[0].stock as Array<{ stockId: string; gender: string | null; matchesSize: boolean; matchesGender: boolean }>;
+      expect(lines[0]).toMatchObject({ stockId: female.id, gender: 'female', matchesSize: true, matchesGender: true });
+      expect(lines.find((l) => l.stockId === male.id)).toMatchObject({ gender: 'male', matchesSize: true, matchesGender: false });
+    } finally {
+      await models.Employee.update({ gender: null }, { where: { id: w.employees.empA1b.id } });
+      await models.Stock.update({ quantity: 0 }, { where: { id: [male.id, female.id] } });
+    }
+  });
+
   it('serves stock options to stores, matching sizes first', async () => {
     const r = await approved([{ ppeItemId: w.ppe.boots.id, quantity: 1, size: '9' }]);
     const res = await w.agents.stores.get(`${URL}/${r.id}/stock-options`);

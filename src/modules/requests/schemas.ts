@@ -61,6 +61,8 @@ export const fulfilBody = z.object({
         requestItemId: z.string().uuid(),
         stockId: z.string().uuid('Choose a stock line'),
         quantity: z.coerce.number().int('Enter a whole number').min(1, 'Enter at least 1').max(1000),
+        /** What the client saw already issued on the item; a mismatch means someone issued meanwhile */
+        issued: z.number().int().min(0).optional(),
       })
     )
     .min(1, 'Issue at least one item')
