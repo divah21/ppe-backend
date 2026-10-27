@@ -37,8 +37,9 @@ export const createFixtures = () => {
   };
 
   const org = async () => {
-    const department = await make('Department', { name: `${tag}-dept`, code: `${tag}-D` });
-    const section = await make('Section', { name: `${tag}-section`, departmentId: department.id });
+    const n = created.length;
+    const department = await make('Department', { name: `${tag}-dept-${n}`, code: `${tag}-D${n}` });
+    const section = await make('Section', { name: `${tag}-section-${n}`, departmentId: department.id });
     return { department, section };
   };
 
