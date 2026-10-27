@@ -4,16 +4,23 @@ const NIL = '00000000-0000-0000-0000-000000000000';
 
 export type Scope = { kind: 'mine' } | { kind: 'department'; id: string } | { kind: 'section'; id: string };
 
-/** The slice of the mine a user may see. A department or section role without one sees nothing. */
+/**
+ * The slice of the mine a user may see. A department or section role without one sees nothing,
+ * and so does any role this list does not know (fail closed).
+ */
 export const scopeOf = (auth: AuthContext): Scope => {
   switch (auth.role) {
+    case ROLES.ADMIN:
+    case ROLES.SHEQ:
+    case ROLES.STORES:
+      return { kind: 'mine' };
     case ROLES.HOD:
     case ROLES.DEPARTMENT_REP:
       return { kind: 'department', id: auth.departmentId ?? NIL };
     case ROLES.SECTION_REP:
       return { kind: 'section', id: auth.sectionId ?? NIL };
     default:
-      return { kind: 'mine' };
+      return { kind: 'section', id: NIL };
   }
 };
 

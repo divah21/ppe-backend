@@ -1,7 +1,8 @@
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { sequelize } from '../src/core/db';
 import { prepareV2 } from '../src/v2';
-import { app } from './helpers';
+import { PASSWORD, app, signIn } from './helpers';
 import { createInsightsWorld, type InsightsWorld } from './insights.fixtures';
 
 let w: InsightsWorld;
@@ -72,6 +73,27 @@ describe('GET /api/v2/dashboard/summary', () => {
     const d = (await (await w.agent(w.users.otherSectionRep)).get(URL)).body.data;
     expect(d.kpis).toMatchObject({ awaitingMyAction: 0, openRequests: 1, issuedThisPeriod: 1, spendThisPeriod: 50, renewalsDue: 0 });
     expect(d.renewalsDue).toEqual([]);
+  });
+
+  it('shows nothing to a role it does not know', async () => {
+    // The model only allows known names, but nothing in the database stops another one
+    const [[role]] = (await sequelize.query(
+      `INSERT INTO roles (id, name, description, created_at, updated_at) VALUES (gen_random_uuid(), :name, 'Unknown role', NOW(), NOW()) RETURNING id`,
+      { replacements: { name: `${w.fx.tag}-viewer` } }
+    )) as unknown as [[{ id: string }]];
+    w.fx.track('Role', role.id);
+    const user = await w.fx.make('User', {
+      username: `${w.fx.tag}-viewer`,
+      passwordHash: PASSWORD,
+      roleId: role.id,
+      isActive: true,
+      mustChangePassword: false,
+    });
+    const res = await (await signIn(user.username)).get(URL);
+    expect(res.status).toBe(200);
+    expect(res.body.data.scope.kind).not.toBe('mine');
+    expect(res.body.data.kpis).toMatchObject({ awaitingMyAction: 0, openRequests: 0, issuedThisPeriod: 0, spendThisPeriod: 0, lowStock: null, renewalsDue: 0 });
+    expect(res.body.data.spendBreakdown.rows).toEqual([]);
   });
 
   it('rejects an unknown period', async () => {

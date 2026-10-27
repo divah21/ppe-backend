@@ -59,7 +59,7 @@ const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['per
        COUNT(*) FILTER (WHERE r.status::text NOT IN (:closed)) AS open
      ${REQUESTS_FROM}
      WHERE ${rs.sql}`,
-    { ...rs.replacements, actionStatuses: ACTION_STATUSES[auth.role], closed: CLOSED_REQUEST_STATUSES }
+    { ...rs.replacements, actionStatuses: ACTION_STATUSES[auth.role] ?? ['none'], closed: CLOSED_REQUEST_STATUSES }
   );
   const [allocations] = await select<{ issued: string; spend: string; renewals: string }>(
     `SELECT
