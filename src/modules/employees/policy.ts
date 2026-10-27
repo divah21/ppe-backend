@@ -18,6 +18,13 @@ export const employeeScope = (auth: AuthContext): WhereOptions => {
   return { sectionId: { [Op.in]: inDepartment(auth.departmentId) } };
 };
 
+/** Sections the user works with (pickers and filters). */
+export const sectionScope = (auth: AuthContext): WhereOptions => {
+  if (WHOLE_MINE.has(auth.role)) return {};
+  if (auth.role === ROLES.SECTION_REP) return { id: auth.sectionId ?? NONE };
+  return { departmentId: auth.departmentId ?? NONE };
+};
+
 export const canEdit = (auth: AuthContext) =>
   auth.role === ROLES.ADMIN || (EDITOR_ROLES as readonly Role[]).includes(auth.role);
 

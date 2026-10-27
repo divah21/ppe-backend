@@ -8,6 +8,7 @@ import { EDITOR_ROLES } from './policy';
 import { employeeBody, employeeListQuery, employeeOptionsQuery, importBody } from './schemas';
 import {
   createEmployee,
+  employeeLookups,
   employeeOptions,
   getEmployee,
   listEmployees,
@@ -30,6 +31,11 @@ router.get(
 router.get(
   '/options',
   route(async (req, res) => ok(res, await employeeOptions(getAuth(req), parse(employeeOptionsQuery, req.query))))
+);
+
+router.get(
+  '/lookups',
+  route(async (req, res) => ok(res, await employeeLookups(getAuth(req))))
 );
 
 router.post(

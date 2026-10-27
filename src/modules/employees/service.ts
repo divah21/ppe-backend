@@ -6,7 +6,7 @@ import { inTransaction, models, sequelize, type Row } from '../../core/db';
 import { AppError, conflict, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { logger } from '../../core/logger';
-import { allowedActions, employeeScope, sectionWithinScope } from './policy';
+import { allowedActions, employeeScope, sectionScope, sectionWithinScope } from './policy';
 import type { EmployeeInput, employeeListQuery, employeeOptionsQuery } from './schemas';
 
 /* eslint-disable-next-line @typescript-eslint/no-require-imports */
@@ -136,6 +136,41 @@ export const employeeOptions = async (auth: AuthContext, q: z.infer<typeof emplo
     name: `${r.firstName} ${r.lastName}`,
     worksNumber: r.worksNumber as string,
   }));
+};
+
+/** Organisation pickers for the employee screens, limited to the sections the user works with. */
+export const employeeLookups = async (auth: AuthContext) => {
+  const sections = await models.Section.findAll({
+    where: { [Op.and]: [sectionScope(auth), { isActive: true }] },
+    attributes: ['id', 'name', 'code', 'departmentId'],
+    include: [{ model: models.Department, as: 'department', attributes: ['id', 'name'] }],
+    order: [['name', 'ASC']],
+  });
+  const sectionIds = sections.map((s) => s.id as string);
+  const [jobTitles, costCentres] = await Promise.all([
+    models.JobTitle.findAll({
+      where: { sectionId: { [Op.in]: sectionIds }, isActive: true },
+      attributes: ['id', 'name', 'sectionId'],
+      order: [['name', 'ASC']],
+    }),
+    models.CostCenter.findAll({ where: { isActive: true }, attributes: ['id', 'code', 'name'], order: [['code', 'ASC']] }),
+  ]);
+  const departments = new Map<string, { id: string; name: string }>();
+  for (const s of sections) {
+    const d = s.department as Row | null;
+    if (d) departments.set(d.id, { id: d.id as string, name: d.name as string });
+  }
+  return {
+    departments: [...departments.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    sections: sections.map((s) => ({
+      id: s.id as string,
+      name: s.name as string,
+      code: (s.code as string | null) ?? null,
+      departmentId: (s.departmentId as string | null) ?? null,
+    })),
+    jobTitles: jobTitles.map((j) => ({ id: j.id as string, name: j.name as string, sectionId: j.sectionId as string })),
+    costCentres: costCentres.map((c) => ({ id: c.id as string, code: c.code as string, name: c.name as string })),
+  };
 };
 
 const findInScope = async (auth: AuthContext, id: string, t?: Transaction) => {

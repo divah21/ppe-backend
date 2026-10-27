@@ -118,6 +118,22 @@ describe('GET /employees/options', () => {
   });
 });
 
+describe('GET /employees/lookups', () => {
+  it('returns the organisation pickers within the user scope', async () => {
+    const rep = (await w.agents.sectionRep.get(`${URL}/lookups`)).body.data;
+    expect(rep.sections.map((s: { id: string }) => s.id)).toEqual([w.mine.section.id]);
+    expect(rep.departments).toEqual([{ id: w.mine.department.id, name: w.mine.department.name }]);
+    expect(rep.jobTitles).toEqual([{ id: w.jobTitle.id, name: `${fx.tag}-Fitter`, sectionId: w.mine.section.id }]);
+    expect(rep.costCentres).toEqual(expect.arrayContaining([{ id: w.costCentre.id, code: `${fx.tag}-CC`, name: `${fx.tag} Plant` }]));
+
+    const hod = (await w.agents.hod.get(`${URL}/lookups`)).body.data;
+    expect(hod.sections.map((s: { id: string }) => s.id).sort()).toEqual([w.mine.section.id, w.sectionB.id].sort());
+
+    const admin = (await w.agents.admin.get(`${URL}/lookups`)).body.data;
+    expect(admin.sections.map((s: { id: string }) => s.id)).toEqual(expect.arrayContaining([w.other.section.id]));
+  });
+});
+
 describe('GET /employees/:id', () => {
   it('includes current PPE with renewal status and recent requests', async () => {
     const res = await w.agents.admin.get(`${URL}/${w.employees.a.id}`);
