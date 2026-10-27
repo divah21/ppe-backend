@@ -342,3 +342,88 @@ describe('POST /api/v2/users/:id/reset-password', () => {
     expect((await request(app).post(`/api/v2/users/${admin.id}/reset-password`)).status).toBe(401);
   });
 });
+
+describe('review fixes', () => {
+  it('rejects an inactive department or section as a new scope', async () => {
+    const closed = await fx.org();
+    await models.Department.update({ isActive: false }, { where: { id: closed.department.id } });
+    await models.Section.update({ isActive: false }, { where: { id: closed.section.id } });
+
+    const toDept = await createUser({
+      employeeId: free.id,
+      username: `${fx.tag}-r1`,
+      roleId: roleIds.hod,
+      departmentId: closed.department.id,
+    });
+    expect(toDept.status).toBe(422);
+    expect(toDept.body.error.details.fieldErrors.departmentId).toBeDefined();
+
+    const toSection = await createUser({
+      employeeId: free.id,
+      username: `${fx.tag}-r2`,
+      roleId: roleIds['section-rep'],
+      sectionId: closed.section.id,
+    });
+    expect(toSection.status).toBe(422);
+    expect(toSection.body.error.details.fieldErrors.sectionId).toBeDefined();
+
+    const user = await fx.user('section-rep', { sectionId: mine.section.id });
+    const moved = await write(adminAgent, 'put', `/api/v2/users/${user.id}`).send({
+      username: user.username,
+      roleId: roleIds['section-rep'],
+      sectionId: closed.section.id,
+      isActive: true,
+    });
+    expect(moved.status).toBe(422);
+  });
+
+  it('keeps a scope that was made inactive after it was assigned', async () => {
+    const closing = await fx.org();
+    const user = await fx.user('department-rep', { departmentId: closing.department.id });
+    await models.Department.update({ isActive: false }, { where: { id: closing.department.id } });
+
+    const res = await write(adminAgent, 'put', `/api/v2/users/${user.id}`).send({
+      username: `${user.username}-renamed`,
+      roleId: roleIds['department-rep'],
+      departmentId: closing.department.id,
+      isActive: true,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.managedDepartment).toMatchObject({ id: closing.department.id });
+  });
+
+  it('does not reactivate the account of an employee who has left', async () => {
+    const leaver = await fx.employee(mine.section.id);
+    const user = await fx.user('stores', { employeeId: leaver.id });
+    await models.User.update({ isActive: false }, { where: { id: user.id } });
+    await models.Employee.update({ isActive: false }, { where: { id: leaver.id } });
+
+    const res = await write(adminAgent, 'put', `/api/v2/users/${user.id}`).send({
+      username: user.username,
+      roleId: roleIds.stores,
+      isActive: true,
+    });
+    expect(res.status).toBe(422);
+    expect(res.body.error.details.fieldErrors.isActive).toBeDefined();
+    expect((await models.User.findByPk(user.id))?.isActive).toBe(false);
+
+    const stillEditable = await write(adminAgent, 'put', `/api/v2/users/${user.id}`).send({
+      username: user.username,
+      roleId: roleIds.sheq,
+      isActive: false,
+    });
+    expect(stillEditable.status).toBe(200);
+  });
+
+  it('lets only one of two simultaneous creates claim a username in different letter cases', async () => {
+    const a = await fx.employee(mine.section.id);
+    const b = await fx.employee(mine.section.id);
+    const name = `${fx.tag}-race`;
+    const results = await Promise.all([
+      createUser({ employeeId: a.id, username: name, roleId: roleIds.stores }),
+      createUser({ employeeId: b.id, username: name.toUpperCase(), roleId: roleIds.stores }),
+    ]);
+    for (const r of results) if (r.status === 201) fx.track('User', r.body.data.id);
+    expect(results.map((r) => r.status).sort()).toEqual([201, 409]);
+  });
+});

@@ -1,7 +1,7 @@
 import { randomInt } from 'node:crypto';
 import { Op, col, fn, literal, where as sqlWhere, type Includeable, type Order, type Transaction, type WhereOptions } from 'sequelize';
 import { ROLES, type AuthContext, type Role } from '../../core/auth';
-import { inTransaction, models, type Row } from '../../core/db';
+import { inTransaction, models, sequelize, type Row } from '../../core/db';
 import { AppError, conflict, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { revokeUserSessions } from '../../core/sessions';
@@ -195,29 +195,49 @@ export const sectionOptions = async () => {
   }));
 };
 
-/** The role and the one scope it needs: a department for HOD/department rep, a section for section rep. */
-const resolveAccess = async (input: Pick<CreateUserInput, 'roleId' | 'departmentId' | 'sectionId'>, t: Transaction) => {
+const KNOWN_ROLES = new Set<string>(Object.values(ROLES));
+
+type CurrentScope = { departmentId?: string | null; sectionId?: string | null };
+
+/**
+ * The role and the one scope it needs: a department for HOD/department rep, a section for section rep.
+ * A newly chosen department or section must be active; the one a user already manages may be kept.
+ */
+const resolveAccess = async (
+  input: Pick<CreateUserInput, 'roleId' | 'departmentId' | 'sectionId'>,
+  t: Transaction,
+  current: CurrentScope = {}
+) => {
   const role = await models.Role.findByPk(input.roleId, { transaction: t });
-  if (!role) throw invalid('roleId', 'Choose a role');
+  if (!role || !KNOWN_ROLES.has(role.name)) throw invalid('roleId', 'Choose a role');
 
   let departmentId: string | null = null;
   let sectionId: string | null = null;
   if (DEPARTMENT_SCOPED.has(role.name)) {
     if (!input.departmentId) throw invalid('departmentId', `Choose the department this ${roleLabel(role.name).toLowerCase()} manages`);
-    if (!(await models.Department.findByPk(input.departmentId, { attributes: ['id'], transaction: t }))) {
-      throw invalid('departmentId', 'Choose a department');
+    const department = await models.Department.findByPk(input.departmentId, { attributes: ['id', 'isActive'], transaction: t });
+    if (!department || (!department.isActive && department.id !== current.departmentId)) {
+      throw invalid('departmentId', 'Choose an active department');
     }
     departmentId = input.departmentId;
   }
   if (role.name === ROLES.SECTION_REP) {
     if (!input.sectionId) throw invalid('sectionId', 'Choose the section this representative manages');
-    if (!(await models.Section.findByPk(input.sectionId, { attributes: ['id'], transaction: t }))) {
-      throw invalid('sectionId', 'Choose a section');
+    const section = await models.Section.findByPk(input.sectionId, { attributes: ['id', 'isActive'], transaction: t });
+    if (!section || (!section.isActive && section.id !== current.sectionId)) {
+      throw invalid('sectionId', 'Choose an active section');
     }
     sectionId = input.sectionId;
   }
   return { role, departmentId, sectionId };
 };
+
+/** Serialises writes that claim a username, so two requests differing only in case cannot both pass the check. */
+const lockUsername = (username: string, t: Transaction) =>
+  sequelize.query('SELECT pg_advisory_xact_lock(hashtext(lower(:username)))', {
+    replacements: { username },
+    transaction: t,
+  });
 
 const assertUsernameFree = async (username: string, t: Transaction, exceptId?: string) => {
   const taken = await models.User.findOne({
@@ -241,6 +261,7 @@ export const createUser = async (input: CreateUserInput) => {
     if (await models.User.findOne({ where: { employeeId: employee.id }, attributes: ['id'], transaction: t })) {
       throw conflict('This employee already has a user account');
     }
+    await lockUsername(input.username, t);
     await assertUsernameFree(input.username, t);
     const { role, departmentId, sectionId } = await resolveAccess(input, t);
 
@@ -266,15 +287,24 @@ export const updateUser = async (auth: AuthContext, id: string, input: UpdateUse
   const { deactivated } = await inTransaction(async (t) => {
     const row = await models.User.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
     if (!row) throw notFound('User');
-    const { role, departmentId, sectionId } = await resolveAccess(input, t);
+    const { role, departmentId, sectionId } = await resolveAccess(input, t, { departmentId: row.departmentId, sectionId: row.sectionId });
 
     if (id === auth.userId) {
       if (!input.isActive) throw conflict('You cannot deactivate your own account');
       if (role.name !== ROLES.ADMIN) throw conflict('You cannot remove your own administrator role');
     }
-    if (input.username !== row.username) await assertUsernameFree(input.username, t, id);
+    if (input.username !== row.username) {
+      await lockUsername(input.username, t);
+      await assertUsernameFree(input.username, t, id);
+    }
 
     const wasActive = !!row.isActive;
+    if (!wasActive && input.isActive && row.employeeId) {
+      const employee = await models.Employee.findByPk(row.employeeId, { attributes: ['id', 'isActive'], transaction: t });
+      if (employee && !employee.isActive) {
+        throw invalid('isActive', 'This employee is no longer active, so their account cannot be reactivated');
+      }
+    }
     await row.update(
       { username: input.username, roleId: role.id, departmentId, sectionId, isActive: input.isActive },
       { transaction: t }
