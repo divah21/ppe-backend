@@ -253,3 +253,70 @@ describe('deletes', () => {
     expect(await models.Budget.count({ where: { id: dept.body.data.id } })).toBe(0);
   });
 });
+
+describe('budgets allocated before or without a company link', () => {
+  let fy: number;
+  let legacyId: string;
+  let fyCompanyId: string;
+
+  beforeAll(async () => {
+    fy = await freeFiscalYear();
+    // As v1 stored it when the client sent no companyBudgetId
+    const legacy = await fx.make('Budget', { departmentId: mine.department.id, fiscalYear: fy, allocatedAmount: 400, period: 'annual', status: 'active' });
+    legacyId = legacy.id;
+  });
+
+  it('refuses a company total below what departments already hold, then links them', async () => {
+    const low = await write(admin, 'post', `${BASE}/company`).send({ fiscalYear: fy, totalBudget: 399 });
+    if (low.status === 201) fx.track('CompanyBudget', low.body.data.id);
+    expect(low.status).toBe(409);
+    expect(await models.CompanyBudget.count({ where: { fiscalYear: fy } })).toBe(0);
+
+    const res = await write(admin, 'post', `${BASE}/company`).send({ fiscalYear: fy, totalBudget: 500 });
+    expect(res.status).toBe(201);
+    fyCompanyId = fx.track('CompanyBudget', res.body.data.id);
+    expect(res.body.data).toMatchObject({ allocatedToDepartments: 400, unallocated: 100, departmentBudgetCount: 1 });
+    expect((await models.Budget.findByPk(legacyId))!.companyBudgetId).toBe(fyCompanyId);
+  });
+
+  it('counts an unlinked budget of the year against the company budget', async () => {
+    await models.Budget.update({ companyBudgetId: null }, { where: { id: legacyId } });
+    const over = await write(admin, 'post', BASE).send({ departmentId: other.department.id, fiscalYear: fy, allocatedAmount: 100.01 });
+    expect(over.status).toBe(409);
+    expect((await admin.get(`${BASE}/company/${fyCompanyId}`)).body.data).toMatchObject({ allocatedToDepartments: 400, unallocated: 100 });
+
+    const topUp = await write(admin, 'put', `${BASE}/${legacyId}`).send({ allocatedAmount: 500.01 });
+    expect(topUp.status).toBe(409);
+    const ok = await write(admin, 'put', `${BASE}/${legacyId}`).send({ allocatedAmount: 500 });
+    expect(ok.status).toBe(200);
+    expect(ok.body.data.companyBudgetId).toBe(fyCompanyId);
+    expect((await admin.get(`${BASE}/company/${fyCompanyId}`)).body.data.unallocated).toBe(0);
+  });
+
+  it('does not top up a budget whose company budget is closed', async () => {
+    expect((await write(admin, 'put', `${BASE}/company/${fyCompanyId}`).send({ totalBudget: 600, status: 'closed' })).status).toBe(200);
+    expect((await write(admin, 'put', `${BASE}/${legacyId}`).send({ allocatedAmount: 550 })).status).toBe(409);
+    expect((await write(admin, 'put', `${BASE}/${legacyId}`).send({ allocatedAmount: 450 })).status).toBe(200);
+  });
+
+  it('serialises a budget edit against deleting its company budget without a deadlock', async () => {
+    const [edit, del] = await Promise.all([
+      write(admin, 'put', `${BASE}/${legacyId}`).send({ allocatedAmount: 400 }),
+      write(admin, 'delete', `${BASE}/company/${fyCompanyId}`),
+    ]);
+    expect([200, 404]).toContain(edit.status);
+    expect(del.status).toBe(204);
+    expect(await models.Budget.count({ where: { id: legacyId } })).toBe(0);
+  });
+});
+
+describe('department budget list', () => {
+  it('searches by department name and sorts by department', async () => {
+    const res = await admin.get(BASE).query({ fiscalYear: year, q: mine.department.name, sort: 'department', order: 'asc', pageSize: 5 });
+    expect(res.status).toBe(200);
+    expect(res.body.data.length).toBeGreaterThan(0);
+    expect(res.body.data.every((b: { department: { id: string } }) => b.department.id === mine.department.id)).toBe(true);
+    const hodSearch = await hod.get(BASE).query({ fiscalYear: year, q: other.department.name });
+    expect(hodSearch.body.data).toEqual([]);
+  });
+});

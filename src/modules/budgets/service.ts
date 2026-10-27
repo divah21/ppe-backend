@@ -42,8 +42,17 @@ const periodLabel = (b: { fiscalYear: number; period: Period; quarter: number | 
 const companyRange = (c: Row) =>
   periodRange({ fiscalYear: Number(c.fiscalYear), startDate: c.startDate ?? null, endDate: c.endDate ?? null });
 
-const allocatedUnder = async (companyBudgetId: string, transaction?: Transaction) =>
-  money(await models.Budget.sum('allocatedAmount', { where: { companyBudgetId }, transaction }));
+/**
+ * Department budgets drawn from a company budget: those linked to it plus unlinked budgets of
+ * its fiscal year (v1 linked a budget only when the client sent companyBudgetId, so older rows
+ * are often unlinked but still come out of that year's company budget).
+ */
+const drawnFrom = (c: Row): WhereOptions => ({
+  [Op.or]: [{ companyBudgetId: c.id }, { companyBudgetId: null, fiscalYear: Number(c.fiscalYear) }],
+});
+
+const allocatedUnder = async (c: Row, transaction?: Transaction) =>
+  money(await models.Budget.sum('allocatedAmount', { where: drawnFrom(c), transaction }));
 
 const toCompany = (c: Row, allocated: number, spend: { spent: number; allocationCount: number }, departmentBudgetCount: number) => {
   const totalBudget = money(c.totalBudget);
@@ -73,9 +82,9 @@ export type CompanyBudgetDto = ReturnType<typeof toCompany>;
 
 const companyDto = async (c: Row, transaction?: Transaction) => {
   const [allocated, spend, count] = await Promise.all([
-    allocatedUnder(c.id, transaction),
+    allocatedUnder(c, transaction),
     totalSpend(companyRange(c), transaction),
-    models.Budget.count({ where: { companyBudgetId: c.id }, transaction }),
+    models.Budget.count({ where: drawnFrom(c), transaction }),
   ]);
   return toCompany(c, allocated, spend, count);
 };
@@ -96,21 +105,37 @@ export const getCompanyBudget = async (id: string) => {
   return companyDto(row);
 };
 
-export const createCompanyBudget = async (auth: AuthContext, input: CompanyInput) => {
-  const existing = await models.CompanyBudget.findOne({ where: { fiscalYear: input.fiscalYear } });
-  if (existing) throw conflict(`A company budget for FY ${input.fiscalYear} already exists. Edit it instead.`);
-  const row = await models.CompanyBudget.create({
-    ...input,
-    suggestedBudget: input.suggestedBudget ?? 0,
-    bufferAmount: input.bufferAmount ?? 0,
-    startDate: input.startDate ?? `${input.fiscalYear}-01-01`,
-    endDate: input.endDate ?? `${input.fiscalYear}-12-31`,
-    allocatedToDepartments: 0,
-    totalSpent: 0,
-    createdById: auth.userId,
+export const createCompanyBudget = (auth: AuthContext, input: CompanyInput) =>
+  inTransaction(async (t) => {
+    const existing = await models.CompanyBudget.findOne({ where: { fiscalYear: input.fiscalYear }, transaction: t });
+    if (existing) throw conflict(`A company budget for FY ${input.fiscalYear} already exists. Edit it instead.`);
+    const row = await models.CompanyBudget.create(
+      {
+        ...input,
+        suggestedBudget: input.suggestedBudget ?? 0,
+        bufferAmount: input.bufferAmount ?? 0,
+        startDate: input.startDate ?? `${input.fiscalYear}-01-01`,
+        endDate: input.endDate ?? `${input.fiscalYear}-12-31`,
+        allocatedToDepartments: 0,
+        totalSpent: 0,
+        createdById: auth.userId,
+      },
+      { transaction: t }
+    );
+    // Department budgets allocated before the company budget existed now draw from it
+    await models.Budget.update(
+      { companyBudgetId: row.id },
+      { where: { companyBudgetId: null, fiscalYear: input.fiscalYear }, transaction: t }
+    );
+    const allocated = await allocatedUnder(row, t);
+    if (input.totalBudget < allocated) {
+      throw conflict(
+        `Departments already hold ${allocated.toFixed(2)} for FY ${input.fiscalYear}. Set a total of at least that, or reduce their allocations first.`
+      );
+    }
+    await row.update({ allocatedToDepartments: allocated }, { transaction: t });
+    return companyDto(row, t);
   });
-  return companyDto(row);
-};
 
 const lockCompany = async (id: string, t: Transaction) => {
   const row = await models.CompanyBudget.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
@@ -121,7 +146,7 @@ const lockCompany = async (id: string, t: Transaction) => {
 export const updateCompanyBudget = (id: string, input: CompanyUpdate) =>
   inTransaction(async (t) => {
     const row = await lockCompany(id, t);
-    const allocated = await allocatedUnder(id, t);
+    const allocated = await allocatedUnder(row, t);
     if (input.totalBudget !== undefined && input.totalBudget < allocated) {
       throw conflict(
         `Departments already hold ${allocated.toFixed(2)} of this budget. Reduce their allocations before lowering the total below that.`
@@ -141,7 +166,7 @@ export const deleteCompanyBudget = (id: string) =>
     if (spent > 0) {
       throw conflict('PPE has already been issued against this budget year. Close the budget instead of deleting it.');
     }
-    await models.Budget.destroy({ where: { companyBudgetId: id }, transaction: t });
+    await models.Budget.destroy({ where: drawnFrom(row), transaction: t });
     await row.destroy({ transaction: t });
   });
 
@@ -318,7 +343,7 @@ export const createBudget = async (input: BudgetInput) => {
     let allocated = 0;
     if (company) {
       if (company.status === 'closed') throw conflict(`The FY ${input.fiscalYear} company budget is closed.`);
-      allocated = await allocatedUnder(company.id, t);
+      allocated = await allocatedUnder(company, t);
       const available = round2(money(company.totalBudget) - allocated);
       if (input.allocatedAmount > available) throw insufficient(available, input.fiscalYear);
     }
@@ -355,25 +380,38 @@ export const createBudget = async (input: BudgetInput) => {
   return dto;
 };
 
+/**
+ * Locks the company budget a department budget draws from, then the budget itself. Company
+ * first, in the same order as the company budget writes, so concurrent writes cannot deadlock.
+ */
+const lockForWrite = async (id: string, t: Transaction) => {
+  const current = await models.Budget.findByPk(id, { attributes: ['id', 'companyBudgetId', 'fiscalYear'], transaction: t });
+  if (!current) throw notFound('Budget');
+  const company = current.companyBudgetId
+    ? await models.CompanyBudget.findByPk(current.companyBudgetId, { transaction: t, lock: t.LOCK.UPDATE })
+    : await models.CompanyBudget.findOne({ where: { fiscalYear: current.fiscalYear }, transaction: t, lock: t.LOCK.UPDATE });
+  const budget = await models.Budget.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
+  if (!budget) throw notFound('Budget');
+  return { budget, company };
+};
+
 export const updateBudget = (auth: AuthContext, id: string, input: BudgetUpdate) =>
   inTransaction(async (t) => {
-    const locked = await models.Budget.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
-    if (!locked) throw notFound('Budget');
+    const { budget: locked, company } = await lockForWrite(id, t);
 
     const patch: Record<string, unknown> = {};
     if (input.status !== undefined) patch.status = input.status;
     if (input.notes !== undefined) patch.notes = input.notes;
+    if (company && !locked.companyBudgetId) patch.companyBudgetId = company.id;
 
     if (input.allocatedAmount !== undefined) {
-      const company = locked.companyBudgetId
-        ? await models.CompanyBudget.findByPk(locked.companyBudgetId, { transaction: t, lock: t.LOCK.UPDATE })
-        : null;
       const oldAmount = money(locked.allocatedAmount);
       if (company) {
-        const allocated = await allocatedUnder(company.id, t);
+        const allocated = await allocatedUnder(company, t);
         const available = round2(money(company.totalBudget) - allocated + oldAmount);
-        if (input.allocatedAmount > oldAmount && input.allocatedAmount > available) {
-          throw insufficient(round2(available - oldAmount), Number(company.fiscalYear));
+        if (input.allocatedAmount > oldAmount) {
+          if (company.status === 'closed') throw conflict(`The FY ${company.fiscalYear} company budget is closed.`);
+          if (input.allocatedAmount > available) throw insufficient(round2(available - oldAmount), Number(company.fiscalYear));
         }
         await company.update({ allocatedToDepartments: round2(allocated - oldAmount + input.allocatedAmount) }, { transaction: t });
       }
@@ -388,13 +426,9 @@ export const updateBudget = (auth: AuthContext, id: string, input: BudgetUpdate)
 
 export const deleteBudget = (id: string) =>
   inTransaction(async (t) => {
-    const row = await models.Budget.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
-    if (!row) throw notFound('Budget');
-    const company = row.companyBudgetId
-      ? await models.CompanyBudget.findByPk(row.companyBudgetId, { transaction: t, lock: t.LOCK.UPDATE })
-      : null;
-    await row.destroy({ transaction: t });
-    if (company) await company.update({ allocatedToDepartments: await allocatedUnder(company.id, t) }, { transaction: t });
+    const { budget, company } = await lockForWrite(id, t);
+    await budget.destroy({ transaction: t });
+    if (company) await company.update({ allocatedToDepartments: await allocatedUnder(company, t) }, { transaction: t });
   });
 
 /* ------------------------------------------------------------------------- summary */
