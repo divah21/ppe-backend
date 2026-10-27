@@ -218,6 +218,17 @@ export const getStock = async (id: string) => {
 };
 export type StockDetailDto = Awaited<ReturnType<typeof getStock>>;
 
+// A retried or stale write carries the quantity the client saw; refuse it rather than apply it twice
+const assertExpected = (expected: number | undefined, current: number) => {
+  if (expected !== undefined && expected !== current) {
+    throw new AppError(
+      'CONFLICT',
+      `Stock for this line changed to ${current} since you opened it. Check the amount and save again.`,
+      { quantity: current }
+    );
+  }
+};
+
 const lockStock = (id: string, t: Transaction) =>
   models.Stock.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
 
@@ -250,6 +261,7 @@ export const createStock = async (input: StockCreateInput) => {
     const existing =
       (input.batchNumber ? await findLine({ ...variant, batchNumber: input.batchNumber }) : null) ??
       (await findLine(variant));
+    assertExpected(input.expectedQuantity, existing ? Number(existing.quantity) : 0);
 
     if (!existing) {
       const row = await models.Stock.create(
@@ -311,14 +323,7 @@ export const adjustStock = async (id: string, { delta, expectedQuantity }: Adjus
     const row = await lockStock(id, t);
     if (!row) throw notFound('Stock line');
     const previousQuantity = Number(row.quantity);
-    // The client sends the quantity it showed; a retried or stale request must not apply twice
-    if (expectedQuantity !== undefined && expectedQuantity !== previousQuantity) {
-      throw new AppError(
-        'CONFLICT',
-        `Stock for this line changed to ${previousQuantity} while you were adjusting it. Check the amount and save again.`,
-        { quantity: previousQuantity }
-      );
-    }
+    assertExpected(expectedQuantity, previousQuantity);
     const quantity =
       delta < 0
         ? await deductStock(id, -delta, { transaction: t })
@@ -348,6 +353,16 @@ export const bulkTopup = async ({ items }: BulkTopupInput) =>
     const found = new Map(rows.map((r) => [r.id as string, r]));
     const missing = ids.filter((id) => !found.has(id));
     if (missing.length) throw new AppError('NOT_FOUND', 'Some stock lines no longer exist', { missing });
+    const changed = items.filter(
+      (i) => i.expectedQuantity !== undefined && i.expectedQuantity !== Number(found.get(i.stockId)!.quantity)
+    );
+    if (changed.length) {
+      throw new AppError(
+        'CONFLICT',
+        'Stock changed on some lines since you opened them. Check the amounts and save again.',
+        { quantities: Object.fromEntries(changed.map((i) => [i.stockId, Number(found.get(i.stockId)!.quantity)])) }
+      );
+    }
 
     const now = new Date();
     const results = [];

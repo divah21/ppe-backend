@@ -316,6 +316,39 @@ describe('stock review fixes', () => {
     expect(await qty(glovesLine.id)).toBe(current - 1);
   });
 
+  it('receives a resubmitted receipt only once when the client sends the quantity it saw', async () => {
+    const body = { ppeItemId: gloves.id, color: 'zz-white', quantity: 4, unitPriceUSD: 1, expectedQuantity: 0 };
+    const first = await write(stores, 'post', '/api/v2/stock').send(body);
+    expect(first.status).toBe(201);
+    fx.track('Stock', first.body.data.stock.id);
+    const retry = await write(stores, 'post', '/api/v2/stock').send(body);
+    expect(retry.status).toBe(409);
+    expect(retry.body.error).toMatchObject({ code: 'CONFLICT', details: { quantity: 4 } });
+
+    const topup = await write(stores, 'post', '/api/v2/stock').send({ ...body, expectedQuantity: 4 });
+    expect(topup.status).toBe(200);
+    expect((await write(stores, 'post', '/api/v2/stock').send({ ...body, expectedQuantity: 4 })).status).toBe(409);
+    expect(await qty(first.body.data.stock.id)).toBe(8);
+  });
+
+  it('applies a bulk top-up once when the client sends the quantities it saw', async () => {
+    const before = [await qty(glovesLine.id), await qty(bootsLine.id)];
+    const body = {
+      items: [
+        { stockId: glovesLine.id, quantity: 2, expectedQuantity: before[0] },
+        { stockId: bootsLine.id, quantity: 3, expectedQuantity: before[1] },
+      ],
+    };
+    expect((await write(stores, 'post', '/api/v2/stock/bulk-topup').send(body)).status).toBe(200);
+    const retry = await write(stores, 'post', '/api/v2/stock/bulk-topup').send(body);
+    expect(retry.status).toBe(409);
+    expect(retry.body.error).toMatchObject({
+      code: 'CONFLICT',
+      details: { quantities: { [glovesLine.id]: before[0]! + 2, [bootsLine.id]: before[1]! + 3 } },
+    });
+    expect([await qty(glovesLine.id), await qty(bootsLine.id)]).toEqual([before[0]! + 2, before[1]! + 3]);
+  });
+
   it('keeps the existing levels when a receipt leaves them blank', async () => {
     const line = await fx.make('Stock', { ppeItemId: gloves.id, color: 'zz-red', quantity: 1, minLevel: 30, reorderPoint: 40, unitPriceUSD: 1 });
     const res = await write(stores, 'post', '/api/v2/stock').send({ ppeItemId: gloves.id, color: 'zz-red', quantity: 2, unitPriceUSD: 1 });
