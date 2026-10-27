@@ -70,6 +70,23 @@ describe('POST /api/v2/allocations/:id/return', () => {
     expect(await stockQty(unsizedStock.id)).toBe(before + 1);
   });
 
+  it('only restocks a sized item into stock of the same size', async () => {
+    const item = await af.item({ hasSizeVariants: true });
+    const other = await af.stock(item.id, 4, { size: 'M' });
+    const a = await af.allocation(employee.id, item.id, { size: 'L', quantity: 2 });
+    const res = await write(stores, 'post', `/api/v2/allocations/${a.id}/return`).send({ condition: 'good' });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ status: 'returned', restocked: 0 });
+    expect(await stockQty(other.id)).toBe(4);
+
+    const matching = await af.stock(item.id, 1, { size: 'L' });
+    const b = await af.allocation(employee.id, item.id, { size: 'L', quantity: 2 });
+    const ok = await write(stores, 'post', `/api/v2/allocations/${b.id}/return`).send({ condition: 'fair' });
+    expect(ok.body.data.restocked).toBe(2);
+    expect(await stockQty(matching.id)).toBe(3);
+    expect(await stockQty(other.id)).toBe(4);
+  });
+
   it('validates the body, the role, the id and the session', async () => {
     const a = await af.allocation(employee.id, unsized.id);
     const bad = await write(stores, 'post', `/api/v2/allocations/${a.id}/return`).send({ condition: 'shiny' });
@@ -118,6 +135,17 @@ describe('POST /api/v2/allocations/:id/renew', () => {
     expect(res.body.data).toMatchObject({ size: 'L', quantity: 1 });
     expect(res.body.data.daysUntilDue).toBeGreaterThan(360);
     expect(await stockQty(sizedStock.id)).toBe(0);
+  });
+
+  it('records the stock size when a sized item is renewed without one', async () => {
+    const item = await af.item({ hasSizeVariants: true });
+    const stockM = await af.stock(item.id, 2, { size: 'M' });
+    const old = await af.allocation(employee.id, item.id, { size: null });
+    const res = await write(stores, 'post', `/api/v2/allocations/${old.id}/renew`).send({});
+    expect(res.status).toBe(201);
+    fx.track('Allocation', res.body.data.id);
+    expect(res.body.data.size).toBe('M');
+    expect(await stockQty(stockM.id)).toBe(1);
   });
 
   it('refuses when there is not enough stock and changes nothing', async () => {
@@ -219,6 +247,25 @@ describe('POST /api/v2/allocations/import', () => {
       allocations: [{ firstName: 'twin', lastName, ppeItems: [{ itemName: unsized.name, issueDate: '2025-01-01', quantity: 1 }] }],
     });
     expect(res.body.data.errors[0].message).toMatch(/More than one employee/);
+  });
+
+  it('generates works numbers when the works number cell is blank', async () => {
+    const res = await write(stores, 'post', '/api/v2/allocations/import').send({
+      dryRun: true,
+      defaultSectionId: section.id,
+      allocations: ['One', 'Two'].map((firstName) => ({
+        firstName,
+        lastName: `${fx.tag}blank`,
+        worksNumber: '  ',
+        jobType: '',
+        ppeItems: [{ itemName: unsized.name, issueDate: '2025-01-01', quantity: 1 }],
+      })),
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.errors).toEqual([]);
+    const numbers = res.body.data.employeesCreated.map((e: { worksNumber: string }) => e.worksNumber);
+    expect(numbers).toHaveLength(2);
+    for (const n of numbers) expect(n).toMatch(/^EMP\d+$/);
   });
 
   it('validates the body, the role and the session', async () => {

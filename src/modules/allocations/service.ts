@@ -431,10 +431,13 @@ export const returnAllocation = async (auth: AuthContext, id: string, input: Ret
     await row.update({ status: 'returned', notes: row.notes ? `${row.notes}\n${line}` : line }, { transaction: t });
 
     if (!RESTOCK_CONDITIONS.has(input.condition)) return 0;
+    // A sized item only goes back on the shelf of its own size; putting a size L into size M stock would
+    // make the stock count wrong for both sizes
+    const sizedReturn = Boolean((row.ppeItem as Row).hasSizeVariants && row.size);
     const stock =
       (row.stockId && (await models.Stock.findByPk(row.stockId, { transaction: t }))) ||
       (await models.Stock.findOne({
-        where: { ppeItemId: row.ppeItemId },
+        where: sizedReturn ? { ppeItemId: row.ppeItemId, size: row.size } : { ppeItemId: row.ppeItemId },
         order: [[literal(`size IS NOT DISTINCT FROM ${sequelize.escape(row.size ?? null)}`), 'DESC'], ['quantity', 'DESC']],
         transaction: t,
       }));
@@ -481,7 +484,8 @@ export const renewAllocation = async (auth: AuthContext, id: string, input: Rene
         stockId: stock.id,
         issuedById: auth.userId,
         quantity,
-        size,
+        // A sized item renewed without a size takes the size of the stock row it was drawn from
+        size: item.hasSizeVariants ? (size ?? stock.size ?? null) : size,
         issueDate,
         nextRenewalDate: addMonths(issueDate, frequency),
         replacementFrequency: frequency,

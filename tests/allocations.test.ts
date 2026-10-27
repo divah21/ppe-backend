@@ -129,6 +129,7 @@ describe('GET /api/v2/allocations', () => {
       { sort: 'password' },
       { employeeId: 'nope' },
       { from: '2025-13-40' },
+      { to: '2025-02-31' },
       { from: '2025-06-01', to: '2025-01-01' },
       { pageSize: 5000 },
     ]) {

@@ -9,7 +9,11 @@ export const RESTOCK_CONDITIONS: ReadonlySet<string> = new Set(['good', 'fair'])
 const isoDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use the format YYYY-MM-DD')
-  .refine((s) => !Number.isNaN(Date.parse(`${s}T00:00:00Z`)), 'Enter a valid date');
+  .refine((s) => {
+    // Date.parse rolls 2025-02-31 over to March, so compare the parts back
+    const d = new Date(`${s}T00:00:00Z`);
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+  }, 'Enter a valid date');
 
 const scopeFilters = {
   departmentId: z.string().uuid().optional(),
@@ -75,8 +79,8 @@ export const importBody = z.object({
       z.object({
         firstName: z.string().trim().min(1, 'Enter the first name').max(100),
         lastName: z.string().trim().min(1, 'Enter the last name').max(100),
-        worksNumber: z.string().trim().max(50).optional(),
-        jobType: z.string().trim().max(50).optional(),
+        worksNumber: z.string().trim().max(50).optional().transform((v) => v || undefined),
+        jobType: z.string().trim().max(50).optional().transform((v) => v || undefined),
         ppeItems: z.array(importItem).min(1, 'Add at least one item').max(50),
       })
     )
