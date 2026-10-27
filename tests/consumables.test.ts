@@ -162,6 +162,28 @@ describe('stock', () => {
     expect((await write(hod, 'post', `${BASE}/stock/${stock.id}/adjust`).send({ type: 'add', quantity: 1, reason: 'x y z' })).status).toBe(403);
   });
 
+  it('refuses an adjustment made against a stale quantity', async () => {
+    const item = await cx.item('STALE');
+    const stock = await cx.stock(item.id, 10);
+    const adjust = (body: object) => write(stores, 'post', `${BASE}/stock/${stock.id}/adjust`).send(body);
+
+    const first = await adjust({ type: 'remove', quantity: 2.5, reason: 'Damaged', expectedQuantity: 10 });
+    expect(first.status).toBe(200);
+    expect(first.body.data.quantity).toBe(7.5);
+
+    const resubmitted = await adjust({ type: 'remove', quantity: 2.5, reason: 'Damaged', expectedQuantity: 10 });
+    expect(resubmitted.status).toBe(409);
+    expect(resubmitted.body.error.code).toBe('CONFLICT');
+    expect(resubmitted.body.error.details).toMatchObject({ quantity: 7.5 });
+
+    const staleCount = await adjust({ type: 'set', quantity: 3, reason: 'Stock take', expectedQuantity: 10 });
+    expect(staleCount.status).toBe(409);
+    expect(await cx.quantityOf(stock.id)).toBe(7.5);
+
+    expect((await adjust({ type: 'set', quantity: 3, reason: 'Stock take', expectedQuantity: 7.5 })).status).toBe(200);
+    expect(await cx.quantityOf(stock.id)).toBe(3);
+  });
+
   it('does not oversell under concurrent removals', async () => {
     const item = await cx.item('RACE');
     const stock = await cx.stock(item.id, 10);
