@@ -189,7 +189,20 @@ export type CreateRequestInput = z.infer<typeof createRequestBody>;
 const lineQuantities = z.array(z.object({ id: uuid, quantity: amount('nonnegative') })).max(50).optional();
 
 export const approveRequestBody = z.object({ comments: optionalText(1000), items: lineQuantities });
-export const fulfilRequestBody = z.object({ comments: optionalText(1000), items: lineQuantities });
+export const fulfilRequestBody = z.object({
+  comments: optionalText(1000),
+  items: z
+    .array(
+      z.object({
+        id: uuid,
+        quantity: amount('nonnegative'),
+        // What the client saw already issued; a mismatch means someone else issued meanwhile
+        issued: amount('nonnegative').optional(),
+      })
+    )
+    .max(50)
+    .optional(),
+});
 
 export const reasonBody = z.object({
   comments: z.string().trim().min(3, 'Give a reason').max(1000),

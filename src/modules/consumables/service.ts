@@ -162,8 +162,12 @@ export const bulkImportItems = ({ items, updateExisting }: BulkItemsInput) =>
 
       if (it.quantity !== null && it.quantity > 0) {
         const stock = await ensureStockRow(item, { unitPrice: it.unitPrice, unitPriceUSD: it.unitPriceUSD }, t);
+        // As in v1, prices on the sheet also reprice the stock on hand
+        const prices = Object.fromEntries(
+          Object.entries({ unitPrice: it.unitPrice, unitPriceUSD: it.unitPriceUSD }).filter(([, v]) => v !== null && v !== undefined)
+        );
+        await Stock.update({ ...prices, lastRestocked: new Date() }, { where: { id: stock.id }, transaction: t });
         await setStockQuantity(stock, toCents(it.quantity), t);
-        await Stock.update({ lastRestocked: new Date() }, { where: { id: stock.id }, transaction: t });
         result.stockSet++;
       }
     }
@@ -284,7 +288,8 @@ const ensureStockRow = async (
 /** Sets an absolute quantity on a locked stock row. */
 const setStockQuantity = async (stock: Row, targetCents: number, t: Transaction) => {
   const delta = targetCents - toCents(stock.quantity);
-  if (delta !== 0 && (await changeConsumableStock(stock.id, delta, t)) === null) {
+  // Applied even when the quantity is unchanged, so the stored values follow the current price
+  if ((await changeConsumableStock(stock.id, delta, t)) === null) {
     throw new AppError('INSUFFICIENT_STOCK', 'The stock level changed while saving. Try again.');
   }
 };

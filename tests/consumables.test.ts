@@ -111,6 +111,15 @@ describe('items', () => {
     const stock = await stores.get(`${BASE}/stock`).query({ q: `${fx.tag}-B1` });
     expect(stock.body.data[0]).toMatchObject({ quantity: 3, totalValueUSD: 6 });
 
+    // A new price on the sheet reprices the stock on hand, even when the quantity is unchanged
+    const repriced = await write(stores, 'post', `${BASE}/items/bulk`).send({
+      updateExisting: true,
+      items: [{ ...items[0], quantity: 3, unitPriceUSD: 4.25 }],
+    });
+    expect(repriced.status).toBe(200);
+    const after = await stores.get(`${BASE}/stock`).query({ q: `${fx.tag}-B1` });
+    expect(after.body.data[0]).toMatchObject({ quantity: 3, unitPriceUSD: 4.25, totalValueUSD: 12.75 });
+
     const dup = await write(stores, 'post', `${BASE}/items/bulk`).send({ items: [items[1], items[1]] });
     expect(dup.status).toBe(422);
   });

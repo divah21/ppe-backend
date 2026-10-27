@@ -323,6 +323,25 @@ describe('issuing', () => {
     expect(await cx.quantityOf(glovesStock.id)).toBe(before - 2);
   });
 
+  it('applies a repeated partial issue once when the client says what it saw', async () => {
+    const before = await cx.quantityOf(glovesStock.id);
+    const req = await approved([{ consumableItemId: gloves.id, quantity: 4 }]);
+    const line = lineFor(req, gloves.id).id;
+    const body = { items: [{ id: line, quantity: 1, issued: 0 }] };
+    const results = await Promise.all([
+      write(stores, 'post', `${R}/${req.id}/fulfil`).send(body),
+      write(stores, 'post', `${R}/${req.id}/fulfil`).send(body),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(results.find((r) => r.status === 409)!.body.error.code).toBe('CONFLICT');
+    expect(await cx.quantityOf(glovesStock.id)).toBe(before - 1);
+
+    const next = await write(stores, 'post', `${R}/${req.id}/fulfil`).send({ items: [{ id: line, quantity: 3, issued: 1 }] });
+    expect(next.status).toBe(200);
+    expect(next.body.data.status).toBe('fulfilled');
+    expect(await cx.quantityOf(glovesStock.id)).toBe(before - 4);
+  });
+
   it('lets stores turn a request down before issuing', async () => {
     const req = await approved([{ consumableItemId: gloves.id, quantity: 1 }]);
     expect((await write(stores, 'post', `${R}/${req.id}/stores-reject`).send({ comments: '' })).status).toBe(422);

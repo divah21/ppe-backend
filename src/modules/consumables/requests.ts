@@ -2,7 +2,7 @@ import { Op, QueryTypes, literal, type Transaction, type WhereOptions } from 'se
 import type { z } from 'zod';
 import { ROLES, type AuthContext } from '../../core/auth';
 import { inTransaction, models, sequelize, type Row } from '../../core/db';
-import { AppError, forbidden, notFound } from '../../core/errors';
+import { AppError, conflict, forbidden, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { allowedActions, isAdmin, orgScope, type RequestAction } from './policy';
 import type { ApproveInput, CreateRequestInput, FulfilInput, RequestStatus, requestListQuery } from './schemas';
@@ -354,6 +354,13 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
   inTransaction(async (t) => {
     const { row, lines } = await lockForAction(auth, id, 'fulfil', t);
     const given = lineQuantities(lines, input.items);
+    // A retried or duplicated issue (or a second clerk) must not issue the same quantity twice
+    for (const l of input.items ?? []) {
+      const line = lines.find((x) => x.id === l.id)!;
+      if (l.issued !== undefined && toCents(l.issued) !== toCents(line.quantityFulfilled)) {
+        throw conflict('Items on this request were issued while you were working. Check the request and try again.');
+      }
+    }
 
     const plan = lines.map((line) => {
       const approved = toCents(line.quantityApproved ?? line.quantityRequested);
