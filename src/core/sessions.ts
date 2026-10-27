@@ -19,6 +19,8 @@ export const ensureSessionTable = () =>
       id UUID PRIMARY KEY,
       user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       secret_hash CHAR(64) NOT NULL,
+      previous_hash CHAR(64),
+      rotated_at TIMESTAMPTZ,
       expires_at TIMESTAMPTZ NOT NULL,
       revoked_at TIMESTAMPTZ,
       user_agent TEXT,
@@ -54,24 +56,40 @@ export const createSession = async (userId: string, meta: SessionMeta) => {
   return { sessionId: id, refreshToken: `${id}.${secret}` };
 };
 
-type RotateResult = { userId: string; sessionId: string; refreshToken: string } | null;
+// Two tabs refreshing at once both send the same cookie; the loser is not a thief
+const RACE_GRACE_SECONDS = 30;
+
+type RotateResult =
+  | { kind: 'rotated'; userId: string; sessionId: string; refreshToken: string }
+  /** Lost a concurrent refresh; the winner's response already updated the shared cookie jar */
+  | { kind: 'raced'; userId: string; sessionId: string }
+  | null;
 
 export const rotateSession = async (refreshToken: string): Promise<RotateResult> => {
   const [id, secret] = refreshToken.split('.');
   if (!id || !secret || !/^[0-9a-f-]{36}$/i.test(id)) return null;
 
   const next = newSecret();
-  // Atomic compare-and-swap: only one concurrent refresh with the current secret can win
-  const rows = await sequelize.query<{ user_id: string }>(
-    `UPDATE auth_sessions SET secret_hash = :next, last_used_at = NOW()
+  const current = hash(secret);
+  // Atomic compare-and-swap: only one refresh with the current secret can win
+  const [rotated] = await sequelize.query<{ user_id: string }>(
+    `UPDATE auth_sessions
+     SET previous_hash = secret_hash, secret_hash = :next, rotated_at = NOW(), last_used_at = NOW()
      WHERE id = :id AND secret_hash = :current AND revoked_at IS NULL AND expires_at > NOW()
      RETURNING user_id`,
-    { replacements: { id, next: hash(next), current: hash(secret) }, type: QueryTypes.SELECT }
+    { replacements: { id, next: hash(next), current }, type: QueryTypes.SELECT }
   );
-  const row = rows[0];
-  if (row) return { userId: row.user_id, sessionId: id, refreshToken: `${id}.${next}` };
+  if (rotated) return { kind: 'rotated', userId: rotated.user_id, sessionId: id, refreshToken: `${id}.${next}` };
 
-  // Wrong secret for a session that exists: an old token was replayed, so end the session
+  const [raced] = await sequelize.query<{ user_id: string }>(
+    `SELECT user_id FROM auth_sessions
+     WHERE id = :id AND previous_hash = :current AND rotated_at > NOW() - make_interval(secs => :grace)
+       AND revoked_at IS NULL AND expires_at > NOW()`,
+    { replacements: { id, current, grace: RACE_GRACE_SECONDS }, type: QueryTypes.SELECT }
+  );
+  if (raced) return { kind: 'raced', userId: raced.user_id, sessionId: id };
+
+  // An older secret for a live session: the token was copied and replayed, so end the session
   await revokeSession(id);
   return null;
 };

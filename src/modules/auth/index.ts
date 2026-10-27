@@ -67,7 +67,9 @@ router.post(
       clearAuthCookies(res);
       throw new AppError('UNAUTHENTICATED', 'Your session has ended. Please sign in again.');
     }
-    setAuthCookies(res, signAccessToken(rotated.userId, rotated.sessionId), rotated.refreshToken);
+    if (rotated.kind === 'rotated') {
+      setAuthCookies(res, signAccessToken(rotated.userId, rotated.sessionId), rotated.refreshToken);
+    }
     return ok(res, { refreshed: true });
   })
 );
@@ -102,7 +104,6 @@ router.post(
     await user.update({ passwordHash: newPassword, mustChangePassword: false });
     // Other devices must sign in again with the new password
     await revokeUserSessions(auth.userId, auth.sessionId);
-    await audit(req, 'UPDATE', 'User', auth.userId, { action: 'password_change', via: 'v2' });
     return ok(res, toMe((await loadUser(auth.userId))!));
   })
 );

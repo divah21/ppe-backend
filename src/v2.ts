@@ -1,23 +1,14 @@
 import cookieParser from 'cookie-parser';
-import { Router, type RequestHandler } from 'express';
+import { Router } from 'express';
 import { readdirSync } from 'node:fs';
 import path from 'node:path';
-import { config } from './core/config';
-import { AppError, errorHandler, notFoundHandler } from './core/errors';
+import { configError } from './core/config';
+import { errorHandler, notFoundHandler } from './core/errors';
 import type { V2Module } from './core/module';
 import { ensureSessionTable } from './core/sessions';
 
-const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-
-/**
- * Cookie auth is only safe if other sites cannot drive it. SameSite=Lax covers most of that;
- * this also rejects state-changing requests whose Origin is not one of ours.
- */
-const sameOriginWrites: RequestHandler = (req, _res, next) => {
-  const origin = req.get('origin');
-  if (SAFE_METHODS.has(req.method) || !origin || config.allowedOrigins.includes(origin)) return next();
-  next(new AppError('FORBIDDEN', 'Cross-site request blocked'));
-};
+// Cross-site requests never reach this router: the app-level CORS allowlist rejects any
+// Origin it does not know (403), and the session cookies are SameSite=Lax.
 
 const loadModules = (): V2Module[] => {
   const dir = path.join(__dirname, 'modules');
@@ -34,8 +25,13 @@ const loadModules = (): V2Module[] => {
 
 export const createV2Router = () => {
   const router = Router();
+  if (configError) {
+    router.use((_req, res) => {
+      res.status(503).json({ error: { code: 'UNAVAILABLE', message: 'This service is not configured yet' } });
+    });
+    return router;
+  }
   router.use(cookieParser());
-  router.use(sameOriginWrites);
   router.get('/health', (_req, res) => res.json({ data: { status: 'ok' } }));
   for (const mod of loadModules()) router.use(mod.path, mod.router);
   router.use(notFoundHandler);
@@ -44,4 +40,6 @@ export const createV2Router = () => {
 };
 
 /** Schema the v2 API needs before it serves traffic. */
-export const prepareV2 = () => ensureSessionTable();
+export const prepareV2 = async () => {
+  if (!configError) await ensureSessionTable();
+};

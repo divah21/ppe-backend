@@ -58,6 +58,11 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
   if (err instanceof AppError) {
     return res.status(err.status).json({ error: { code: err.code, message: err.message, details: err.details } });
   }
+  if (err?.name === 'SequelizeValidationError') {
+    const fieldErrors: Record<string, string[]> = {};
+    for (const e of err.errors ?? []) (fieldErrors[e.path] ??= []).push(e.message);
+    return res.status(422).json({ error: { code: 'VALIDATION_FAILED', message: 'Some fields are invalid', details: { fieldErrors } } });
+  }
   if (err?.name === 'SequelizeUniqueConstraintError') {
     return res.status(409).json({ error: { code: 'CONFLICT', message: 'A record with these details already exists' } });
   }

@@ -49,24 +49,24 @@ describe('v2 auth', () => {
   });
 
   it('rotates the refresh token and revokes the session when an old one is replayed', async () => {
-    const agent = await signIn(admin.username);
-    const first = await write(agent, 'post', '/api/v2/auth/refresh');
-    expect(first.status).toBe(200);
-    const oldToken = cookieNamed(first, 'ppe_rt');
-    expect(oldToken).toBeDefined();
-
-    const second = await write(agent, 'post', '/api/v2/auth/refresh');
-    expect(second.status).toBe(200);
-
-    const replay = await request(app)
-      .post('/api/v2/auth/refresh')
+    const refresh = (cookie: string) =>
+      request(app).post('/api/v2/auth/refresh').set('Origin', ORIGIN).set('Cookie', cookie);
+    const login = await request(app)
+      .post('/api/v2/auth/login')
       .set('Origin', ORIGIN)
-      .set('Cookie', oldToken!.split(';')[0]!);
-    expect(replay.status).toBe(401);
+      .send({ username: admin.username, password: PASSWORD });
+    const stolen = cookieNamed(login, 'ppe_rt')!.split(';')[0]!;
 
-    // The thief's replay ended the session for the real holder too
-    const after = await write(agent, 'post', '/api/v2/auth/refresh');
-    expect(after.status).toBe(401);
+    const first = await refresh(stolen);
+    expect(first.status).toBe(200);
+    const second = await refresh(cookieNamed(first, 'ppe_rt')!.split(';')[0]!);
+    expect(second.status).toBe(200);
+    const current = cookieNamed(second, 'ppe_rt')!.split(';')[0]!;
+
+    // Two rotations old is outside the concurrent-refresh grace, so it can only be a copy
+    expect((await refresh(stolen)).status).toBe(401);
+    // The replay ended the session for the real holder too
+    expect((await refresh(current)).status).toBe(401);
   });
 
   it('signs out and ends the session', async () => {
@@ -109,5 +109,48 @@ describe('v2 auth', () => {
     const res = await request(app).get('/api/v2/does-not-exist');
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe('NOT_FOUND');
+  });
+});
+
+describe('v2 auth hardening', () => {
+  it('ends access immediately on logout, not at token expiry', async () => {
+    const login = await request(app)
+      .post('/api/v2/auth/login')
+      .set('Origin', ORIGIN)
+      .send({ username: admin.username, password: PASSWORD });
+    const at = cookieNamed(login, 'ppe_at')!.split(';')[0]!;
+    const rt = cookieNamed(login, 'ppe_rt')!.split(';')[0]!;
+    expect((await request(app).get('/api/v2/auth/me').set('Cookie', at)).status).toBe(200);
+    await request(app).post('/api/v2/auth/logout').set('Origin', ORIGIN).set('Cookie', rt);
+    expect((await request(app).get('/api/v2/auth/me').set('Cookie', at)).status).toBe(401);
+  });
+
+  it('lets two concurrent refreshes with the same cookie both succeed', async () => {
+    const login = await request(app)
+      .post('/api/v2/auth/login')
+      .set('Origin', ORIGIN)
+      .send({ username: admin.username, password: PASSWORD });
+    const rt = cookieNamed(login, 'ppe_rt')!.split(';')[0]!;
+    const [a, b] = await Promise.all([
+      request(app).post('/api/v2/auth/refresh').set('Origin', ORIGIN).set('Cookie', rt),
+      request(app).post('/api/v2/auth/refresh').set('Origin', ORIGIN).set('Cookie', rt),
+    ]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    const winner = [a, b].find((r) => cookieNamed(r, 'ppe_rt'))!;
+    const fresh = cookieNamed(winner, 'ppe_rt')!.split(';')[0]!;
+    expect((await request(app).post('/api/v2/auth/refresh').set('Origin', ORIGIN).set('Cookie', fresh)).status).toBe(200);
+  });
+
+  it('keeps passwords out of the audit log', async () => {
+    const user = await fx.user('stores');
+    const agent = await signIn(user.username);
+    await write(agent, 'post', '/api/v2/auth/change-password').send({
+      currentPassword: PASSWORD,
+      newPassword: 'Another-pass-7',
+    });
+    const { models } = await import('../src/core/db');
+    const rows = await models.AuditLog.findAll({ where: { userId: user.id } });
+    expect(rows.length).toBeGreaterThan(0);
+    expect(JSON.stringify(rows.map((r) => r.toJSON()))).not.toMatch(/Another-pass-7|Test-pass-123/);
   });
 });

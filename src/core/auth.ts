@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { config } from './config';
 import { models, type Row } from './db';
 import { AppError, forbidden } from './errors';
+import { isSessionActive } from './sessions';
 
 export const ROLES = {
   ADMIN: 'admin',
@@ -121,8 +122,9 @@ const attachAuth = async (req: Request) => {
   const claims = token ? verifyAccessToken(token) : null;
   if (!claims) throw new AppError('UNAUTHENTICATED', 'Please sign in');
 
-  const user = await loadUser(claims.sub);
-  if (!user || !user.isActive) throw new AppError('UNAUTHENTICATED', 'Please sign in');
+  // Logout, password change and theft revocation end access immediately, not at token expiry
+  const [user, live] = await Promise.all([loadUser(claims.sub), isSessionActive(claims.sid)]);
+  if (!user || !user.isActive || !live) throw new AppError('UNAUTHENTICATED', 'Please sign in');
 
   const path = `${req.baseUrl}${req.path}`;
   if (user.mustChangePassword && !PASSWORD_CHANGE_PATHS.some((p) => path.endsWith(p))) {

@@ -9,6 +9,8 @@ module.exports = {
         id UUID PRIMARY KEY,
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         secret_hash CHAR(64) NOT NULL,
+        previous_hash CHAR(64),
+        rotated_at TIMESTAMPTZ,
         expires_at TIMESTAMPTZ NOT NULL,
         revoked_at TIMESTAMPTZ,
         user_agent TEXT,

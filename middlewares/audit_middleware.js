@@ -197,16 +197,18 @@ const autoAuditLog = () => {
 const sanitizeBody = (body) => {
   if (!body) return null;
   
-  const sanitized = { ...body };
-  const sensitiveFields = ['password', 'passwordHash', 'token', 'secret', 'apiKey'];
-  
-  sensitiveFields.forEach(field => {
-    if (sanitized[field]) {
-      sanitized[field] = '[REDACTED]';
-    }
-  });
-  
-  return sanitized;
+  return redact(body);
+};
+
+// Any key that looks like a credential, at any depth (currentPassword, newPassword, refreshToken...)
+const SENSITIVE_KEY = /pass(word)?|token|secret|api[-_]?key|otp/i;
+
+const redact = (value) => {
+  if (Array.isArray(value)) return value.map(redact);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, v]) => [key, SENSITIVE_KEY.test(key) ? '[REDACTED]' : redact(v)])
+  );
 };
 
 module.exports = {
