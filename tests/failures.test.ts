@@ -252,7 +252,9 @@ describe('replacement', () => {
 
     const created = await models.Allocation.findByPk(res.body.data.allocationId);
     expect(created).toMatchObject({ allocationType: 'replacement', status: 'active', employeeId: a1.id, ppeItemId: item.id });
-    expect(Number(created!.totalCost)).toBe(12.5);
+    // Priced in USD (unitPriceUSD), not the local-currency unitCost.
+    expect(Number(created!.unitCost)).toBe(4.25);
+    expect(Number(created!.totalCost)).toBe(4.25);
     expect(created!.notes).toMatch(/Swapped at the store/);
     expect((await models.Allocation.findByPk(issued.id))!.status).toBe('replaced');
 
@@ -284,12 +286,16 @@ describe('replacement', () => {
     fx.track('Allocation', r1.body.data.allocationId);
     expect((await models.Allocation.findByPk(r1.body.data.allocationId))!.size).toBe('L');
 
-    const unsized = await ff.stock(item.id, 2, { size: null });
+    const unsized = await ff.stock(item.id, 2, { size: null, unitPriceUSD: null });
     const plain = await approved();
     const r2 = await write(stores, 'post', `${URL}/${plain}/replace`).send({ stockId: unsized.id, size: '42' });
     expect(r2.status).toBe(200);
     fx.track('Allocation', r2.body.data.allocationId);
-    expect((await models.Allocation.findByPk(r2.body.data.allocationId))!.size).toBe('42');
+    const unpriced = (await models.Allocation.findByPk(r2.body.data.allocationId))!;
+    expect(unpriced.size).toBe('42');
+    // No USD price: leave cost null so spend falls back to the average price instead of $0.
+    expect(unpriced.unitCost).toBeNull();
+    expect(unpriced.totalCost).toBeNull();
   });
 
   it('applies once when two replacements race', async () => {
