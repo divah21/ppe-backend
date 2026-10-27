@@ -4,7 +4,7 @@ import { ok, paged, pageWindow, parse, route } from '../../core/http';
 import { defineModule } from '../../core/module';
 import { backupRunning, createBackup, listBackups, resolveBackup } from './backups';
 import { backupListQuery, backupParam, categoryParam } from './schemas';
-import { getCategory, listSettings, updateCategory } from './service';
+import { getCategory, listSettings, ppeItemOptions, updateCategory } from './service';
 
 const router = Router();
 router.use(authenticate, requireRole(ROLES.ADMIN));
@@ -54,6 +54,11 @@ router.get(
     res.setHeader('Cache-Control', 'no-store');
     await new Promise<void>((resolve, reject) => res.download(file, filename, (err) => (err && !res.headersSent ? reject(err) : resolve())));
   })
+);
+
+router.get(
+  '/allocation/item-options',
+  route(async (_req, res) => ok(res, await ppeItemOptions()))
 );
 
 router.get(

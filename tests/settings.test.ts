@@ -122,6 +122,10 @@ describe('PUT /api/v2/settings/:category', () => {
     expect(missing.status).toBe(422);
     expect(missing.body.error.details.fieldErrors.allowedAdditionalItemIds).toBeDefined();
 
+    const options = await adminAgent.get('/api/v2/settings/allocation/item-options');
+    expect(options.body.data).toContainEqual({ id: ppeItem.id, name: `${fx.tag}-gloves` });
+    expect((await sheqAgent.get('/api/v2/settings/allocation/item-options')).status).toBe(403);
+
     const ok = await write(adminAgent, 'put', '/api/v2/settings/allocation').send({ allowedAdditionalItemIds: [ppeItem.id] });
     expect(ok.status).toBe(200);
     expect(ok.body.data.settings.find((s: { key: string }) => s.key === 'allowedAdditionalItemIds').value).toEqual([ppeItem.id]);

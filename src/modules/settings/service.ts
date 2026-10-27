@@ -130,3 +130,13 @@ export const updateCategory = async (req: Request, key: string, body: unknown, u
   }
   return getCategory(key);
 };
+
+/** Active PPE items for the additional-items picker. */
+export const ppeItemOptions = async () => {
+  const rows = await models.PPEItem.findAll({
+    where: { isActive: { [Op.ne]: false } },
+    attributes: ['id', 'name', 'itemCode'],
+    order: [['name', 'ASC']],
+  });
+  return rows.map((r) => ({ id: r.id as string, name: r.itemCode ? `${r.name} (${r.itemCode})` : (r.name as string) }));
+};
