@@ -44,7 +44,14 @@ describe('items', () => {
       maxLevel: 10,
     });
     expect(created.status).toBe(201);
-    expect(created.body.data).toMatchObject({ category: 'CONS', unit: 'EA', unitPriceUSD: 4.25, isActive: true, inStock: 0 });
+    expect(created.body.data).toMatchObject({
+      category: 'CONS',
+      unit: 'EA',
+      unitPriceUSD: 4.25,
+      isActive: true,
+      inStock: 0,
+      stockAccount: '710019',
+    });
 
     const updated = await write(stores, 'put', `${BASE}/items/${created.body.data.id}`).send({
       description: 'Nitrile gloves (100)',
@@ -170,6 +177,12 @@ describe('stock', () => {
     const codes = res.body.data.map((s: { productCode: string }) => s.productCode);
     expect(codes).toContain(`${fx.tag}-LOW`);
     expect(codes).not.toContain(`${fx.tag}-HIGH`);
+
+    for (const sort of ['productCode', 'quantity', 'totalValueUSD', 'lastRestocked']) {
+      expect((await sectionRep.get(`${BASE}/stock`).query({ q: fx.tag, sort, order: 'asc' })).status).toBe(200);
+    }
+    const byQty = await sectionRep.get(`${BASE}/stock`).query({ q: fx.tag, sort: 'quantity', order: 'desc', lowStock: 'false' });
+    expect(byQty.body.data[0].productCode).toBe(`${fx.tag}-HIGH`);
 
     const summary = await sectionRep.get(`${BASE}/stock/summary`);
     expect(summary.body.data).toMatchObject({ totalItems: expect.any(Number), lowStockCount: expect.any(Number) });

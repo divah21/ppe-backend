@@ -174,6 +174,12 @@ describe('scoping', () => {
     expect(list.status).toBe(200);
     expect(list.body.meta).toMatchObject({ page: 1, pageSize: 1 });
     expect(list.body.data[0].allowedActions).toEqual(['approve', 'reject']);
+    for (const sort of ['requestNumber', 'requestDate', 'status', 'priority', 'totalValueUSD']) {
+      expect((await hod.get(R).query({ sort, order: 'asc', q: 'CR-' })).status).toBe(200);
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const dated = await sectionRep.get(R).query({ from: today, to: today });
+    expect(dated.body.data.map((r: { id: string }) => r.id)).toContain(id);
     expect((await hod.get(R).query({ status: 'done' })).status).toBe(422);
     expect((await hod.get(R).query({ from: '31/01/2026' })).status).toBe(422);
   });
@@ -266,6 +272,9 @@ describe('issuing', () => {
 
     const issues = await deptRep.get(`${BASE}/allocations`).query({ consumableRequestId: req.id });
     expect(issues.body.data).toHaveLength(1);
+    const searched = await stores.get(`${BASE}/allocations`).query({ q: `${fx.tag}-GLOVES`, sort: 'quantity' });
+    expect(searched.status).toBe(200);
+    expect(searched.body.data.length).toBeGreaterThanOrEqual(1);
     const hidden = await hodOther.get(`${BASE}/allocations`).query({ consumableRequestId: req.id });
     expect(hidden.body.data).toEqual([]);
   });
