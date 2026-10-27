@@ -177,7 +177,8 @@ describe('scoping', () => {
     for (const sort of ['requestNumber', 'requestDate', 'status', 'priority', 'totalValueUSD']) {
       expect((await hod.get(R).query({ sort, order: 'asc', q: 'CR-' })).status).toBe(200);
     }
-    const today = new Date().toISOString().slice(0, 10);
+    // The filter works in server-local days, so 'today' must be local too, not UTC
+    const today = new Date().toLocaleDateString('en-CA');
     const dated = await sectionRep.get(R).query({ from: today, to: today });
     expect(dated.body.data.map((r: { id: string }) => r.id)).toContain(id);
     expect((await hod.get(R).query({ status: 'done' })).status).toBe(422);
