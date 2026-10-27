@@ -44,6 +44,9 @@ const { accessLogger, autoAuditLog } = require('./middlewares/audit_middleware')
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+// Loopback by default: nginx is the only client. Reachable directly, a caller could
+// set X-Forwarded-For (trusted below) and dodge the per-IP login limits.
+const HOST = process.env.HOST || '127.0.0.1';
 
 // ============================================================
 // MIDDLEWARE
@@ -160,10 +163,10 @@ app.get('/health', async (req, res) => {
       timestamp: new Date().toISOString()
     });
   } catch (error) {
+    console.error('Health check failed:', error.message);
     res.status(503).json({
       status: 'unhealthy',
-      database: 'disconnected',
-      error: error.message
+      database: 'disconnected'
     });
   }
 });
@@ -202,7 +205,7 @@ app.use(`${API_PREFIX}/backup`, backupRoutes);
 app.use(`${API_PREFIX}/consumables`, consumableRoutes);
 
 // v2 API (TypeScript, cookie sessions). Has its own 404 and error envelope.
-const { createV2Router, prepareV2 } = require('./src/v2');
+const { createV2Router, prepareV2, startV2Maintenance } = require('./src/v2');
 app.use('/api/v2', createV2Router());
 
 // 404 Handler
@@ -220,6 +223,7 @@ const startServer = async () => {
     // Test database connection
     await testConnection();
     await prepareV2();
+    startV2Maintenance();
 
     // Initialize scheduled backup at 6:00 PM
     try {
@@ -255,20 +259,50 @@ const startServer = async () => {
     }
     
     // Start HTTP server (Nginx handles SSL termination)
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, HOST, () => {
       console.log('\n🚀 ========================================');
       console.log(`   PPE Management System API (HTTP)`);
       console.log(`   Nginx handles SSL termination`);
       console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`   Server running on port ${PORT}`);
-      console.log(`   API Base: http://localhost:${PORT}${API_PREFIX}`);
+      console.log(`   Server listening on ${HOST}:${PORT}`);
+      console.log(`   API Base: http://${HOST}:${PORT}${API_PREFIX}`);
       console.log('========================================\n');
     });
+    registerShutdown(server);
   } catch (error) {
     console.error('❌ Failed to start server:', error);
     process.exit(1);
   }
 };
+
+// PM2 on Windows cannot deliver signals; with shutdown_with_message it sends 'shutdown'
+// instead. Finish in-flight requests and stop the schedulers before exiting.
+const registerShutdown = (server) => {
+  let stopping = false;
+  const shutdown = (reason) => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`Shutting down (${reason})...`);
+    setTimeout(() => process.exit(1), 8000).unref();
+    try {
+      backupHelper.stopScheduledBackup();
+      require('node-cron').getTasks().forEach((task) => task.stop());
+    } catch (error) {
+      console.error('Could not stop schedulers:', error.message);
+    }
+    server.close(async () => {
+      await sequelize.close().catch(() => undefined);
+      process.exit(0);
+    });
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('message', (msg) => msg === 'shutdown' && shutdown('message'));
+};
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection:', reason);
+});
 
 // Tests import the app without opening a port or starting schedulers
 if (process.env.NODE_ENV !== 'test') startServer();

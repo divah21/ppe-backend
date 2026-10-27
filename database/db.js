@@ -15,6 +15,8 @@ const sequelize = new Sequelize(
     logging: dbConfig.logging,
     pool: dbConfig.pool,
     dialectOptions: dbConfig.dialectOptions || {},
+    // Sessions default to UTC; date strings and date_trunc/to_char must use mine-local midnight
+    timezone: process.env.DB_TIMEZONE || 'Africa/Harare',
     define: {
       timestamps: true,
       underscored: true,
