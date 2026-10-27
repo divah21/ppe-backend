@@ -11,7 +11,8 @@ const {
   sendRequestApprovedToStores, 
   sendPPEReadyForCollection,
   sendRequestRejectedEmail,
-  sendTemplatedEmail
+  sendTemplatedEmail,
+  FRONTEND_URL
 } = require('../../helpers/email_helper');
 
 // Helper function to include User with Employee name data
@@ -1105,7 +1106,7 @@ router.put('/:id/fulfill', authenticate, authorize(['stores', 'admin']), auditLo
           <p style="color: #374151; line-height: 1.6;">Allocated items are available at Stores. We will notify you when pending items become available.</p>
         `;
 
-        await sendTemplatedEmail(request.targetEmployee?.email || request.employee?.email, `PPE Partially Fulfilled - #${request.requestNumber || request.id}`, 'PPE Partially Fulfilled', content, `${process.env.FRONTEND_URL || 'https://ppesystem.earekasystems.biz'}/stores/allocations/${request.id}`, 'View Request');
+        await sendTemplatedEmail(request.targetEmployee?.email || request.employee?.email, `PPE Partially Fulfilled - #${request.requestNumber || request.id}`, 'PPE Partially Fulfilled', content, `${FRONTEND_URL}/stores/allocations/${request.id}`, 'View Request');
       }
     } catch (emailErr) {
       console.error('Error sending fulfillment emails from requests controller:', emailErr);

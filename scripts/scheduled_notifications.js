@@ -31,7 +31,8 @@ const {
 // Import email helper
 const {
   sendLowStockAlert,
-  sendTemplatedEmail
+  sendTemplatedEmail,
+  FRONTEND_URL
 } = require('../helpers/email_helper');
 
 const transporter = require('../helpers/mailer_transport');
@@ -40,7 +41,6 @@ const emailLogger = require('../helpers/email_logger');
 // Configuration
 const RENEWAL_WARNING_DAYS = 10; // Send reminders for renewals due in 10 days or less
 const CRITICAL_STOCK_THRESHOLD = 0.3; // 30% of min level = critical
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://ppesystem.earekasystems.biz';
 const SYSTEM_NAME = 'PPE Management System';
 const BRAND_COLOR = '#2563EB';
 const BRAND_SECONDARY = '#1E40AF';
