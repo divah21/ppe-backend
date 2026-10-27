@@ -1,6 +1,8 @@
 import request from 'supertest';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { app } from './helpers';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { spendByDepartment } from '../src/modules/budgets/spend';
+import { allocate, pricedItem } from './finance.fixtures';
+import { app, createFixtures } from './helpers';
 
 /* eslint-disable-next-line @typescript-eslint/no-require-imports */
 const { errorHandler } = require('../middlewares/error_handler');
@@ -42,5 +44,22 @@ describe('v1 error handler', () => {
     errorHandler(Object.assign(new Error('Unexpected token } in JSON'), { status: 400 }), {}, res, () => undefined);
     expect(res.statusCode).toBe(400);
     expect(res.body).toMatchObject({ message: 'Unexpected token } in JSON' });
+  });
+});
+
+describe('database time zone', () => {
+  const fx = createFixtures();
+  afterAll(() => fx.cleanup());
+
+  it('buckets a 00:30 CAT issue on 1 January into the new year', async () => {
+    const { department, section } = await fx.org();
+    const employee = await fx.employee(section.id);
+    const { item } = await pricedItem(fx, { price: 10, quantity: 5 });
+    await allocate(fx, { employeeId: employee.id, ppeItemId: item.id, quantity: 1, issueDate: new Date('2026-01-01T00:30:00+02:00') });
+
+    const newYear = await spendByDepartment({ start: '2026-01-01', end: '2027-01-01' }, department.id);
+    const oldYear = await spendByDepartment({ start: '2025-01-01', end: '2026-01-01' }, department.id);
+    expect(newYear.get(department.id)?.allocationCount).toBe(1);
+    expect(oldYear.get(department.id)).toBeUndefined();
   });
 });
