@@ -345,10 +345,10 @@ export const renewalsDue = async (auth: AuthContext, q: RenewalsQuery) => {
   const { limit, offset } = pageWindow(q);
 
   const [groups, [summary]] = await Promise.all([
-    sequelize.query<{ employee_id: string; earliest_due: Date; item_count: number; overdue_count: number }>(
+    sequelize.query<{ employee_id: string; earliest_due: Date; item_count: number; overdue_count: number; ids: string[] }>(
       `${cte}
        SELECT w.employee_id, MIN(w.due_date) AS earliest_due, COUNT(*)::int AS item_count,
-              COUNT(*) FILTER (WHERE w.due_date < now())::int AS overdue_count
+              COUNT(*) FILTER (WHERE w.due_date < now())::int AS overdue_count, array_agg(w.id) AS ids
        FROM win w JOIN employees e ON e.id = w.employee_id
        GROUP BY w.employee_id, e."lastName", e."firstName"
        ORDER BY ${sortSql} ${dir}, w.employee_id
@@ -365,15 +365,7 @@ export const renewalsDue = async (auth: AuthContext, q: RenewalsQuery) => {
     ),
   ]);
 
-  const employeeIds = groups.map((g) => g.employee_id);
-  const ids = employeeIds.length
-    ? (
-        await sequelize.query<{ id: string }>(`${cte} SELECT id FROM win WHERE employee_id IN (:employeeIds)`, {
-          replacements: { ...replacements, employeeIds },
-          type: QueryTypes.SELECT,
-        })
-      ).map((r) => r.id)
-    : [];
+  const ids = groups.flatMap((g) => g.ids);
   const rows = ids.length
     ? await models.Allocation.findAll({
         where: { id: ids },
