@@ -268,6 +268,9 @@ const startServer = async () => {
       console.log(`   API Base: http://${HOST}:${PORT}${API_PREFIX}`);
       console.log('========================================\n');
     });
+    // Outlive nginx's upstream keepalive (60s), or nginx reuses a socket Node already closed and returns 502
+    server.keepAliveTimeout = 65000;
+    server.headersTimeout = 66000;
     registerShutdown(server);
   } catch (error) {
     console.error('❌ Failed to start server:', error);
