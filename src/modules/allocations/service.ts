@@ -288,6 +288,12 @@ const RENEWAL_SORT: Record<string, string> = {
   items: 'item_count',
 };
 
+/** A later active or expired allocation of the same item to the same employee exists. */
+const newerHolding = (a: string) => `EXISTS (
+      SELECT 1 FROM allocations n
+      WHERE n.employee_id = ${a}.employee_id AND n.ppe_item_id = ${a}.ppe_item_id AND n.status IN ('active', 'expired')
+        AND (n.issue_date, n.created_at, n.id) > (${a}.issue_date, ${a}.created_at, ${a}.id))`;
+
 const renewalWindow = (auth: AuthContext, q: RenewalsQuery) => {
   const scope = scopeOf(auth);
   const replacements: Record<string, unknown> = { days: q.days };
@@ -314,14 +320,15 @@ const renewalWindow = (auth: AuthContext, q: RenewalsQuery) => {
     replacements.q = likeTerm(q.q);
   }
 
-  // Active and expired allocations are both still with the employee and need renewing
+  // Active and expired allocations are both still with the employee and need renewing, but only the latest
+  // of an item: an earlier one superseded by a fulfilled request is not due again
   const cte = `WITH due AS (
       SELECT a.id, a.employee_id, ${dueSql('a', 'p')} AS due_date
       FROM allocations a
       JOIN ppe_items p ON p.id = a.ppe_item_id
       JOIN employees e ON e.id = a.employee_id
       JOIN sections s ON s.id = e."sectionId"
-      WHERE a.status IN ('active', 'expired') AND e."isActive" IS NOT FALSE
+      WHERE a.status IN ('active', 'expired') AND e."isActive" IS NOT FALSE AND NOT ${newerHolding('a')}
       ${filters.map((f) => `AND ${f}`).join(' ')}
     ), win AS (
       SELECT * FROM due
@@ -338,10 +345,10 @@ export const renewalsDue = async (auth: AuthContext, q: RenewalsQuery) => {
   const { limit, offset } = pageWindow(q);
 
   const [groups, [summary]] = await Promise.all([
-    sequelize.query<{ employee_id: string; earliest_due: Date; item_count: number; overdue_count: number }>(
+    sequelize.query<{ employee_id: string; earliest_due: Date; item_count: number; overdue_count: number; ids: string[] }>(
       `${cte}
        SELECT w.employee_id, MIN(w.due_date) AS earliest_due, COUNT(*)::int AS item_count,
-              COUNT(*) FILTER (WHERE w.due_date < now())::int AS overdue_count
+              COUNT(*) FILTER (WHERE w.due_date < now())::int AS overdue_count, array_agg(w.id) AS ids
        FROM win w JOIN employees e ON e.id = w.employee_id
        GROUP BY w.employee_id, e."lastName", e."firstName"
        ORDER BY ${sortSql} ${dir}, w.employee_id
@@ -358,15 +365,7 @@ export const renewalsDue = async (auth: AuthContext, q: RenewalsQuery) => {
     ),
   ]);
 
-  const employeeIds = groups.map((g) => g.employee_id);
-  const ids = employeeIds.length
-    ? (
-        await sequelize.query<{ id: string }>(`${cte} SELECT id FROM win WHERE employee_id IN (:employeeIds)`, {
-          replacements: { ...replacements, employeeIds },
-          type: QueryTypes.SELECT,
-        })
-      ).map((r) => r.id)
-    : [];
+  const ids = groups.flatMap((g) => g.ids);
   const rows = ids.length
     ? await models.Allocation.findAll({
         where: { id: ids },
@@ -455,11 +454,29 @@ export const renewAllocation = async (auth: AuthContext, id: string, input: Rene
     const quantity = input.quantity ?? Number(old.quantity);
     const size: string | null = input.size ?? old.size ?? null;
 
+    const [superseded] = await sequelize.query(`SELECT 1 FROM allocations a WHERE a.id = :id AND ${newerHolding('a')}`, {
+      replacements: { id: old.id },
+      type: QueryTypes.SELECT,
+      transaction: t,
+    });
+    if (superseded) {
+      throw new AppError('INVALID_TRANSITION', `${item.name} has been issued to this employee again since; renew the latest issue instead`);
+    }
+
     // v1 rule: sized items draw from the matching size; unsized items from the unsized row
     const stockWhere: WhereOptions = { ppeItemId: old.ppeItemId };
     if (item.hasSizeVariants && size) Object.assign(stockWhere, { size });
     else if (!item.hasSizeVariants) Object.assign(stockWhere, { size: null });
-    const stock = await models.Stock.findOne({ where: stockWhere, order: [['quantity', 'DESC']], transaction: t });
+    // Keep the gender (or unisex) and colour of the stock line the old issue came from
+    const prev = old.stockId ? await models.Stock.findByPk(old.stockId, { transaction: t }) : null;
+    const order: OrderItem[] = [[literal(`quantity >= ${sequelize.escape(quantity)}`), 'DESC']];
+    if (prev?.gender) {
+      Object.assign(stockWhere, { [Op.or]: [{ gender: [prev.gender, 'unisex'] }, { gender: null }] });
+      order.push([literal(`gender IS NOT DISTINCT FROM ${sequelize.escape(prev.gender)}`), 'DESC']);
+    }
+    if (prev?.color) order.push([literal(`color IS NOT DISTINCT FROM ${sequelize.escape(prev.color)}`), 'DESC']);
+    order.push(['quantity', 'DESC']);
+    const stock = await models.Stock.findOne({ where: stockWhere, order, transaction: t });
 
     const remaining = stock ? await deductStock(stock.id, quantity, { transaction: t }) : null;
     if (remaining === null || !stock) {
