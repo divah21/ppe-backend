@@ -9,6 +9,7 @@ const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
 const { validateRequestedSize } = require('../../middlewares/size_validation');
+const { deductStock, restoreStock } = require('../../helpers/stock_helper');
 
 /**
  * @route   GET /api/v1/stock
@@ -596,7 +597,6 @@ router.post(
         // Add quantity to existing stock entry
         // If new price differs from existing, update to new price (FIFO or weighted average can be implemented later)
         const updatedData = {
-          quantity: existing.quantity + quantity,
           minLevel: minLevel || existing.minLevel,
           maxLevel: maxLevel || existing.maxLevel,
           reorderPoint: reorderPoint || existing.reorderPoint,
@@ -634,7 +634,12 @@ router.post(
           updatedData.eligibleSections = eligibleSections;
         }
         
-        await existing.update(updatedData);
+        await sequelize.transaction(async (transaction) => {
+          await existing.update(updatedData, { transaction });
+          if (Number(quantity) > 0) {
+            existing.quantity = await restoreStock(existing.id, Number(quantity), { transaction });
+          }
+        });
         stock = existing;
         isUpdate = true;
       } else {
@@ -743,7 +748,8 @@ router.put(
   auditLog('UPDATE', 'Stock'),
   async (req, res, next) => {
     try {
-      const { adjustment, reason } = req.body;
+      const { reason } = req.body;
+      const adjustment = Number(req.body.adjustment);
 
       const stock = await Stock.findByPk(req.params.id, {
         include: [{ model: PPEItem, as: 'ppeItem' }]
@@ -756,16 +762,16 @@ router.put(
         });
       }
 
-      const newQuantity = stock.quantity + adjustment;
-
-      if (newQuantity < 0) {
+      const newQuantity = adjustment === 0 ? stock.quantity
+        : adjustment < 0 ? await deductStock(stock.id, -adjustment)
+        : await restoreStock(stock.id, adjustment);
+      if (newQuantity === null) {
         return res.status(400).json({
           success: false,
           message: 'Adjustment would result in negative stock'
         });
       }
-
-      await stock.update({ quantity: newQuantity });
+      stock.quantity = newQuantity;
 
       res.json({
         success: true,
@@ -1361,11 +1367,14 @@ router.post(
           }
 
           // Update stock quantity
-          const previousQty = stock.quantity || 0;
-          const newQuantity = previousQty + parseInt(quantity);
+          const newQuantity = await restoreStock(stock.id, parseInt(quantity));
+          if (newQuantity === null) {
+            results.notFound.push({ stockId, itemName, size, color, quantity, error: 'Stock quantity could not be updated' });
+            continue;
+          }
+          const previousQty = newQuantity - parseInt(quantity);
 
           await stock.update({
-            quantity: newQuantity,
             lastRestocked: new Date(),
             notes: stock.notes 
               ? `${stock.notes}\n[${new Date().toISOString().split('T')[0]}] ${reason}: +${quantity}`
