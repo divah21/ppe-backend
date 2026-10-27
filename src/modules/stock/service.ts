@@ -87,7 +87,13 @@ export const listStock = async (q: StockListQuery) => {
   const where: WhereOptions[] = [];
   if (q.q) {
     const term = likeTerm(q.q);
-    where.push({ [Op.or]: [{ '$ppeItem.name$': { [Op.iLike]: term } }, { '$ppeItem.item_code$': { [Op.iLike]: term } }] });
+    where.push({
+      [Op.or]: [
+        { '$ppeItem.name$': { [Op.iLike]: term } },
+        { '$ppeItem.item_code$': { [Op.iLike]: term } },
+        { '$ppeItem.category$': { [Op.iLike]: term } },
+      ],
+    });
   }
   if (q.category) where.push({ '$ppeItem.category$': q.category });
   if (q.ppeItemId) where.push({ ppeItemId: q.ppeItemId });
@@ -221,8 +227,10 @@ const lockStock = (id: string, t: Transaction) =>
  */
 export const createStock = async (input: StockCreateInput) => {
   const result = await inTransaction(async (t) => {
-    // Serialises concurrent receipts of the same item so the merge check cannot race
-    const item = await models.PPEItem.findByPk(input.ppeItemId, { transaction: t, lock: t.LOCK.UPDATE });
+    // Serialises concurrent receipts of the same item so the merge check cannot race. NO KEY UPDATE
+    // still lets other transactions insert rows that reference the item (their FK check takes KEY
+    // SHARE), so an issue holding a stock row lock cannot deadlock against a receipt.
+    const item = await models.PPEItem.findByPk(input.ppeItemId, { transaction: t, lock: t.LOCK.NO_KEY_UPDATE });
     if (!item) throw fieldError('ppeItemId', 'Choose a PPE item from the catalogue');
 
     const sized = await validateRequestedSize(item, input.size);
@@ -235,12 +243,13 @@ export const createStock = async (input: StockCreateInput) => {
       gender: input.gender,
       location: input.location,
     };
-    const existing = await models.Stock.findOne({
-      where: variant,
-      order: [['createdAt', 'ASC']],
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
+    // Prefer the line already holding this batch: topping up another line of the same variant
+    // with that batch number would collide with the unique (variant, batch) index.
+    const findLine = (where: WhereOptions) =>
+      models.Stock.findOne({ where, order: [['createdAt', 'ASC']], transaction: t, lock: t.LOCK.UPDATE });
+    const existing =
+      (input.batchNumber ? await findLine({ ...variant, batchNumber: input.batchNumber }) : null) ??
+      (await findLine(variant));
 
     if (!existing) {
       const row = await models.Stock.create(
@@ -297,11 +306,19 @@ export const createStock = async (input: StockCreateInput) => {
   return { ...result, stock: toStock((await models.Stock.findByPk(result.id, { include: [includeItem] }))!) };
 };
 
-export const adjustStock = async (id: string, { delta }: AdjustInput) => {
+export const adjustStock = async (id: string, { delta, expectedQuantity }: AdjustInput) => {
   const change = await inTransaction(async (t) => {
     const row = await lockStock(id, t);
     if (!row) throw notFound('Stock line');
     const previousQuantity = Number(row.quantity);
+    // The client sends the quantity it showed; a retried or stale request must not apply twice
+    if (expectedQuantity !== undefined && expectedQuantity !== previousQuantity) {
+      throw new AppError(
+        'CONFLICT',
+        `Stock for this line changed to ${previousQuantity} while you were adjusting it. Check the amount and save again.`,
+        { quantity: previousQuantity }
+      );
+    }
     const quantity =
       delta < 0
         ? await deductStock(id, -delta, { transaction: t })

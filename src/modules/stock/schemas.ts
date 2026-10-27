@@ -56,6 +56,7 @@ export const adjustBody = z.object({
     .max(1_000_000)
     .refine((v) => v !== 0, 'Enter a change other than zero'),
   reason: z.string().trim().min(3, 'Give a reason for this adjustment').max(500),
+  expectedQuantity: z.number().int().min(0).optional(),
 });
 export type AdjustInput = z.infer<typeof adjustBody>;
 

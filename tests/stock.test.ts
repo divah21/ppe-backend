@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { models } from '../src/core/db';
+import { models, sequelize } from '../src/core/db';
 import { prepareV2 } from '../src/v2';
 import { app, createFixtures, signIn, write } from './helpers';
 
@@ -11,6 +11,8 @@ let admin: Agent;
 let stores: Agent;
 let sheq: Agent;
 let hod: Agent;
+let deptRep: Agent;
+let sectionRep: Agent;
 let gloves: { id: string; name: string };
 let boots: { id: string };
 let glovesLine: { id: string };
@@ -52,6 +54,8 @@ beforeAll(async () => {
   stores = await signIn((await fx.user('stores')).username);
   sheq = await signIn((await fx.user('sheq')).username);
   hod = await signIn((await fx.user('hod', { departmentId: department.id })).username);
+  deptRep = await signIn((await fx.user('department-rep', { departmentId: department.id })).username);
+  sectionRep = await signIn((await fx.user('section-rep', { departmentId: department.id, sectionId: section.id })).username);
 });
 afterAll(() => fx.cleanup());
 
@@ -276,5 +280,76 @@ describe('POST /api/v2/stock/bulk-topup', () => {
     const body = { items: [{ stockId: glovesLine.id, quantity: 1 }] };
     expect((await write(sheq, 'post', '/api/v2/stock/bulk-topup').send(body)).status).toBe(403);
     expect((await request(app).post('/api/v2/stock/bulk-topup').send(body)).status).toBe(401);
+  });
+});
+
+describe('stock review fixes', () => {
+  it('matches the search against the category too', async () => {
+    const res = await stores.get('/api/v2/stock').query({ q: `${fx.tag}-HANDS` });
+    expect(res.body.data.map((s: { id: string }) => s.id)).toEqual([glovesLine.id]);
+  });
+
+  it('keeps department and section roles out of every route', async () => {
+    for (const agent of [deptRep, sectionRep]) {
+      expect((await agent.get('/api/v2/stock')).status).toBe(403);
+      expect((await agent.get('/api/v2/stock/summary')).status).toBe(403);
+      expect((await agent.get('/api/v2/stock/lookups')).status).toBe(403);
+      expect((await agent.get(`/api/v2/stock/${glovesLine.id}`)).status).toBe(403);
+      const before = await qty(glovesLine.id);
+      expect((await write(agent, 'post', `/api/v2/stock/${glovesLine.id}/adjust`).send({ delta: 1, reason: 'Count' })).status).toBe(403);
+      expect(
+        (await write(agent, 'post', '/api/v2/stock/bulk-topup').send({ items: [{ stockId: glovesLine.id, quantity: 1 }] })).status
+      ).toBe(403);
+      expect((await write(agent, 'post', '/api/v2/stock').send({ ppeItemId: gloves.id, quantity: 1, unitPriceUSD: 1 })).status).toBe(403);
+      expect(await qty(glovesLine.id)).toBe(before);
+    }
+  });
+
+  it('applies an adjustment once when the client sends the quantity it saw', async () => {
+    const current = await qty(glovesLine.id);
+    const body = { delta: -1, reason: 'Stock take', expectedQuantity: current };
+    const first = await write(stores, 'post', `/api/v2/stock/${glovesLine.id}/adjust`).send(body);
+    expect(first.status).toBe(200);
+    const retry = await write(stores, 'post', `/api/v2/stock/${glovesLine.id}/adjust`).send(body);
+    expect(retry.status).toBe(409);
+    expect(retry.body.error).toMatchObject({ code: 'CONFLICT', details: { quantity: current - 1 } });
+    expect(await qty(glovesLine.id)).toBe(current - 1);
+  });
+
+  it('keeps the existing levels when a receipt leaves them blank', async () => {
+    const line = await fx.make('Stock', { ppeItemId: gloves.id, color: 'zz-red', quantity: 1, minLevel: 30, reorderPoint: 40, unitPriceUSD: 1 });
+    const res = await write(stores, 'post', '/api/v2/stock').send({ ppeItemId: gloves.id, color: 'zz-red', quantity: 2, unitPriceUSD: 1 });
+    expect(res.status).toBe(200);
+    expect(res.body.data.stock).toMatchObject({ id: line.id, quantity: 3, minLevel: 30, reorderPoint: 40 });
+  });
+
+  it('tops up the line that already holds the received batch', async () => {
+    const a = await fx.make('Stock', { ppeItemId: gloves.id, color: 'zz-blue', batchNumber: 'zz-A', quantity: 1, unitPriceUSD: 1 });
+    const b = await fx.make('Stock', { ppeItemId: gloves.id, color: 'zz-blue', batchNumber: 'zz-B', quantity: 1, unitPriceUSD: 1 });
+    const res = await write(stores, 'post', '/api/v2/stock').send({
+      ppeItemId: gloves.id,
+      color: 'zz-blue',
+      batchNumber: 'zz-B',
+      quantity: 5,
+      unitPriceUSD: 1,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.stock).toMatchObject({ id: b.id, quantity: 6, batchNumber: 'zz-B' });
+    expect(await qty(a.id)).toBe(1);
+  });
+
+  it('does not block on transactions that reference the PPE item', async () => {
+    const t = await sequelize.transaction();
+    // What a concurrent allocation insert's foreign key check holds on the item
+    await sequelize.query('SELECT id FROM ppe_items WHERE id = :id FOR KEY SHARE', { replacements: { id: gloves.id }, transaction: t });
+    const receipt = write(stores, 'post', '/api/v2/stock')
+      .send({ ppeItemId: gloves.id, color: 'zz-green', quantity: 1, unitPriceUSD: 1 })
+      .then((r) => r);
+    const outcome = await Promise.race([receipt, new Promise<'blocked'>((r) => setTimeout(() => r('blocked'), 3000))]);
+    await t.commit();
+    const res = await receipt;
+    if (res.body.data?.stock?.id) fx.track('Stock', res.body.data.stock.id);
+    expect(outcome).not.toBe('blocked');
+    expect(res.status).toBe(201);
   });
 });
