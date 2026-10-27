@@ -103,7 +103,8 @@ describe('POST /api/v2/allocations/:id/return', () => {
 
 describe('POST /api/v2/allocations/:id/renew', () => {
   it('issues a replacement from stock and marks the old one replaced', async () => {
-    const old = await af.allocation(employee.id, unsized.id, { quantity: 1, issueDate: monthsAgo(12, 2) });
+    const holder = await fx.employee(section.id);
+    const old = await af.allocation(holder.id, unsized.id, { quantity: 1, issueDate: monthsAgo(12, 2) });
     const before = await stockQty(unsizedStock.id);
 
     const res = await write(stores, 'post', `/api/v2/allocations/${old.id}/renew`).send({ quantity: 2 });
@@ -114,7 +115,7 @@ describe('POST /api/v2/allocations/:id/renew', () => {
       quantity: 2,
       unitCost: 5,
       totalCost: 10,
-      employee: { id: employee.id },
+      employee: { id: holder.id },
       item: { id: unsized.id },
       allowedActions: ['return', 'renew'],
     });
@@ -158,6 +159,46 @@ describe('POST /api/v2/allocations/:id/renew', () => {
     const noRow = await write(stores, 'post', `/api/v2/allocations/${old.id}/renew`).send({ size: 'XS' });
     expect(noRow.status).toBe(409);
     expect(noRow.body.error.details).toMatchObject({ available: 0 });
+  });
+
+  it('keeps to the gender of the stock line the old issue came from', async () => {
+    const item = await af.item({ hasSizeVariants: true });
+    const male = await af.stock(item.id, 2, { size: '9', gender: 'male' });
+    const female = await af.stock(item.id, 8, { size: '9', gender: 'female' });
+    const old = await af.allocation(employee.id, item.id, { size: '9', stockId: male.id });
+    const res = await write(stores, 'post', `/api/v2/allocations/${old.id}/renew`).send({});
+    expect(res.status).toBe(201);
+    fx.track('Allocation', res.body.data.id);
+    expect(await stockQty(male.id)).toBe(1);
+    expect(await stockQty(female.id)).toBe(8);
+
+    // Out of the male line it falls back to unisex, never to the other gender
+    const unisex = await af.stock(item.id, 3, { size: '9', gender: 'unisex' });
+    const again = await write(stores, 'post', `/api/v2/allocations/${res.body.data.id}/renew`).send({ quantity: 2 });
+    expect(again.status).toBe(201);
+    fx.track('Allocation', again.body.data.id);
+    expect((await models.Allocation.findByPk(again.body.data.id))!.stockId).toBe(unisex.id);
+    expect(await stockQty(male.id)).toBe(1);
+    expect(await stockQty(female.id)).toBe(8);
+  });
+
+  it('refuses an issue that a later one of the same item has superseded, and drops it from renewals due', async () => {
+    const holder = await fx.employee(section.id);
+    const old = await af.allocation(holder.id, unsized.id, { issueDate: monthsAgo(13) });
+    const due = async () =>
+      (await stores.get('/api/v2/allocations/renewals-due').query({ q: holder.worksNumber })).body.data.flatMap(
+        (r: { items: Array<{ id: string }> }) => r.items.map((i) => i.id)
+      );
+    expect(await due()).toEqual([old.id]);
+
+    await af.allocation(holder.id, unsized.id, { issueDate: monthsAgo(1), status: 'active' });
+    expect(await due()).toEqual([]);
+    const before = await stockQty(unsizedStock.id);
+    const res = await write(stores, 'post', `/api/v2/allocations/${old.id}/renew`).send({});
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('INVALID_TRANSITION');
+    expect(await statusOf(old.id)).toBe('active');
+    expect(await stockQty(unsizedStock.id)).toBe(before);
   });
 
   it('serialises concurrent renewals of the same allocation', async () => {
