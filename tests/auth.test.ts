@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { prepareV2 } from '../src/v2';
 import { ORIGIN, PASSWORD, app, createFixtures, signIn, write } from './helpers';
 
@@ -35,6 +35,21 @@ describe('v2 auth', () => {
       .send({ username: admin.username, password: 'nope' });
     expect(res.status).toBe(401);
     expect(res.body.error).toEqual({ code: 'UNAUTHENTICATED', message: 'Incorrect username or password' });
+  });
+
+  it('runs bcrypt for unknown usernames too, so timing does not reveal which accounts exist', async () => {
+    const bcrypt = (await import('bcryptjs')).default;
+    const spy = vi.spyOn(bcrypt, 'compare');
+    try {
+      const res = await request(app)
+        .post('/api/v2/auth/login')
+        .set('Origin', ORIGIN)
+        .send({ username: 'zz-no-such-user', password: 'guess' });
+      expect(res.status).toBe(401);
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('validates the body with a 422 envelope', async () => {
