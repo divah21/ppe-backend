@@ -69,5 +69,13 @@ export const RENEWAL_SQL = (a: string, p: string) => `COALESCE(
 /** Cost of an allocation line: stored total, else unit cost times quantity. */
 export const COST_SQL = (a: string) => `COALESCE(${a}.total_cost, ${a}.unit_cost * ${a}.quantity, 0)`;
 
+/*
+ * A request's section and department, for a query joining employees e and sections sec on
+ * REQUEST_SECTION. Same rule as requests/policy.ts: v1 stored the creator's section on a request,
+ * so the employee's section wins and the stored one only covers visitor requests.
+ */
+export const REQUEST_SECTION = 'COALESCE(e."sectionId", r.section_id)';
+export const REQUEST_DEPARTMENT = 'COALESCE(sec.department_id, r.department_id)';
+
 /** Request statuses that are finished and need nobody's action. */
 export const CLOSED_REQUEST_STATUSES = ['fulfilled', 'rejected', 'cancelled'] as const;

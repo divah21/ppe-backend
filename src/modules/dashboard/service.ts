@@ -1,8 +1,9 @@
 import { QueryTypes } from 'sequelize';
 import { ROLES, type AuthContext, type Role } from '../../core/auth';
 import { sequelize } from '../../core/db';
+import { PRICE_CTE, allocationCost } from '../budgets/spend';
 import type { DashboardQuery } from './schemas';
-import { CLOSED_REQUEST_STATUSES, COST_SQL, RENEWAL_SQL, scopeOf, scopeSql, type Scope } from './scope';
+import { CLOSED_REQUEST_STATUSES, RENEWAL_SQL, REQUEST_DEPARTMENT, REQUEST_SECTION, scopeOf, scopeSql, type Scope } from './scope';
 
 /** Request stages each role acts on (v1 approval chain: section rep, dept rep, HOD, stores; SHEQ for replacements). */
 const ACTION_STATUSES: Record<Role, readonly string[]> = {
@@ -25,8 +26,8 @@ const RENEWAL_WINDOW_DAYS = 30;
 const REQUESTS_FROM = `
   FROM requests r
   LEFT JOIN employees e ON e.id = r.employee_id
-  LEFT JOIN sections sec ON sec.id = COALESCE(r.section_id, e."sectionId")`;
-const requestScope = (scope: Scope) => scopeSql(scope, 'COALESCE(r.section_id, e."sectionId")', 'COALESCE(r.department_id, sec.department_id)');
+  LEFT JOIN sections sec ON sec.id = ${REQUEST_SECTION}`;
+const requestScope = (scope: Scope) => scopeSql(scope, REQUEST_SECTION, REQUEST_DEPARTMENT);
 
 const ALLOCATIONS_FROM = `
   FROM allocations a
@@ -34,6 +35,10 @@ const ALLOCATIONS_FROM = `
   JOIN sections sec ON sec.id = e."sectionId"
   LEFT JOIN ppe_items p ON p.id = a.ppe_item_id`;
 const allocationScope = (scope: Scope) => scopeSql(scope, 'sec.id', 'sec.department_id');
+
+/** Priced as on the budget pages, so spend agrees across screens. Queries using it start WITH PRICE_CTE. */
+const COST = allocationCost('a', 'pr');
+const JOIN_PRICE = 'LEFT JOIN price pr ON pr.ppe_item_id = a.ppe_item_id';
 
 const RENEWAL_DUE = `a.status = 'active' AND e."isActive" IS NOT FALSE
   AND ${RENEWAL_SQL('a', 'p')} >= NOW() AND ${RENEWAL_SQL('a', 'p')} < NOW() + make_interval(days => :renewalDays)`;
@@ -43,12 +48,10 @@ const select = <T extends object>(sql: string, replacements: Record<string, unkn
 
 const num = (v: unknown) => Number(v ?? 0);
 
-const LOW_STOCK_ITEMS = `
-  SELECT p.id, p.name, p.item_code, SUM(s.quantity)::int AS quantity, MAX(COALESCE(s.min_level, 10))::int AS min_level
+// Per stock line, as the Stock page counts it (stock/service.ts lowSql), so the tile matches its filter
+const LOW_STOCK_LINES = `
   FROM stocks s JOIN ppe_items p ON p.id = s.ppe_item_id
-  WHERE p.is_active IS NOT FALSE
-  GROUP BY p.id, p.name, p.item_code
-  HAVING SUM(s.quantity) <= MAX(COALESCE(s.min_level, 10))`;
+  WHERE s.quantity <= COALESCE(s.min_level, 0)`;
 
 const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['period']) => {
   const rs = requestScope(scope);
@@ -62,17 +65,19 @@ const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['per
     { ...rs.replacements, actionStatuses: ACTION_STATUSES[auth.role] ?? ['none'], closed: CLOSED_REQUEST_STATUSES }
   );
   const [allocations] = await select<{ issued: string; spend: string; renewals: string }>(
-    `SELECT
+    `WITH ${PRICE_CTE}
+     SELECT
        COALESCE(SUM(a.quantity) FILTER (WHERE a.issue_date >= date_trunc(:period, NOW())), 0) AS issued,
-       COALESCE(SUM(${COST_SQL('a')}) FILTER (WHERE a.issue_date >= date_trunc(:period, NOW())), 0) AS spend,
+       COALESCE(SUM(${COST}) FILTER (WHERE a.issue_date >= date_trunc(:period, NOW())), 0) AS spend,
        COUNT(*) FILTER (WHERE ${RENEWAL_DUE}) AS renewals
      ${ALLOCATIONS_FROM}
-     WHERE ${as.sql}`,
+     ${JOIN_PRICE}
+     WHERE ${as.sql} AND (a.issue_date >= date_trunc(:period, NOW()) OR a.status = 'active')`,
     { ...as.replacements, period, renewalDays: RENEWAL_WINDOW_DAYS }
   );
   let lowStock: number | null = null;
   if (SEES_STOCK.has(auth.role)) {
-    const [row] = await select<{ count: string }>(`SELECT COUNT(*) AS count FROM (${LOW_STOCK_ITEMS}) low`, {});
+    const [row] = await select<{ count: string }>(`SELECT COUNT(*) AS count ${LOW_STOCK_LINES}`, {});
     lowStock = num(row?.count);
   }
   return {
@@ -93,7 +98,10 @@ const requestsPerWeek = async (scope: Scope) => {
      )
      SELECT w.week_start, COUNT(r.id) AS count
      FROM weeks w
-     LEFT JOIN (SELECT r.id, r.created_at ${REQUESTS_FROM} WHERE ${rs.sql}) r
+     LEFT JOIN (
+       SELECT r.id, r.created_at ${REQUESTS_FROM}
+       WHERE ${rs.sql} AND r.created_at >= date_trunc('week', NOW()) - make_interval(weeks => :back)
+     ) r
        ON r.created_at >= w.week_start AND r.created_at < w.week_start + interval '1 week'
      GROUP BY w.week_start ORDER BY w.week_start`,
     { ...rs.replacements, back: WEEKS - 1 }
@@ -111,12 +119,14 @@ const spendBreakdown = async (scope: Scope, period: DashboardQuery['period']) =>
   const as = allocationScope(scope);
   const g = SPEND_GROUP_BY[scope.kind];
   const rows = await select<{ id: string | null; name: string; amount: string }>(
-    `SELECT ${g.id} AS id, ${g.name} AS name, SUM(${COST_SQL('a')}) AS amount
+    `WITH ${PRICE_CTE}
+     SELECT ${g.id} AS id, ${g.name} AS name, SUM(${COST}) AS amount
      ${ALLOCATIONS_FROM}
+     ${JOIN_PRICE}
      LEFT JOIN departments d ON d.id = sec.department_id
      WHERE ${as.sql} AND a.issue_date >= date_trunc(:period, NOW())
      GROUP BY 1, 2
-     HAVING SUM(${COST_SQL('a')}) > 0
+     HAVING SUM(${COST}) > 0
      ORDER BY amount DESC, name`,
     { ...as.replacements, period }
   );
@@ -129,12 +139,25 @@ const spendBreakdown = async (scope: Scope, period: DashboardQuery['period']) =>
 };
 
 const lowStockTop = async () => {
-  const rows = await select<{ id: string; name: string; item_code: string | null; quantity: number; min_level: number }>(
-    `${LOW_STOCK_ITEMS} ORDER BY SUM(s.quantity) - MAX(COALESCE(s.min_level, 10)), p.name LIMIT :top`,
+  const rows = await select<{
+    stock_id: string;
+    id: string;
+    name: string;
+    item_code: string | null;
+    size: string | null;
+    quantity: number;
+    min_level: number;
+  }>(
+    `SELECT s.id AS stock_id, p.id, p.name, p.item_code, s.size, s.quantity, COALESCE(s.min_level, 0) AS min_level
+     ${LOW_STOCK_LINES}
+     ORDER BY s.quantity - COALESCE(s.min_level, 0), s.quantity, p.name, s.size
+     LIMIT :top`,
     { top: TOP }
   );
   return rows.map((r) => ({
+    stockId: r.stock_id,
     ppeItemId: r.id,
+    size: r.size,
     name: r.name,
     itemCode: r.item_code,
     quantity: num(r.quantity),

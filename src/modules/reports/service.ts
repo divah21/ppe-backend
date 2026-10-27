@@ -3,7 +3,7 @@ import { ROLES, type AuthContext, type Role } from '../../core/auth';
 import { sequelize } from '../../core/db';
 import { badRequest } from '../../core/errors';
 import { likeTerm } from '../../core/http';
-import { COST_SQL, RENEWAL_SQL, filterSql, scopeOf, scopeSql, type Scope } from '../dashboard/scope';
+import { COST_SQL, RENEWAL_SQL, REQUEST_DEPARTMENT, REQUEST_SECTION, filterSql, scopeOf, scopeSql, type Scope } from '../dashboard/scope';
 import type {
   AllocationsReportQuery,
   MatrixReportQuery,
@@ -231,7 +231,7 @@ const REQUEST_COLUMNS: Column[] = [
 
 export const requestsReport = async (auth: AuthContext, q: RequestsReportQuery): Promise<Sheet[]> => {
   const scope = scopeOf(auth);
-  const f = filterSql(scope, q, 'COALESCE(r.section_id, e."sectionId")', 'COALESCE(r.department_id, sec.department_id)');
+  const f = filterSql(scope, q, REQUEST_SECTION, REQUEST_DEPARTMENT);
   const parts = [f.sql];
   if (q.status) parts.push('r.status::text = :status');
   if (q.requestType) parts.push('r.request_type::text = :requestType');
@@ -248,8 +248,8 @@ export const requestsReport = async (auth: AuthContext, q: RequestsReportQuery):
                  FROM request_items ri LEFT JOIN ppe_items p ON p.id = ri.ppe_item_id WHERE ri.request_id = r.id) AS items
        FROM requests r
        LEFT JOIN employees e ON e.id = r.employee_id
-       LEFT JOIN sections sec ON sec.id = COALESCE(r.section_id, e."sectionId")
-       LEFT JOIN departments d ON d.id = COALESCE(r.department_id, sec.department_id)
+       LEFT JOIN sections sec ON sec.id = ${REQUEST_SECTION}
+       LEFT JOIN departments d ON d.id = ${REQUEST_DEPARTMENT}
        LEFT JOIN users u ON u.id = r.requested_by_id
        WHERE ${parts.join(' AND ')}
        ORDER BY r.created_at DESC
@@ -532,9 +532,10 @@ export const ppeCardsReport = async (auth: AuthContext, q: PpeCardsReportQuery):
       `SELECT DISTINCT ON (a.employee_id, a.ppe_item_id) a.employee_id, a.ppe_item_id, p.name AS item, p.category,
               a.issue_date, a.size, ${RENEWAL_SQL('a', 'p')} AS renewal
        FROM allocations a LEFT JOIN ppe_items p ON p.id = a.ppe_item_id
-       WHERE a.status = 'active' AND a.employee_id IN (:ids)
+       WHERE a.status = 'active' AND a.employee_id = ANY(string_to_array(:ids, ',')::uuid[])
        ORDER BY a.employee_id, a.ppe_item_id, a.issue_date DESC`,
-      { ids: ids.length ? ids : none }
+      // One array literal, not an IN list of up to 10k bound values
+      { ids: ids.join(',') }
     ),
   ]);
 

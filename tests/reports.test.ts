@@ -160,3 +160,28 @@ describe('report validation and access', () => {
     expect((await request(app).get('/api/v2/reports/allocations')).status).toBe(401);
   });
 });
+
+describe('requests report scope', () => {
+  it('scopes a request by its employee’s department, not the department stored by its creator', async () => {
+    // v1 stored the creator's section/department: here dept A's, for an employee in dept B
+    const misfiled = await w.fx.make('Request', {
+      employeeId: w.employees.empB.id,
+      requestedById: w.users.sectionRep.id,
+      departmentId: w.mine.department.id,
+      sectionId: w.mine.section.id,
+      status: 'rejected',
+      requestType: 'replacement',
+      rejectionReason: `${w.fx.tag}-misfiled`,
+    });
+    expect(misfiled.id).toBeTruthy();
+    const otherHod = await w.agent(await w.fx.user('hod', { departmentId: w.other.department.id }));
+
+    const [mine] = await download(hod, 'requests');
+    expect(mine!.text).not.toContain(`${w.fx.tag}-misfiled`);
+    expect(mine!.text).toContain('Total requests: 2');
+
+    const [theirs] = await download(otherHod, 'requests');
+    expect(theirs!.text).toContain(`${w.fx.tag}-misfiled`);
+    expect(theirs!.text).toContain(w.other.department.name);
+  });
+});
