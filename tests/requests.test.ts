@@ -146,6 +146,50 @@ describe('POST /requests', () => {
     }
   });
 
+  it('lets an annual request through once the item is due on its current frequency, as the renewals screen says', async () => {
+    // Issued 7 months ago with a stored date from an older 12-month frequency; gloves are now every 6 months
+    const alloc = await models.Allocation.create({
+      employeeId: w.employees.empA1.id,
+      ppeItemId: w.ppe.gloves.id,
+      quantity: 1,
+      status: 'active',
+      issueDate: new Date(Date.now() - 210 * 86_400_000),
+      nextRenewalDate: new Date(Date.now() + 150 * 86_400_000),
+    });
+    try {
+      const res = await write(w.agents.sectionRep, 'post', URL).send({
+        ...body(),
+        requestType: 'annual',
+        items: [{ ppeItemId: w.ppe.gloves.id, quantity: 1 }],
+      });
+      expect(res.status).toBe(201);
+      const eligibility = await w.agents.sectionRep.get(`${URL}/employees/${w.employees.empA1.id}/eligibility`);
+      const gloves = eligibility.body.data.items.find((i: { ppeItemId: string }) => i.ppeItemId === w.ppe.gloves.id);
+      expect(gloves.isDue).toBe(true);
+    } finally {
+      await alloc.destroy();
+    }
+  });
+
+  it("uses the job title's own matrix entries even when it maps to a PPE category, as the matrix screen does", async () => {
+    const category = await w.fx.make('JobTitle', { name: `${w.fx.tag}-category`, sectionId: w.a.section.id });
+    const jobTitle = await w.fx.make('JobTitle', { name: `${w.fx.tag}-fitter`, sectionId: w.a.section.id, ppeCategoryId: category.id });
+    await w.fx.make('JobTitlePPEMatrix', { jobTitleId: jobTitle.id, ppeItemId: w.ppe.helmet.id, quantityRequired: 1, isActive: true });
+    await models.Employee.update({ jobTitleId: jobTitle.id }, { where: { id: w.employees.empA1.id } });
+    try {
+      const res = await write(w.agents.sectionRep, 'post', URL).send({
+        ...body(),
+        items: [{ ppeItemId: w.ppe.helmet.id, quantity: 1 }],
+      });
+      expect(res.status).toBe(201);
+      const eligibility = await w.agents.sectionRep.get(`${URL}/employees/${w.employees.empA1.id}/eligibility`);
+      const helmet = eligibility.body.data.items.find((i: { ppeItemId: string }) => i.ppeItemId === w.ppe.helmet.id);
+      expect(helmet).toMatchObject({ inMatrix: true, matrixSource: 'job-title' });
+    } finally {
+      await models.Employee.update({ jobTitleId: null }, { where: { id: w.employees.empA1.id } });
+    }
+  });
+
   it('hides employees outside the caller scope (404) and forbids other roles (403)', async () => {
     expect((await write(w.agents.sectionRep, 'post', URL).send({ ...body(), employeeId: w.employees.empA2.id })).status).toBe(404);
     expect((await write(w.agents.sectionRep, 'post', URL).send({ ...body(), employeeId: w.employees.empB.id })).status).toBe(404);

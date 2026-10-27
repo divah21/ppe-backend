@@ -1,8 +1,9 @@
-import { Op } from 'sequelize';
+import { Op, QueryTypes } from 'sequelize';
 import type { AuthContext } from '../../core/auth';
-import { models, type Row } from '../../core/db';
+import { models, sequelize, type Row } from '../../core/db';
 import { notFound } from '../../core/errors';
 import { likeTerm } from '../../core/http';
+import { computeEligibility } from '../matrix/service';
 import { employeeScope } from './policy';
 
 export interface MatrixEntry {
@@ -12,38 +13,41 @@ export interface MatrixEntry {
 }
 
 /**
- * The employee's PPE matrix as v1 builds it: the section matrix as a baseline, overridden by the
- * job-title matrix (looked up through the job title's ppeCategoryId mapping when it has one).
+ * The employee's PPE matrix, resolved exactly as the matrix screen and its eligibility endpoint do:
+ * the section matrix as a baseline, overridden by the job title's own (and legacy by-name) entries,
+ * falling back to its PPE category only when it has none. The caller must have scoped the employee.
  */
-export const matrixFor = async (employee: Row) => {
-  const jobTitleId = employee.jobTitleRef?.ppeCategoryId ?? employee.jobTitleId ?? null;
-  const [bySection, byJobTitle] = await Promise.all([
-    models.SectionPPEMatrix.findAll({ where: { sectionId: employee.sectionId, isActive: true } }),
-    jobTitleId ? models.JobTitlePPEMatrix.findAll({ where: { jobTitleId, isActive: true } }) : Promise.resolve([] as Row[]),
-  ]);
+export const matrixFor = async (employeeId: string) => {
+  const eligibility = await computeEligibility(employeeId);
   const map = new Map<string, MatrixEntry>();
-  const add = (rows: Row[], source: MatrixEntry['source']) => {
-    for (const row of rows) {
-      map.set(row.ppeItemId, { source, quantityRequired: Number(row.quantityRequired ?? 1), isMandatory: !!row.isMandatory });
-    }
-  };
-  add(bySection, 'section');
-  add(byJobTitle, 'job-title');
+  for (const item of eligibility?.items ?? []) {
+    map.set(item.ppeItemId, {
+      source: item.source === 'jobTitle' ? 'job-title' : 'section',
+      quantityRequired: Number(item.quantity ?? 1),
+      isMandatory: item.isMandatory,
+    });
+  }
   return map;
 };
 
-/** Latest next-renewal date of the employee's active allocations, per PPE item (null = due now). */
+/*
+ * Same rule as the renewals screen (allocations dueSql): issue date plus the item's current
+ * frequency, else the allocation's, else the stored renewal date, else 12 months.
+ */
+const DUE_SQL = `COALESCE(a.issue_date + make_interval(months => COALESCE(NULLIF(p.replacement_frequency, 0), NULLIF(a.replacement_frequency, 0))), a.next_renewal_date, a.issue_date + interval '12 months')`;
+
+/** Latest renewal due date of the employee's active allocations, per PPE item (absent = never issued). */
 export const dueDates = async (employeeId: string, ppeItemIds?: string[]) => {
-  const rows = await models.Allocation.findAll({
-    where: { employeeId, status: 'active', ...(ppeItemIds ? { ppeItemId: ppeItemIds } : {}) },
-    attributes: ['ppeItemId', 'nextRenewalDate'],
-  });
-  const map = new Map<string, Date | null>();
-  for (const row of rows) {
-    const next: Date | null = row.nextRenewalDate ?? null;
-    const current = map.get(row.ppeItemId);
-    if (current === undefined || (next && (!current || next > current))) map.set(row.ppeItemId, next);
-  }
+  if (ppeItemIds && ppeItemIds.length === 0) return new Map<string, Date>();
+  const rows = await sequelize.query<{ ppe_item_id: string; due: Date | null }>(
+    `SELECT a.ppe_item_id, MAX(${DUE_SQL}) AS due
+       FROM allocations a LEFT JOIN ppe_items p ON p.id = a.ppe_item_id
+      WHERE a.employee_id = :employeeId AND a.status = 'active' ${ppeItemIds ? 'AND a.ppe_item_id IN (:ppeItemIds)' : ''}
+      GROUP BY a.ppe_item_id`,
+    { replacements: { employeeId, ppeItemIds: ppeItemIds ?? [] }, type: QueryTypes.SELECT }
+  );
+  const map = new Map<string, Date>();
+  for (const r of rows) if (r.due) map.set(r.ppe_item_id, new Date(r.due));
   return map;
 };
 
@@ -119,12 +123,12 @@ export const searchEmployees = async (auth: AuthContext, q?: string) => {
 export const employeeEligibility = async (auth: AuthContext, employeeId: string) => {
   const employee = await models.Employee.findOne({
     where: { [Op.and]: [employeeScope(auth), { id: employeeId }] },
-    include: [{ model: models.JobTitle, as: 'jobTitleRef', required: false }],
+    attributes: ['id'],
   });
   if (!employee) throw notFound('Employee');
 
   const [matrix, due, catalogue] = await Promise.all([
-    matrixFor(employee),
+    matrixFor(employee.id),
     dueDates(employee.id),
     models.PPEItem.findAll({
       where: { isActive: { [Op.ne]: false }, itemType: 'PPE' },
