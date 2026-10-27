@@ -172,6 +172,25 @@ describe('job title writes', () => {
     expect(res.status).toBe(200);
   });
 
+  it('still lets an admin edit a legacy job title whose name or code differs from another only by case', async () => {
+    const upper = await fx.make('JobTitle', { name: `${fx.tag}-RIGGER`, code: `${fx.tag}R`, sectionId: w.other.section.id });
+    await fx.make('JobTitle', { name: `${fx.tag}-rigger`, code: `${fx.tag}r`, sectionId: w.other.section.id });
+    const res = await write(w.agents.admin, 'put', `${URL}/${upper.id}`).send({
+      name: `${fx.tag}-RIGGER`,
+      code: `${fx.tag}R`,
+      sectionId: w.other.section.id,
+      isActive: false,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.isActive).toBe(false);
+
+    const body = (name: string, code: string) => ({ name, code, sectionId: w.other.section.id });
+    const put = (b: object) => write(w.agents.admin, 'put', `${URL}/${upper.id}`).send(b);
+    expect((await put(body(`${fx.tag}-renamed`, `${fx.tag}Q`))).status).toBe(200);
+    expect((await put(body(`${fx.tag}-RIGGER`, `${fx.tag}Q`))).status).toBe(409);
+    expect((await put(body(`${fx.tag}-renamed`, `${fx.tag}R`))).status).toBe(409);
+  });
+
   it('validates input', async () => {
     const bad = await write(w.agents.admin, 'post', URL).send({ name: '', sectionId: 'x', isActive: 'yes' });
     expect(bad.status).toBe(422);
@@ -196,6 +215,12 @@ describe('job title writes', () => {
     expect(blocked.status).toBe(409);
     expect(blocked.body.error.details).toEqual({ mappedJobTitles: 1 });
     expect(mapped.id).toBeDefined();
+  });
+
+  it('deletes a job title that is mapped only to itself', async () => {
+    const self = await fx.make('JobTitle', { name: `${fx.tag}-Self`, sectionId: w.other.section.id });
+    await self.update({ ppeCategoryId: self.id });
+    expect((await write(w.agents.admin, 'delete', `${URL}/${self.id}`)).status).toBe(204);
   });
 
   it('returns 404 for unknown job titles', async () => {

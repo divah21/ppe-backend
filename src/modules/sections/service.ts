@@ -109,7 +109,9 @@ export const updateSection = async (auth: AuthContext, id: string, input: Sectio
     const row = await models.Section.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
     if (!row) throw notFound('Section');
     await lockDepartment(input.departmentId, t);
-    await assertUniqueName(input, t, id);
+    // Only a changed name or department is checked, so legacy case-variant duplicates can still be edited
+    const sameName = row.departmentId === input.departmentId && String(row.name).toLowerCase() === input.name.toLowerCase();
+    if (!sameName) await assertUniqueName(input, t, id);
     await row.update(input, { transaction: t });
   });
   return getSection(auth, id);

@@ -117,7 +117,8 @@ export const updateCostCentre = async (auth: AuthContext, id: string, input: Cos
     const row = await models.CostCenter.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
     if (!row) throw notFound('Cost centre');
     await checkDepartment(input.departmentId, t);
-    await assertUniqueCode(input.code, t, id);
+    // Only a changed code is checked, so legacy case-variant duplicates can still be edited
+    if (String(row.code).toLowerCase() !== input.code.toLowerCase()) await assertUniqueCode(input.code, t, id);
     await row.update(input, { transaction: t });
   });
   return getCostCentre(auth, id);

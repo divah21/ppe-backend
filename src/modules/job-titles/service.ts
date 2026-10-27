@@ -101,17 +101,23 @@ const lockSection = async (sectionId: string, t: Transaction) => {
   }
 };
 
-const assertUnique = async (input: JobTitleInput, t: Transaction, exceptId?: string) => {
+const assertUnique = async (input: JobTitleInput, t: Transaction, current?: Row) => {
+  const exceptId = current?.id as string | undefined;
   const notSelf = exceptId ? [{ id: { [Op.ne]: exceptId } }] : [];
-  const sameName = await models.JobTitle.findOne({
+  const lower = (v: unknown) => (typeof v === 'string' ? v.toLowerCase() : '');
+  // Only changed values are checked, so legacy case-variant duplicates can still be edited
+  const nameChanged = !current || current.sectionId !== input.sectionId || lower(current.name) !== lower(input.name);
+  const codeChanged = !current || lower(current.code) !== lower(input.code);
+
+  const sameName = nameChanged && (await models.JobTitle.findOne({
     where: {
       [Op.and]: [{ sectionId: input.sectionId }, sqlWhere(fn('lower', col('name')), input.name.toLowerCase()), ...notSelf],
     },
     transaction: t,
-  });
+  }));
   if (sameName) throw conflict('A job title with this name already exists in the section');
 
-  if (input.code) {
+  if (input.code && codeChanged) {
     const sameCode = await models.JobTitle.findOne({
       where: { [Op.and]: [sqlWhere(fn('lower', col('code')), input.code.toLowerCase()), ...notSelf] },
       transaction: t,
@@ -135,7 +141,7 @@ export const updateJobTitle = async (auth: AuthContext, id: string, input: JobTi
     const row = await models.JobTitle.findByPk(id, { transaction: t, lock: t.LOCK.UPDATE });
     if (!row) throw notFound('Job title');
     await lockSection(input.sectionId, t);
-    await assertUnique(input, t, id);
+    await assertUnique(input, t, row);
     await row.update(input, { transaction: t });
   });
   return getJobTitle(auth, id);
@@ -144,7 +150,7 @@ export const updateJobTitle = async (auth: AuthContext, id: string, input: JobTi
 const REFERENCES: Reference[] = [
   { key: 'employees', sql: 'SELECT COUNT(*) FROM employees WHERE "jobTitleId" = :id', one: 'employee', many: 'employees' },
   { key: 'ppeMatrix', sql: 'SELECT COUNT(*) FROM job_title_ppe_matrix WHERE "jobTitleId" = :id', one: 'PPE matrix entry', many: 'PPE matrix entries' },
-  { key: 'mappedJobTitles', sql: 'SELECT COUNT(*) FROM job_titles WHERE "ppeCategoryId" = :id', one: 'job title mapped to it', many: 'job titles mapped to it' },
+  { key: 'mappedJobTitles', sql: 'SELECT COUNT(*) FROM job_titles WHERE "ppeCategoryId" = :id AND id <> :id', one: 'job title mapped to it', many: 'job titles mapped to it' },
 ];
 
 export const deleteJobTitle = async (id: string) =>

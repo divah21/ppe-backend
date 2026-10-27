@@ -173,6 +173,23 @@ describe('section writes', () => {
     expect(res.status).toBe(200);
   });
 
+  it('still lets an admin edit a legacy section whose name differs from another only by case', async () => {
+    const dept = await fx.make('Department', { name: `${fx.tag}-legacy-dept` });
+    const upper = await fx.make('Section', { name: `${fx.tag}-LEGACY`, departmentId: dept.id });
+    await fx.make('Section', { name: `${fx.tag}-legacy`, departmentId: dept.id });
+    const res = await write(w.agents.admin, 'put', `${URL}/${upper.id}`).send({
+      name: `${fx.tag}-LEGACY`,
+      departmentId: dept.id,
+      isActive: false,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.isActive).toBe(false);
+
+    const body = (name: string) => ({ name, departmentId: dept.id });
+    expect((await write(w.agents.admin, 'put', `${URL}/${upper.id}`).send(body(`${fx.tag}-renamed`))).status).toBe(200);
+    expect((await write(w.agents.admin, 'put', `${URL}/${upper.id}`).send(body(`${fx.tag}-LEGACY`))).status).toBe(409);
+  });
+
   it('validates input', async () => {
     const bad = await write(w.agents.admin, 'post', URL).send({ name: 'x' });
     expect(bad.status).toBe(422);
