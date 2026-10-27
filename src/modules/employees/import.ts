@@ -2,6 +2,7 @@ import { Op, type Transaction } from 'sequelize';
 import { inTransaction, models, type Row } from '../../core/db';
 import { AppError } from '../../core/errors';
 import { importRow, type ImportRow } from './schemas';
+import { localToday } from './service';
 
 export interface ImportIssue {
   /** 0-based position in the submitted rows */
@@ -88,6 +89,7 @@ const plan = async (rawRows: Array<Record<string, unknown>>, t?: Transaction) =>
   const sectionBy = lookup(sections, 'name', 'code');
   const costCentreBy = lookup(costCentres, 'code', 'name');
   const jobTitleIds = new Map(jobTitles.map((j) => [`${j.sectionId}|${key(j.name)}`, j.id as string]));
+  const jobTitleSection = new Map(jobTitles.map((j) => [j.id as string, j.sectionId as string]));
   const existingBy = new Map(existing.map((e) => [e.worksNumber as string, e]));
 
   const planned: Planned[] = [];
@@ -108,6 +110,7 @@ const plan = async (rawRows: Array<Record<string, unknown>>, t?: Transaction) =>
       continue;
     }
 
+    const current = existingBy.get(row.worksNumber) ?? null;
     let jobTitleId: string | null = null;
     if (row.jobTitle) {
       jobTitleId = jobTitleIds.get(`${section.id}|${key(row.jobTitle)}`) ?? null;
@@ -133,9 +136,20 @@ const plan = async (rawRows: Array<Record<string, unknown>>, t?: Transaction) =>
       lastName: row.lastName,
       sectionId: section.id,
     };
+    // A job title given in the file replaces the linked one (unmatched ones are kept as text only).
+    // Without one, a linked title that belongs to a different section than the new one is dropped.
+    let linkedJobTitle: string | null | undefined;
+    if (row.jobTitle) linkedJobTitle = jobTitleId;
+    else if (current?.jobTitleId && jobTitleSection.get(current.jobTitleId as string) !== section.id) {
+      linkedJobTitle = null;
+      if (current.sectionId !== section.id) {
+        warnings.push(issue('jobTitle', 'The current job title belongs to the old section and is cleared'));
+      }
+    }
+
     const optional: Record<string, unknown> = {
       jobTitle: row.jobTitle,
-      jobTitleId: jobTitleId ?? undefined,
+      jobTitleId: linkedJobTitle,
       costCenterId: costCenterId ?? undefined,
       jobType: row.jobType,
       gender: row.gender,
@@ -145,10 +159,15 @@ const plan = async (rawRows: Array<Record<string, unknown>>, t?: Transaction) =>
       dateJoined: row.dateJoined,
     };
     for (const [k, v] of Object.entries(optional)) if (v !== undefined) values[k] = v;
-    // v1 rule: a terminated contract makes the employee inactive
-    if (row.contractType) values.isActive = row.contractType !== 'TERMINATED';
+    // v1 rule: a terminated contract makes the employee inactive. An import never reactivates
+    // someone who was deactivated; that stays a deliberate admin action.
+    if (row.contractType === 'TERMINATED') values.isActive = false;
+    else if (!current) values.isActive = true;
+    else if (!current.isActive) {
+      warnings.push(issue('worksNumber', 'This employee is inactive and stays inactive; reactivate them from their profile'));
+    }
 
-    planned.push({ index, values, existing: existingBy.get(row.worksNumber) ?? null });
+    planned.push({ index, values, existing: current });
   }
 
   errors.sort((a, b) => a.index - b.index);
@@ -178,7 +197,7 @@ export const importEmployees = async (rows: Array<Record<string, unknown>>, dryR
     const updates = planned.filter((p) => p.existing);
     if (creates.length > 0) {
       await models.Employee.bulkCreate(
-        creates.map((p) => ({ dateJoined: new Date(), isActive: true, ...p.values })),
+        creates.map((p) => ({ dateJoined: localToday(), isActive: true, ...p.values })),
         { transaction: t }
       );
     }

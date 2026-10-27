@@ -208,6 +208,12 @@ describe('POST /employees', () => {
     expect(res.body.error.details.fieldErrors.jobTitleId).toBeDefined();
   });
 
+  it('refuses a job title from another section', async () => {
+    const res = await write(w.agents.deptRep, 'post', URL).send(body({ sectionId: w.sectionB.id, jobTitleId: w.jobTitle.id }));
+    expect(res.status).toBe(422);
+    expect(res.body.error.details.fieldErrors.jobTitleId).toEqual(['Choose a job title from the selected section']);
+  });
+
   it('reports a duplicate works number as 409', async () => {
     const res = await write(w.agents.admin, 'post', URL).send(body({ worksNumber: w.employees.c.worksNumber }));
     expect(res.status).toBe(409);
@@ -264,6 +270,23 @@ describe('PUT /employees/:id', () => {
   it('validates and gates by role', async () => {
     expect((await write(w.agents.admin, 'put', `${URL}/${w.employees.b.id}`).send({ firstName: '' })).status).toBe(422);
     expect((await write(w.agents.hod, 'put', `${URL}/${w.employees.b.id}`).send(full())).status).toBe(403);
+  });
+
+  it('checks the job title against the section, but keeps an older cross-section link editable', async () => {
+    const moved = await write(w.agents.deptRep, 'put', `${URL}/${w.employees.b.id}`).send(full({ jobTitleId: w.jobTitle.id }));
+    expect(moved.status).toBe(422);
+    expect(moved.body.error.details.fieldErrors.jobTitleId).toBeDefined();
+
+    const legacy = await fx.employee(w.sectionB.id, { jobTitleId: w.jobTitle.id, firstName: 'Legacy' });
+    const kept = await write(w.agents.deptRep, 'put', `${URL}/${legacy.id}`).send({
+      worksNumber: legacy.worksNumber,
+      firstName: 'Legacy',
+      lastName: 'Edited',
+      sectionId: w.sectionB.id,
+      jobTitleId: w.jobTitle.id,
+    });
+    expect(kept.status).toBe(200);
+    expect(kept.body.data.lastName).toBe('Edited');
   });
 
   it('ignores fields that are not part of the form', async () => {

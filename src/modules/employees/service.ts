@@ -27,6 +27,12 @@ const INCLUDE: Includeable[] = [
   { model: models.CostCenter, as: 'costCenter', attributes: ['id', 'code', 'name'], required: false },
 ];
 
+/** Today's calendar date on the server (the mine's local time), stored like a picked date. */
+export const localToday = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 const dateOnly = (v: unknown) => (v ? new Date(v as string).toISOString().slice(0, 10) : null);
 
 export const toEmployee = (row: Row, auth: AuthContext) => {
@@ -275,17 +281,25 @@ export const getEmployee = async (auth: AuthContext, id: string) => {
 const fieldError = (field: string, message: string) =>
   new AppError('VALIDATION_FAILED', message, { fieldErrors: { [field]: [message] } });
 
-/** Checks the referenced section (and that it is in the user's scope), job title and cost centre. */
-const checkReferences = async (auth: AuthContext, input: EmployeeInput, t?: Transaction) => {
+/**
+ * Checks the referenced section (and that it is in the user's scope), job title and cost centre.
+ * A job title must belong to the chosen section, except one the record already carries in that
+ * section (older data linked titles across sections) so such records can still be edited.
+ */
+const checkReferences = async (auth: AuthContext, input: EmployeeInput, t?: Transaction, current?: Row) => {
   const [section, jobTitle, costCentre] = await Promise.all([
     models.Section.findByPk(input.sectionId, { attributes: ['id', 'departmentId'], transaction: t }),
-    input.jobTitleId ? models.JobTitle.findByPk(input.jobTitleId, { attributes: ['id'], transaction: t }) : null,
+    input.jobTitleId ? models.JobTitle.findByPk(input.jobTitleId, { attributes: ['id', 'sectionId'], transaction: t }) : null,
     input.costCenterId ? models.CostCenter.findByPk(input.costCenterId, { attributes: ['id'], transaction: t }) : null,
   ]);
   if (!section || !sectionWithinScope(auth, { id: section.id, departmentId: section.departmentId ?? null })) {
     throw fieldError('sectionId', 'Choose a section you manage');
   }
   if (input.jobTitleId && !jobTitle) throw fieldError('jobTitleId', 'This job title no longer exists');
+  const unchanged = !!current && current.jobTitleId === input.jobTitleId && current.sectionId === input.sectionId;
+  if (jobTitle && jobTitle.sectionId !== section.id && !unchanged) {
+    throw fieldError('jobTitleId', 'Choose a job title from the selected section');
+  }
   if (input.costCenterId && !costCentre) throw fieldError('costCenterId', 'This cost centre no longer exists');
 };
 
@@ -319,7 +333,7 @@ export const createEmployee = async (auth: AuthContext, input: EmployeeInput) =>
   await assertWorksNumberFree(input.worksNumber, null);
   const row = await models.Employee.create({
     ...input,
-    dateJoined: input.dateJoined ?? new Date(),
+    dateJoined: input.dateJoined ?? localToday(),
     isActive: true,
   });
   const created = toEmployee(await findInScope(auth, row.id), auth);
@@ -330,7 +344,7 @@ export const createEmployee = async (auth: AuthContext, input: EmployeeInput) =>
 export const updateEmployee = async (auth: AuthContext, id: string, input: EmployeeInput) => {
   await inTransaction(async (t) => {
     const row = await findInScope(auth, id, t);
-    await checkReferences(auth, input, t);
+    await checkReferences(auth, input, t, row);
     if (input.worksNumber !== row.worksNumber) await assertWorksNumberFree(input.worksNumber, id, t);
     // A picked job title replaces the legacy free-text one
     await row.update({ ...input, ...(input.jobTitleId ? { jobTitle: null } : {}) }, { transaction: t });

@@ -102,6 +102,33 @@ describe('POST /employees/import', () => {
     expect(audit).toBeGreaterThan(0);
   });
 
+  it('keeps linked job titles consistent and never reactivates on update', async () => {
+    const mover = await fx.employee(w.mine.section.id, { jobTitleId: w.jobTitle.id, firstName: 'Mover' });
+    const retitled = await fx.employee(w.mine.section.id, { jobTitleId: w.jobTitle.id, firstName: 'Retitled' });
+    const existing = (e: { worksNumber: string; firstName: string }, extra: Record<string, unknown>) => ({
+      worksNumber: e.worksNumber,
+      firstName: e.firstName,
+      lastName: 'Same',
+      section: w.mine.section.name,
+      ...extra,
+    });
+    const res = await write(w.agents.admin, 'post', URL).send({
+      rows: [
+        existing(mover, { section: w.sectionB.get('code') }),
+        existing(retitled, { jobTitle: 'Not a title here' }),
+        existing(w.employees.d, { contractType: 'permanent' }),
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.updated).toBe(3);
+    const warned = res.body.data.warnings.map((x: { index: number; field: string }) => `${x.index}:${x.field}`);
+    expect(warned).toEqual(['0:jobTitle', '1:jobTitle', '2:worksNumber']);
+
+    expect(await models.Employee.findByPk(mover.id)).toMatchObject({ sectionId: w.sectionB.id, jobTitleId: null });
+    expect(await models.Employee.findByPk(retitled.id)).toMatchObject({ jobTitleId: null, jobTitle: 'Not a title here' });
+    expect(await models.Employee.findByPk(w.employees.d.id)).toMatchObject({ isActive: false, contractType: 'PERMANENT' });
+  });
+
   it('flags a section name shared by two sections as ambiguous', async () => {
     await fx.make('Section', { name: w.sectionB.name, departmentId: w.other.department.id });
     const res = await write(w.agents.admin, 'post', URL).send({ dryRun: true, rows: [row(20, { section: w.sectionB.name })] });
