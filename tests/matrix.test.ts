@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { models } from '../src/core/db';
+import { computeEligibility } from '../src/modules/matrix/service';
 import { prepareV2 } from '../src/v2';
 import { app, signIn, write } from './helpers';
 import { createMatrixFixtures } from './matrix.fixtures';
@@ -109,19 +110,53 @@ describe('PUT /matrix/job-titles/entries', () => {
     expect((await admin.get(`${JT}/${twinB.id}`)).body.data.entries[0]).toMatchObject({ quantityRequired: 2 });
   });
 
-  it('shows legacy rows held by job title name and links them on save', async () => {
-    const legacyJt = await fx.jobTitle(mine.section.id);
-    await models.JobTitlePPEMatrix.create({ jobTitle: legacyJt.name, ppeItemId: boots.id, quantityRequired: 3, replacementFrequency: 9 });
-    const before = (await admin.get(`${JT}/${legacyJt.id}`)).body.data;
-    expect(before.entries).toHaveLength(1);
-    expect(before.entries[0]).toMatchObject({ quantityRequired: 3 });
+  it('edits and removes shared legacy rows for one job title without touching same-named ones', async () => {
+    const name = `${fx.tag}-legacy-fitter`;
+    const here = await fx.jobTitle(mine.section.id, { name });
+    const there = await fx.jobTitle(other.section.id, { name });
+    const legacyBoots = await models.JobTitlePPEMatrix.create({ jobTitle: name, ppeItemId: boots.id, quantityRequired: 3, replacementFrequency: 9 });
+    await models.JobTitlePPEMatrix.create({ jobTitle: name, ppeItemId: gloves.id, quantityRequired: 1 });
+    const hereEmployee = await fx.employee(mine.section.id, { jobTitleId: here.id, jobTitle: name });
+    const thereEmployee = await fx.employee(other.section.id, { jobTitleId: there.id, jobTitle: name });
+    const entriesOf = async (id: string) =>
+      Object.fromEntries(((await admin.get(`${JT}/${id}`)).body.data as Row).entries.map((e) => [e.ppeItemId, e]));
+    const eligible = async (employeeId: string) =>
+      Object.fromEntries((await computeEligibility(employeeId))!.items.map((i) => [i.ppeItemId, i]));
 
-    const res = await write(admin, 'put', `${JT}/entries`).send({
-      upserts: [{ jobTitleId: legacyJt.id, ppeItemId: boots.id, quantityRequired: 5 }],
+    expect(await entriesOf(here.id)).toMatchObject({ [boots.id]: { quantityRequired: 3 }, [gloves.id]: {} });
+
+    const edit = await write(admin, 'put', `${JT}/entries`).send({
+      upserts: [{ jobTitleId: here.id, ppeItemId: boots.id, quantityRequired: 5 }],
     });
-    expect(res.body.data).toMatchObject({ created: 0, updated: 1 });
-    const row = await models.JobTitlePPEMatrix.findOne({ where: { jobTitle: legacyJt.name, ppeItemId: boots.id } });
-    expect(row).toMatchObject({ jobTitleId: legacyJt.id, quantityRequired: 5, replacementFrequency: 9 });
+    expect(edit.body.data).toMatchObject({ created: 0, updated: 1, deleted: 0 });
+    // The shared row is unchanged; this job title has its own copy that keeps the legacy frequency
+    expect(await legacyBoots.reload()).toMatchObject({ jobTitleId: null, quantityRequired: 3 });
+    expect(await entriesOf(here.id)).toMatchObject({ [boots.id]: { quantityRequired: 5, replacementFrequency: 9 }, [gloves.id]: {} });
+    expect(await entriesOf(there.id)).toMatchObject({ [boots.id]: { quantityRequired: 3 } });
+    // Eligibility matches what the matrix shows: the own row and the remaining legacy row
+    expect(await eligible(hereEmployee.id)).toMatchObject({ [boots.id]: { quantity: 5 }, [gloves.id]: { quantity: 1 } });
+
+    const remove = await write(admin, 'put', `${JT}/entries`).send({
+      deletes: [
+        { jobTitleId: here.id, ppeItemId: boots.id },
+        { jobTitleId: here.id, ppeItemId: gloves.id },
+      ],
+    });
+    expect(remove.body.data).toMatchObject({ deleted: 2 });
+    expect(await entriesOf(here.id)).toEqual({});
+    expect(Object.keys(await entriesOf(there.id)).sort()).toEqual([boots.id, gloves.id].sort());
+    expect(await eligible(hereEmployee.id)).toEqual({});
+    expect(Object.keys(await eligible(thereEmployee.id)).sort()).toEqual([boots.id, gloves.id].sort());
+    const unconfigured = await admin.get(JT).query({ sectionId: mine.section.id, q: name, configured: 'no' });
+    expect(ids(unconfigured.body)).toEqual([here.id]);
+
+    // Adding the item back works and is counted as new
+    const back = await write(admin, 'put', `${JT}/entries`).send({
+      upserts: [{ jobTitleId: here.id, ppeItemId: gloves.id, quantityRequired: 2 }],
+    });
+    expect(back.body.data).toMatchObject({ created: 1, updated: 0 });
+    expect(await entriesOf(here.id)).toMatchObject({ [gloves.id]: { quantityRequired: 2 } });
+    expect(await entriesOf(there.id)).toMatchObject({ [gloves.id]: { quantityRequired: 1 } });
   });
 
   it('is limited to admin, SHEQ and stores', async () => {
@@ -244,6 +279,32 @@ describe('section matrix', () => {
       deletes: [{ sectionId: '00000000-0000-4000-8000-000000000000', ppeItemId: gloves.id }],
     });
     expect(missing.status).toBe(404);
+  });
+});
+
+describe('legacy and retired entries', () => {
+  it('flags entries whose PPE item was retired', async () => {
+    const section = (await fx.org()).section;
+    await models.SectionPPEMatrix.create({ sectionId: section.id, ppeItemId: retired.id, quantityRequired: 1 });
+    const [entry] = (await admin.get(`${SEC}/${section.id}`)).body.data.entries;
+    expect(entry.ppeItem).toMatchObject({ id: retired.id, isActive: false });
+    // It can still be removed
+    const res = await write(stores, 'put', `${SEC}/entries`).send({ deletes: [{ sectionId: section.id, ppeItemId: retired.id }] });
+    expect(res.body.data).toMatchObject({ deleted: 1 });
+  });
+
+  it('removing a job title row by id does not bring back a shared legacy row', async () => {
+    const name = `${fx.tag}-legacy-welder`;
+    const jt = await fx.jobTitle(mine.section.id, { name });
+    await models.JobTitlePPEMatrix.create({ jobTitle: name, ppeItemId: helmet.id, quantityRequired: 4 });
+    await write(admin, 'put', `${JT}/entries`).send({ upserts: [{ jobTitleId: jt.id, ppeItemId: helmet.id, quantityRequired: 1 }] });
+    const [own] = (await admin.get(`${JT}/${jt.id}`)).body.data.entries;
+    expect(own).toMatchObject({ quantityRequired: 1 });
+
+    expect((await write(sheq, 'delete', `${JT}/entries/${own.id}`)).status).toBe(204);
+    expect((await admin.get(`${JT}/${jt.id}`)).body.data.entries).toEqual([]);
+    expect((await write(sheq, 'delete', `${JT}/entries/${own.id}`)).status).toBe(404);
+    expect(await models.JobTitlePPEMatrix.count({ where: { jobTitle: name, jobTitleId: null, isActive: true } })).toBe(1);
   });
 });
 

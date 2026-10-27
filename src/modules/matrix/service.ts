@@ -22,6 +22,7 @@ const toItem = (item: Row | null | undefined) =>
         category: (item.category as string | null) ?? null,
         unit: (item.unit as string | null) ?? null,
         replacementFrequency: (item.replacementFrequency as number | null) ?? null,
+        isActive: item.isActive !== false,
       }
     : null;
 
@@ -65,11 +66,14 @@ const legacyByName = (names: string[]): WhereOptions => ({
   [Op.and]: [{ jobTitleId: null }, sqlWhere(fn('lower', fn('trim', col('job_title'))), { [Op.in]: names.map(lower) })],
 });
 
+// Same rule as resolveEntries: a legacy row counts unless the job title has its own row for the item
 const JOB_TITLE_HAS_ENTRY = (extra = '') => `EXISTS (
   SELECT 1 FROM job_title_ppe_matrix m
   WHERE m.is_active IS NOT FALSE ${extra}
     AND (m."jobTitleId" = "JobTitle"."id"
-      OR (m."jobTitleId" IS NULL AND lower(trim(m.job_title)) = lower(trim("JobTitle"."name")))))`;
+      OR (m."jobTitleId" IS NULL AND lower(trim(m.job_title)) = lower(trim("JobTitle"."name"))
+        AND NOT EXISTS (SELECT 1 FROM job_title_ppe_matrix o
+          WHERE o."jobTitleId" = "JobTitle"."id" AND o.ppe_item_id = m.ppe_item_id))))`;
 
 const SECTION_HAS_ENTRY = (extra = '') => `EXISTS (
   SELECT 1 FROM section_ppe_matrix m
@@ -79,32 +83,42 @@ const itemFilter = (ppeItemId?: string) => (ppeItemId ? `AND m.ppe_item_id = ${s
 
 /* ------------------------------------------------------------------ job-title matrix */
 
-const loadJobTitleEntries = async (jobTitles: Row[], t?: Transaction) => {
-  const byJobTitle = new Map<string, Map<string, Row>>(jobTitles.map((jt) => [jt.id as string, new Map()]));
-  if (!jobTitles.length) return byJobTitle;
-
-  const rows = await models.JobTitlePPEMatrix.findAll({
-    where: {
-      [Op.and]: [
-        { isActive: { [Op.not]: false } },
-        { [Op.or]: [{ jobTitleId: jobTitles.map((jt) => jt.id) }, legacyByName(jobTitles.map((jt) => jt.name))] },
-      ],
-    },
-    include: [{ model: models.PPEItem, as: 'ppeItem', attributes: ITEM_ATTRS }],
-    transaction: t,
-  });
-
-  // A row linked by id wins over a legacy row for the same item
-  for (const row of [...rows].sort((a, b) => Number(!!a.jobTitleId) - Number(!!b.jobTitleId))) {
-    const owners = row.jobTitleId
-      ? jobTitles.filter((jt) => jt.id === row.jobTitleId)
-      : jobTitles.filter((jt) => lower(jt.name) === lower(row.jobTitle ?? ''));
-    for (const jt of owners) byJobTitle.get(jt.id)!.set(row.ppeItemId, row);
+/**
+ * The entries a job title holds. Legacy rows held by its name are shared with every job title
+ * of that name, so they are never changed by a save for one job title: its own row (linked by
+ * id) overrides the legacy row for the same item, and an inactive own row hides it (a removal).
+ */
+const resolveEntries = (jt: Row, rows: Row[]): Row[] => {
+  const byItem = new Map<string, Row>();
+  const name = lower(jt.name);
+  for (const r of rows) {
+    if (!r.jobTitleId && r.isActive !== false && lower(r.jobTitle ?? '') === name) byItem.set(r.ppeItemId, r);
   }
-  return byJobTitle;
+  for (const r of rows) if (r.jobTitleId === jt.id) byItem.set(r.ppeItemId, r);
+  return [...byItem.values()].filter((r) => r.isActive !== false);
 };
 
-const toJobTitleRow = (jt: Row, entries: Map<string, Row>, categories: Map<string, Row>) => ({
+/** Own rows (active or not) and active legacy rows of some job titles */
+const jobTitleMatrixRows = (jobTitles: Row[], opts: { transaction?: Transaction; lock?: boolean } = {}) =>
+  models.JobTitlePPEMatrix.findAll({
+    where: {
+      [Op.or]: [
+        { jobTitleId: jobTitles.map((jt) => jt.id) },
+        { [Op.and]: [{ isActive: { [Op.not]: false } }, legacyByName(jobTitles.map((jt) => jt.name))] },
+      ],
+    },
+    ...(opts.lock && opts.transaction
+      ? { lock: opts.transaction.LOCK.UPDATE }
+      : { include: [{ model: models.PPEItem, as: 'ppeItem', attributes: ITEM_ATTRS }] }),
+    transaction: opts.transaction,
+  });
+
+const loadJobTitleEntries = async (jobTitles: Row[], t?: Transaction) => {
+  const rows = jobTitles.length ? await jobTitleMatrixRows(jobTitles, { transaction: t }) : [];
+  return new Map<string, Row[]>(jobTitles.map((jt) => [jt.id as string, resolveEntries(jt, rows)]));
+};
+
+const toJobTitleRow = (jt: Row, entries: Row[], categories: Map<string, Row>) => ({
   id: jt.id as string,
   name: jt.name as string,
   code: (jt.code as string | null) ?? null,
@@ -112,7 +126,7 @@ const toJobTitleRow = (jt: Row, entries: Map<string, Row>, categories: Map<strin
   section: ref(jt.section),
   department: ref(jt.section?.department),
   ppeCategory: ref(jt.ppeCategoryId ? categories.get(jt.ppeCategoryId) : null),
-  entries: [...entries.values()].map(toJobTitleEntry).sort(byItemName),
+  entries: entries.map(toJobTitleEntry).sort(byItemName),
 });
 
 export type JobTitleMatrixRow = ReturnType<typeof toJobTitleRow>;
@@ -213,17 +227,13 @@ export const saveJobTitleMatrix = (auth: AuthContext, input: JobTitleSaveInput):
     const items = await loadPpeItems(unique(input.upserts.map((e) => e.ppeItemId)), t);
     const names = unique([...jobTitles.values()].map((jt) => lower(jt.name)));
 
-    const existing = await models.JobTitlePPEMatrix.findAll({
-      where: { [Op.or]: [{ jobTitleId: ids }, legacyByName(names)] },
-      lock: t.LOCK.UPDATE,
-      transaction: t,
-    });
-    const find = (jobTitleId: string, ppeItemId: string) => {
+    const existing = await jobTitleMatrixRows([...jobTitles.values()], { transaction: t, lock: true });
+    const own = (jobTitleId: string, ppeItemId: string) =>
+      existing.find((r) => r.jobTitleId === jobTitleId && r.ppeItemId === ppeItemId);
+    // Active legacy row held by the job title's name; shared, so it is never changed here
+    const legacy = (jobTitleId: string, ppeItemId: string) => {
       const name = lower(jobTitles.get(jobTitleId)!.name);
-      return (
-        existing.find((r) => r.jobTitleId === jobTitleId && r.ppeItemId === ppeItemId) ??
-        existing.find((r) => !r.jobTitleId && r.ppeItemId === ppeItemId && lower(r.jobTitle ?? '') === name)
-      );
+      return existing.find((r) => !r.jobTitleId && r.ppeItemId === ppeItemId && lower(r.jobTitle ?? '') === name);
     };
 
     // v1's unique index is on (job title name, item): a same-named job title in another
@@ -245,16 +255,14 @@ export const saveJobTitleMatrix = (auth: AuthContext, input: JobTitleSaveInput):
 
     let created = 0;
     let updated = 0;
-    const claimed = new Set<string>();
     for (const e of input.upserts) {
       const item = items.get(e.ppeItemId)!;
       const jt = jobTitles.get(e.jobTitleId)!;
-      const row = find(e.jobTitleId, e.ppeItemId);
-      if (row && !claimed.has(row.id)) {
-        claimed.add(row.id);
+      const row = own(e.jobTitleId, e.ppeItemId);
+      if (row) {
+        const wasRemoved = row.isActive === false;
         await row.update(
           {
-            jobTitleId: e.jobTitleId,
             quantityRequired: e.quantityRequired,
             ...(e.replacementFrequency !== undefined && { replacementFrequency: months(e.replacementFrequency, item) }),
             ...(e.heavyUseFrequency !== undefined && { heavyUseFrequency: e.heavyUseFrequency }),
@@ -265,9 +273,12 @@ export const saveJobTitleMatrix = (auth: AuthContext, input: JobTitleSaveInput):
           },
           { transaction: t }
         );
-        updated++;
+        if (wasRemoved) created++;
+        else updated++;
         continue;
       }
+      // Editing a shared legacy row gives this job title its own copy; fields left out keep the legacy values
+      const base = legacy(e.jobTitleId, e.ppeItemId);
       const nameKey = `${lower(jt.name)}:${e.ppeItemId}`;
       await models.JobTitlePPEMatrix.create(
         {
@@ -275,23 +286,53 @@ export const saveJobTitleMatrix = (auth: AuthContext, input: JobTitleSaveInput):
           jobTitle: takenNames.has(nameKey) ? null : jt.name,
           ppeItemId: e.ppeItemId,
           quantityRequired: e.quantityRequired,
-          replacementFrequency: months(e.replacementFrequency, item),
-          heavyUseFrequency: e.heavyUseFrequency ?? null,
-          isMandatory: e.isMandatory ?? true,
-          notes: e.notes ?? null,
-          category: item.category ?? null,
+          replacementFrequency:
+            e.replacementFrequency !== undefined || !base
+              ? months(e.replacementFrequency, item)
+              : ((base.replacementFrequency as number | null) ?? null),
+          heavyUseFrequency: e.heavyUseFrequency !== undefined ? e.heavyUseFrequency : ((base?.heavyUseFrequency as number | null) ?? null),
+          isMandatory: e.isMandatory ?? (base ? base.isMandatory !== false : true),
+          notes: e.notes !== undefined ? e.notes : ((base?.notes as string | null) ?? null),
+          category: item.category ?? base?.category ?? null,
           isActive: true,
         },
         { transaction: t }
       );
       takenNames.add(nameKey);
-      created++;
+      if (base) updated++;
+      else created++;
     }
 
-    const doomed = unique(
-      input.deletes.map((d) => find(d.jobTitleId, d.ppeItemId)?.id).filter((id): id is string => !!id && !claimed.has(id))
-    );
-    const deleted = doomed.length ? await models.JobTitlePPEMatrix.destroy({ where: { id: doomed }, transaction: t }) : 0;
+    let deleted = 0;
+    const doomed: string[] = [];
+    for (const d of input.deletes) {
+      const row = own(d.jobTitleId, d.ppeItemId);
+      const shared = legacy(d.jobTitleId, d.ppeItemId);
+      if (shared) {
+        // Hide the shared legacy row for this job title only
+        if (!row) {
+          await models.JobTitlePPEMatrix.create(
+            {
+              jobTitleId: d.jobTitleId,
+              jobTitle: null,
+              ppeItemId: d.ppeItemId,
+              quantityRequired: shared.quantityRequired,
+              category: shared.category ?? null,
+              isActive: false,
+            },
+            { transaction: t }
+          );
+          deleted++;
+        } else if (row.isActive !== false) {
+          await row.update({ isActive: false }, { transaction: t });
+          deleted++;
+        }
+      } else if (row) {
+        if (row.isActive !== false) deleted++;
+        doomed.push(row.id as string);
+      }
+    }
+    if (doomed.length) await models.JobTitlePPEMatrix.destroy({ where: { id: doomed }, transaction: t });
 
     return { created, updated, deleted };
   });
@@ -299,18 +340,27 @@ export const saveJobTitleMatrix = (auth: AuthContext, input: JobTitleSaveInput):
 export const deleteJobTitleEntry = (auth: AuthContext, id: string) =>
   inTransaction(async (t) => {
     const row = await models.JobTitlePPEMatrix.findByPk(id, { lock: t.LOCK.UPDATE, transaction: t });
-    if (!row) throw notFound('Matrix entry');
-    if (row.jobTitleId) {
-      const visible = await models.JobTitle.count({
-        where: { id: row.jobTitleId },
-        include: [{ ...sectionInclude(auth), attributes: [], include: [] }],
-        transaction: t,
-      });
-      if (!visible) throw notFound('Matrix entry');
-    } else if (!WHOLE_MINE.has(auth.role)) {
-      throw notFound('Matrix entry');
+    // An inactive row is not shown as an entry (it may be hiding a legacy row)
+    if (!row || row.isActive === false) throw notFound('Matrix entry');
+    if (!row.jobTitleId) {
+      // A legacy row is shared by every job title of that name
+      if (!WHOLE_MINE.has(auth.role)) throw notFound('Matrix entry');
+      await row.destroy({ transaction: t });
+      return;
     }
-    await row.destroy({ transaction: t });
+    const jt = await models.JobTitle.findOne({
+      where: { id: row.jobTitleId },
+      attributes: ['id', 'name'],
+      include: [{ ...sectionInclude(auth), attributes: [], include: [] }],
+      transaction: t,
+    });
+    if (!jt) throw notFound('Matrix entry');
+    const shared = await models.JobTitlePPEMatrix.count({
+      where: { [Op.and]: [{ ppeItemId: row.ppeItemId, isActive: { [Op.not]: false } }, legacyByName([jt.name])] },
+      transaction: t,
+    });
+    if (shared) await row.update({ isActive: false }, { transaction: t });
+    else await row.destroy({ transaction: t });
   });
 
 /* ------------------------------------------------------------------ section matrix */
@@ -444,7 +494,7 @@ export const sectionOptions = async (auth: AuthContext, departmentId?: string) =
 export const ppeItemOptions = async () => {
   const rows = await models.PPEItem.findAll({
     where: { isActive: { [Op.not]: false } },
-    attributes: ['id', 'name', 'itemCode', 'category', 'unit', 'replacementFrequency'],
+    attributes: ITEM_ATTRS,
     order: [['name', 'ASC']],
   });
   return rows.map((r) => toItem(r)!);
@@ -506,23 +556,33 @@ const activeItem = () => ({
 });
 
 /**
- * Job-title matrix rows for an employee, most specific first (v1): their job title, then the
- * PPE category job title it maps to, then the legacy job title name.
+ * Job-title matrix rows for an employee, most specific first (v1): what the matrix screen shows
+ * for their job title, else what it shows for the PPE category job title it maps to, else legacy
+ * rows held by the job title text on the employee record. Inactive PPE items are left out.
  */
 const jobTitleEntriesFor = async (employee: Row, t?: Transaction) => {
-  const find = (where: WhereOptions) =>
-    models.JobTitlePPEMatrix.findAll({ where: { [Op.and]: [activeEntry, where] }, include: [activeItem()], transaction: t });
+  const usable = (rows: Row[]) => rows.filter((r) => r.ppeItem && r.ppeItem.isActive !== false);
+  const shownFor = async (jt: Row) => resolveEntries(jt, await jobTitleMatrixRows([jt], { transaction: t }));
+
   const jobTitle = employee.jobTitleRef as Row | null;
-  if (employee.jobTitleId) {
-    const rows = await find({ jobTitleId: employee.jobTitleId });
-    if (rows.length) return rows;
+  if (jobTitle) {
+    const rows = await shownFor(jobTitle);
+    if (rows.length) return usable(rows);
+    const category = jobTitle.ppeCategoryId
+      ? await models.JobTitle.findByPk(jobTitle.ppeCategoryId, { attributes: ['id', 'name'], transaction: t })
+      : null;
+    if (category) {
+      const fallback = await shownFor(category);
+      if (fallback.length) return usable(fallback);
+    }
   }
-  if (jobTitle?.ppeCategoryId) {
-    const rows = await find({ jobTitleId: jobTitle.ppeCategoryId });
-    if (rows.length) return rows;
-  }
-  const name = (jobTitle?.name as string | undefined) ?? (employee.jobTitle as string | null);
-  return name ? find(legacyByName([name])) : [];
+  const name = employee.jobTitle as string | null;
+  if (!name?.trim() || (jobTitle && lower(name) === lower(jobTitle.name))) return [];
+  return models.JobTitlePPEMatrix.findAll({
+    where: { [Op.and]: [activeEntry, legacyByName([name])] },
+    include: [activeItem()],
+    transaction: t,
+  });
 };
 
 /**
