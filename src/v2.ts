@@ -2,6 +2,7 @@ import cookieParser from 'cookie-parser';
 import { Router } from 'express';
 import { readdirSync } from 'node:fs';
 import path from 'node:path';
+import { ensureIndexes } from '../database/indexes';
 import { configError } from './core/config';
 import { errorHandler, notFoundHandler } from './core/errors';
 import { sequelize } from './core/db';
@@ -53,5 +54,7 @@ export const createV2Router = () => {
 
 /** Schema the v2 API needs before it serves traffic. */
 export const prepareV2 = async () => {
-  if (!configError) await ensureSessionTable();
+  if (configError) return;
+  await ensureSessionTable();
+  await ensureIndexes(sequelize);
 };

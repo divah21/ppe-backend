@@ -1,6 +1,10 @@
 import request from 'supertest';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { QueryTypes } from 'sequelize';
+import { INDEXES } from '../database/indexes';
+import { sequelize } from '../src/core/db';
 import { spendByDepartment } from '../src/modules/budgets/spend';
+import { prepareV2 } from '../src/v2';
 import { allocate, pricedItem } from './finance.fixtures';
 import { app, createFixtures } from './helpers';
 
@@ -61,5 +65,18 @@ describe('database time zone', () => {
     const oldYear = await spendByDepartment({ start: '2025-01-01', end: '2026-01-01' }, department.id);
     expect(newYear.get(department.id)?.allocationCount).toBe(1);
     expect(oldYear.get(department.id)).toBeUndefined();
+  });
+});
+
+describe('v2 bootstrap indexes', () => {
+  it('creates every secondary index and leaves none invalid', async () => {
+    await prepareV2();
+    const rows = await sequelize.query<{ relname: string; valid: boolean }>(
+      `SELECT c.relname, i.indisvalid AS valid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+       WHERE c.relname IN (:names)`,
+      { type: QueryTypes.SELECT, replacements: { names: INDEXES.map(([name]) => name) } }
+    );
+    expect(rows.map((r) => r.relname).sort()).toEqual(INDEXES.map(([name]) => name).sort());
+    expect(rows.every((r) => r.valid)).toBe(true);
   });
 });
