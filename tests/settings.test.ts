@@ -180,11 +180,12 @@ describe('backups', () => {
 
 describe('database figures and backup housekeeping', () => {
   it('reports database figures', async () => {
-    const res = await adminAgent.get('/api/v2/settings/database');
+    const res = await adminAgent.get('/api/v2/settings/database-stats');
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ sizeBytes: expect.any(Number), tables: expect.any(Number), connections: expect.any(Number) });
     expect(res.body.data.tables).toBeGreaterThan(10);
-    expect((await sheqAgent.get('/api/v2/settings/database')).status).toBe(403);
+    expect((await adminAgent.get('/api/v2/settings/database')).body.data.category).toBe('database');
+    expect((await sheqAgent.get('/api/v2/settings/database-stats')).status).toBe(403);
   });
 
   it('deletes a backup but never the newest, and cleans up by retention', async () => {

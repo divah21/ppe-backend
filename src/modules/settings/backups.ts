@@ -68,7 +68,13 @@ export const resolveBackup = async (filename: string) => {
 };
 
 /** Deletes one backup file; the newest is always kept so there is something to restore from. */
+// While a backup runs its unfinished file is the newest, so housekeeping waits for it
+const assertIdle = () => {
+  if (running) throw conflict('A backup is running. Try again when it finishes.');
+};
+
 export const deleteBackup = async (req: Request, filename: string) => {
+  assertIdle();
   const file = await resolveBackup(filename);
   const [newest] = await listBackups();
   if (newest?.filename === filename) throw conflict('This is the newest backup. Create a new one before deleting it.');
@@ -78,6 +84,7 @@ export const deleteBackup = async (req: Request, filename: string) => {
 
 /** Deletes backups older than the retention setting (v1 cleanup), always keeping the newest. */
 export const cleanupBackups = async (req: Request) => {
+  assertIdle();
   const row = await models.Setting.findOne({ where: { category: 'database', key: 'backupRetention' } });
   const days = Math.max(1, Number(row?.value) || 30);
   const cutoff = Date.now() - days * 86_400_000;

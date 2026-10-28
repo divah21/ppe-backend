@@ -70,7 +70,8 @@ router.get(
   })
 );
 
-router.get('/database', route(async (_req, res) => ok(res, await databaseStats())));
+// Not /database: that path is the database settings group
+router.get('/database-stats', route(async (_req, res) => ok(res, await databaseStats())));
 
 router.get(
   '/allocation/item-options',
