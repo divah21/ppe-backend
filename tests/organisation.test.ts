@@ -70,6 +70,9 @@ describe('POST /organisation/import/:kind', () => {
     expect((await upload('sections', row, { dryRun: false })).body.data).toMatchObject({ unchanged: 1, updated: 0 });
     expect((await upload('sections', row, { dryRun: false, updateExisting: true })).body.data).toMatchObject({ updated: 1 });
     expect((await models.Section.findByPk(org.section.id))?.description).toBe('Updated by upload');
+    await models.Section.update({ code: `${fx.tag}-WS` }, { where: { id: org.section.id } });
+    const sameCode = await upload('sections', [{ name: `${fx.tag} Workshop`, department: org.department.name, code: `${fx.tag}-WS` }]);
+    expect(sameCode.body.data).toMatchObject({ created: 1, errors: [] });
     expect((await stores.post('/api/v2/organisation/import/sections').send({ rows: row })).status).toBe(403);
   });
 });
@@ -90,6 +93,13 @@ describe('job-title PPE categories', () => {
 
     const chain = await admin.put('/api/v2/job-titles/categories').send({ mappings: [{ jobTitleId: category.id, ppeCategoryId: operator.id }] });
     expect(chain.status).toBe(422);
+    const other = await fx.make('JobTitle', { name: `${fx.tag} Other category`, sectionId: org.section.id });
+    const viaUpload = await upload(
+      'job-titles',
+      [{ name: category.name, section: org.section.name, department: org.department.name, ppeCategory: other.name }],
+      { dryRun: false, updateExisting: true }
+    );
+    expect(viaUpload.body.data.errors[0].message).toMatch(/cannot take another category/);
     expect((await stores.put('/api/v2/job-titles/categories').send({ mappings: [] })).status).toBe(403);
   });
 });

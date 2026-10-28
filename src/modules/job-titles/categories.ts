@@ -14,7 +14,8 @@ export const listCategories = async () => {
             (SELECT COUNT(*) FROM job_titles o WHERE o."ppeCategoryId" = jt.id AND o.id <> jt.id) AS mapped
      FROM job_titles jt
      LEFT JOIN sections s ON s.id = jt."sectionId"
-     WHERE EXISTS (SELECT 1 FROM job_title_ppe_matrix m WHERE m."jobTitleId" = jt.id AND m.is_active)
+     WHERE jt."ppeCategoryId" IS NULL
+       AND EXISTS (SELECT 1 FROM job_title_ppe_matrix m WHERE m."jobTitleId" = jt.id AND m.is_active)
      ORDER BY jt.name, s.name`,
     { type: QueryTypes.SELECT }
   );
@@ -29,6 +30,18 @@ export const assertCategory = async (categoryId: string | null | undefined, jobT
   if (!category) throw fieldErrors({ [field]: 'Choose a PPE category from the list' });
   if (category.ppeCategoryId) throw fieldErrors({ [field]: 'That job title takes its PPE from another category; choose that category instead' });
 };
+
+/** A title other titles inherit from cannot take a category itself, or inheritance would chain. */
+export const assertNoFollowers = async (jobTitleId: string, name: string, t: Transaction, field = 'ppeCategoryId') => {
+  if (await models.JobTitle.count({ where: { ppeCategoryId: jobTitleId }, transaction: t })) {
+    throw fieldErrors({ [field]: `${name} is a PPE category other job titles use, so it cannot take another category` });
+  }
+};
+
+const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** Keywords match at the start of a word; one written with a space ("it ") must be the whole word. */
+const keywordTest = (kw: string) =>
+  new RegExp(kw !== kw.trim() ? `\\b${escape(kw.trim())}\\b` : `\\b${escape(kw)}`);
 
 // v1 auto-map keywords: a category whose name contains the key gets job titles containing a keyword
 const KEYWORDS: Record<string, string[]> = {
@@ -64,8 +77,9 @@ export const suggestCategories = async () => {
     { type: QueryTypes.SELECT }
   );
   const byKeyword = Object.entries(KEYWORDS).flatMap(([key, words]) => {
-    const category = categories.find((c) => c.lower.includes(key) || key.includes(c.lower));
-    return category ? [{ category, words }] : [];
+    const whole = new RegExp(`\\b${escape(key)}\\b`);
+    const category = categories.find((c) => whole.test(c.lower));
+    return category ? [{ category, words: words.map(keywordTest) }] : [];
   });
 
   const suggestions = [];
@@ -74,7 +88,7 @@ export const suggestCategories = async () => {
     const name = jt.name.toLowerCase();
     const first = name.split(' ')[0] ?? name;
     const match =
-      byKeyword.find((k) => k.words.some((w) => name.includes(w)))?.category ??
+      byKeyword.find((k) => k.words.some((w) => w.test(name)))?.category ??
       categories.find((c) => name.includes(c.lower) || (first.length > 2 && c.lower.includes(first)));
     if (match) suggestions.push({ jobTitleId: jt.id, name: jt.name, section: jt.section, ppeCategoryId: match.id, categoryName: match.name });
   }
@@ -88,11 +102,7 @@ export const applyCategories = (input: CategoryMappingInput) =>
       const row = await models.JobTitle.findByPk(m.jobTitleId, { transaction: t, lock: t.LOCK.UPDATE });
       if (!row) throw fieldErrors({ [`mappings.${i}.jobTitleId`]: 'This job title no longer exists' });
       await assertCategory(m.ppeCategoryId, m.jobTitleId, t, `mappings.${i}.ppeCategoryId`);
-      if (m.ppeCategoryId) {
-        // A title other titles inherit from cannot itself be mapped
-        const followers = await models.JobTitle.count({ where: { ppeCategoryId: m.jobTitleId }, transaction: t });
-        if (followers) throw fieldErrors({ [`mappings.${i}.ppeCategoryId`]: `${row.name} is a PPE category other job titles use, so it cannot take another category` });
-      }
+      if (m.ppeCategoryId) await assertNoFollowers(m.jobTitleId, row.name as string, t, `mappings.${i}.ppeCategoryId`);
       await row.update({ ppeCategoryId: m.ppeCategoryId ?? null }, { transaction: t });
     }
     return { updated: input.mappings.length };

@@ -5,7 +5,7 @@ import { AppError, conflict, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { DEPARTMENT_BOUND, NO_ID, WHOLE_MINE } from '../sections/policy';
 import { assertUnreferenced, type Reference } from '../sections/references';
-import { assertCategory } from './categories';
+import { assertCategory, assertNoFollowers } from './categories';
 import type { JobTitleInput, JobTitleListQuery } from './schemas';
 
 /** Job titles follow their section: whole mine, the user's department, or the user's section. */
@@ -20,6 +20,7 @@ const EMPLOYEE_COUNT = literal(
   '(SELECT COUNT(*) FROM employees e WHERE e."jobTitleId" = "JobTitle"."id" AND e."isActive" = true)'
 );
 const HAS_MATRIX = 'EXISTS (SELECT 1 FROM job_title_ppe_matrix m WHERE m."jobTitleId" = "JobTitle"."id" AND m.is_active)';
+const IS_CATEGORY = `"JobTitle"."ppeCategoryId" IS NULL AND ${HAS_MATRIX}`;
 const COUNTS = { include: [[EMPLOYEE_COUNT, 'employeeCount'], [literal(HAS_MATRIX), 'hasMatrix']] } as never;
 
 const categoryInclude = () => ({ model: models.JobTitle, as: 'ppeCategory', attributes: ['id', 'name'], required: false });
@@ -67,7 +68,7 @@ export const listJobTitles = async (auth: AuthContext, q: JobTitleListQuery) => 
   if (q.departmentId) where.push({ '$section.department_id$': q.departmentId });
   if (q.category === 'mapped') where.push({ ppeCategoryId: { [Op.ne]: null } });
   if (q.category === 'unmapped') where.push({ ppeCategoryId: null }, literal(`NOT ${HAS_MATRIX}`));
-  if (q.category === 'categories') where.push(literal(HAS_MATRIX));
+  if (q.category === 'categories') where.push(literal(IS_CATEGORY));
 
   const { rows, count } = await models.JobTitle.findAndCountAll({
     where: { [Op.and]: where },
@@ -154,11 +155,7 @@ export const updateJobTitle = async (auth: AuthContext, id: string, input: JobTi
     await assertUnique(input, t, row);
     if (input.ppeCategoryId && input.ppeCategoryId !== row.ppeCategoryId) {
       await assertCategory(input.ppeCategoryId, id, t);
-      if (await models.JobTitle.count({ where: { ppeCategoryId: id }, transaction: t })) {
-        throw new AppError('VALIDATION_FAILED', 'Some fields are invalid', {
-          fieldErrors: { ppeCategoryId: ['Other job titles take their PPE from this one, so it cannot take another category'] },
-        });
-      }
+      await assertNoFollowers(id, row.name as string, t);
     }
     await row.update(input, { transaction: t });
   });

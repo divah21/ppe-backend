@@ -11,7 +11,7 @@ export const organisationSummary = async () => {
        (SELECT COUNT(*) FROM sections WHERE NOT is_active) AS inactive_sections,
        (SELECT COUNT(*) FROM job_titles WHERE "isActive") AS job_titles,
        (SELECT COUNT(*) FROM job_titles WHERE NOT "isActive") AS inactive_job_titles,
-       (SELECT COUNT(*) FROM job_titles jt WHERE EXISTS (SELECT 1 FROM job_title_ppe_matrix m WHERE m."jobTitleId" = jt.id AND m.is_active)) AS categories,
+       (SELECT COUNT(*) FROM job_titles jt WHERE jt."ppeCategoryId" IS NULL AND EXISTS (SELECT 1 FROM job_title_ppe_matrix m WHERE m."jobTitleId" = jt.id AND m.is_active)) AS categories,
        (SELECT COUNT(*) FROM job_titles WHERE "ppeCategoryId" IS NOT NULL) AS mapped,
        (SELECT COUNT(*) FROM job_titles jt WHERE jt."isActive" AND jt."ppeCategoryId" IS NULL
           AND NOT EXISTS (SELECT 1 FROM job_title_ppe_matrix m WHERE m."jobTitleId" = jt.id AND m.is_active)) AS without_ppe,

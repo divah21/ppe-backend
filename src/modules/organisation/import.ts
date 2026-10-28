@@ -4,7 +4,7 @@ import { models, sequelize, type Row } from '../../core/db';
 import { AppError } from '../../core/errors';
 import { importTransaction, savepoint } from '../../core/import';
 import { departmentBody } from '../departments/schemas';
-import { assertCategory } from '../job-titles/categories';
+import { assertCategory, assertNoFollowers } from '../job-titles/categories';
 import { jobTitleBody } from '../job-titles/schemas';
 import { sectionBody } from '../sections/schemas';
 import type { OrgImportInput, OrgKind } from './schemas';
@@ -131,14 +131,19 @@ export const importOrganisation = async (kind: OrgKind, input: OrgImportInput) =
             if (ppeCategoryId !== undefined) filled.ppeCategoryId = ppeCategoryId;
             const body = BODIES[kind].parse(current ? { ...stored(current, parent), ...filled } : filled) as Record<string, unknown>;
 
-            if (body.code) {
+            // Same rules as the forms: department codes are unique, job-title codes unique when they change, section codes free
+            const codeChanged = !current || lower(body.code) !== lower(current.code);
+            if (body.code && kind !== 'sections' && codeChanged) {
               const [clash] = await sequelize.query<{ id: string }>(
                 `SELECT id FROM ${TABLES[kind]} WHERE lower(code) = :code ${current ? 'AND id <> :id' : ''} LIMIT 1`,
                 { type: QueryTypes.SELECT, replacements: { code: lower(body.code), id: current?.id }, transaction: sp }
               );
               if (clash) throw new RowProblem(`The code ${body.code as string} is already used`);
             }
-            if (kind === 'job-titles') await assertCategory(body.ppeCategoryId as string | null | undefined, current?.id ?? null, sp, 'ppeCategory');
+            if (kind === 'job-titles' && body.ppeCategoryId && body.ppeCategoryId !== current?.ppeCategoryId) {
+              await assertCategory(body.ppeCategoryId as string, current?.id ?? null, sp, 'ppeCategory');
+              if (current) await assertNoFollowers(current.id as string, current.name as string, sp, 'ppeCategory');
+            }
 
             if (current) {
               await current.update(body, { transaction: sp });
