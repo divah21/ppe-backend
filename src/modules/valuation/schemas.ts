@@ -25,7 +25,7 @@ const rangeIssue = { message: 'The end date must be on or after the start date',
 
 export const spendingQuery = listQuery(['spent', 'label', 'allocationCount'], {
   ...range,
-  groupBy: z.enum(['department', 'section', 'item', 'month']).default('department'),
+  groupBy: z.enum(['department', 'section', 'item', 'employee', 'month', 'year']).default('department'),
 }).refine(checkRange, rangeIssue);
 
 export const spendingTotalsQuery = z.object(range).refine(checkRange, rangeIssue);
