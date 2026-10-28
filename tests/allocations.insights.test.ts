@@ -118,7 +118,7 @@ describe('GET /allocations/import/template', () => {
 describe('reports for section reps', () => {
   it('lets a section rep export their allocations, requests and PPE cards', async () => {
     const list = await sectionRep.get('/api/v2/reports');
-    expect(list.body.data.map((r: { key: string }) => r.key).sort()).toEqual(['allocations', 'employees', 'failures', 'ppe-cards', 'requests']);
+    expect(list.body.data.map((r: { key: string }) => r.key).sort()).toEqual(['allocations', 'employees', 'failures', 'overview', 'ppe-cards', 'requests']);
     const file = await sectionRep.get('/api/v2/reports/allocations');
     expect(file.status).toBe(200);
   });

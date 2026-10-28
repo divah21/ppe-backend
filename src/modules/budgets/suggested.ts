@@ -35,7 +35,7 @@ interface EmployeeCost {
  * items (or its PPE category's), plus their section's items not already covered, each at quantity x
  * the average stock price.
  */
-const employeeCosts = async (dept: string | null): Promise<EmployeeCost[]> => {
+export const employeeCosts = async (dept: string | null): Promise<EmployeeCost[]> => {
   const [employees, prices, titleMatrix, sectionMatrix] = await Promise.all([
     sequelize.query<{
       id: string;
