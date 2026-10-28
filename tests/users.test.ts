@@ -329,6 +329,9 @@ describe('POST /api/v2/users/:id/reset-password', () => {
 
     const audit = await models.AuditLog.findOne({ where: { entityId: user.id, action: 'RESET' } });
     expect(JSON.stringify(audit?.toJSON())).not.toContain(res.body.data.temporaryPassword);
+    // Recorded once, as the reset, not again as a generic create
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await models.AuditLog.count({ where: { entityId: user.id, action: 'CREATE' } })).toBe(0);
   });
 
   it('refuses to reset the admin’s own password here', async () => {

@@ -163,6 +163,8 @@ const accessLogger = () => {
  * Middleware to automatically log all modifying operations
  * Detects POST, PUT, PATCH, DELETE and logs to database
  */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const autoAuditLog = () => {
   return async (req, res, next) => {
     // Only log modifying requests
@@ -175,55 +177,49 @@ const autoAuditLog = () => {
       return next();
     }
 
-    // Store original json method
+    // Logged once the response is sent, so 204 deletes are recorded too
+    let body;
     const originalJson = res.json;
-
-    // Override json method to capture response
     res.json = function(data) {
-      // Create audit log after successful response
-      if (res.statusCode >= 200 && res.statusCode < 300) {
-        const entityId = req.params.id || data?.data?.id || null;
-        
-        // Determine action from method
-        let action = 'UNKNOWN';
-        switch (req.method) {
-          case 'POST': action = 'CREATE'; break;
-          case 'PUT': action = 'UPDATE'; break;
-          case 'PATCH': action = 'UPDATE'; break;
-          case 'DELETE': action = 'DELETE'; break;
-        }
-
-        // Extract entity type from URL
-        const pathParts = req.originalUrl.split('/').filter(p => p && !p.includes('?'));
-        const apiIndex = pathParts.findIndex(p => p === 'api');
-        const entityType = apiIndex >= 0 && pathParts[apiIndex + 2] 
-          ? pathParts[apiIndex + 2].toUpperCase().replace(/-/g, '_')
-          : 'UNKNOWN';
-
-        if (req.user) {
-          createAuditLog(
-            req.user.id,
-            action,
-            entityType,
-            entityId,
-            { 
-              body: sanitizeBody(req.body), 
-              params: req.params, 
-              query: req.query 
-            },
-            { 
-              method: req.method, 
-              url: req.originalUrl,
-              statusCode: res.statusCode
-            },
-            req
-          ).catch(err => console.error('Auto audit log error:', err));
-        }
-      }
-
-      // Call original json method
+      body = data;
       return originalJson.call(this, data);
     };
+
+    res.on('finish', () => {
+      // Routes that record a specific event (v2 audit()) are not logged twice
+      if (res.statusCode < 200 || res.statusCode >= 300 || !req.user || req.audited) return;
+
+      const pathParts = req.originalUrl.split('?')[0].split('/').filter(Boolean);
+      const apiIndex = pathParts.findIndex(p => p === 'api');
+      const entityType = apiIndex >= 0 && pathParts[apiIndex + 2]
+        ? pathParts[apiIndex + 2].toUpperCase().replace(/-/g, '_')
+        : 'UNKNOWN';
+
+      // POST /<entity>/:id/<action> (approve, reset-password, ...) is that action, not a create
+      const last = pathParts[pathParts.length - 1];
+      const afterId = pathParts.length >= 2 && UUID.test(pathParts[pathParts.length - 2]) && !UUID.test(last);
+      const action = req.method === 'POST' && afterId
+        ? last.toUpperCase().replace(/-/g, '_')
+        : { POST: 'CREATE', PUT: 'UPDATE', PATCH: 'UPDATE', DELETE: 'DELETE' }[req.method];
+
+      createAuditLog(
+        req.user.id,
+        action,
+        entityType,
+        req.params.id || body?.data?.id || null,
+        {
+          body: sanitizeBody(req.body),
+          params: req.params,
+          query: req.query
+        },
+        {
+          method: req.method,
+          url: req.originalUrl,
+          statusCode: res.statusCode
+        },
+        req
+      ).catch(err => console.error('Auto audit log error:', err));
+    });
 
     next();
   };
