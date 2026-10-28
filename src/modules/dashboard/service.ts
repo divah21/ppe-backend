@@ -3,21 +3,22 @@ import { ROLES, type AuthContext, type Role } from '../../core/auth';
 import { sequelize } from '../../core/db';
 import { budgetSummary } from '../budgets/service';
 import { PRICE_CTE, allocationCost } from '../budgets/spend';
-import { stockValueSummary } from '../valuation/stock';
 import type { DashboardQuery } from './schemas';
 import { awaitingRenewal } from '../allocations/rules';
-import { SEES_BUDGET, SEES_FAILURES, SEES_FORECAST, actionQueue, failurePanel, forecastShortfall, recentActivity, recentRequests } from './panels';
+import { awaitingRole } from '../requests/workflow';
+import {
+  SEES_BUDGET,
+  SEES_FAILURES,
+  SEES_FORECAST,
+  SEES_STOCK_VALUE,
+  actionQueue,
+  failurePanel,
+  forecastShortfall,
+  recentActivity,
+  recentRequests,
+  stockTotals,
+} from './panels';
 import { CLOSED_REQUEST_STATUSES, RENEWAL_SQL, REQUEST_DEPARTMENT, REQUEST_SECTION, scopeOf, scopeSql, type Scope } from './scope';
-
-/** Request stages each role acts on (v1 approval chain: section rep, dept rep, HOD, stores; SHEQ for replacements). */
-const ACTION_STATUSES: Record<Role, readonly string[]> = {
-  [ROLES.ADMIN]: ['pending', 'dept-rep-review', 'sheq-review', 'hod-review', 'stores-review', 'approved', 'partially-fulfilled'],
-  [ROLES.SECTION_REP]: ['pending'],
-  [ROLES.DEPARTMENT_REP]: ['dept-rep-review'],
-  [ROLES.HOD]: ['hod-review'],
-  [ROLES.SHEQ]: ['sheq-review'],
-  [ROLES.STORES]: ['stores-review', 'approved', 'partially-fulfilled'],
-};
 
 /** Stock is mine-wide; only roles that manage it see stock levels. */
 const SEES_STOCK = new Set<Role>([ROLES.ADMIN, ROLES.STORES, ROLES.SHEQ]);
@@ -66,6 +67,21 @@ const LOW_STOCK_LINES = `
   FROM stocks s JOIN ppe_items p ON p.id = s.ppe_item_id
   WHERE s.quantity <= COALESCE(s.min_level, 0)`;
 
+/**
+ * The year's budget against spend: the company budget for whole-mine roles, else the department's.
+ * Null when neither is set, so the tile can say so instead of showing 0%.
+ */
+const budgetTile = (b: Awaited<ReturnType<typeof budgetSummary>> | null) => {
+  if (!b) return null;
+  if (b.company && b.company.totalBudget > 0) {
+    return { allocated: b.company.totalBudget, spent: b.company.spent, utilisationPercent: b.company.utilisationPercent, fiscalYear: b.fiscalYear };
+  }
+  if (b.totals.allocated > 0) {
+    return { allocated: b.totals.allocated, spent: b.totals.spent, utilisationPercent: b.totals.utilisationPercent, fiscalYear: b.fiscalYear };
+  }
+  return null;
+};
+
 const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['period']) => {
   const rs = requestScope(scope);
   const as = allocationScope(scope);
@@ -78,7 +94,7 @@ const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['per
          COUNT(*) FILTER (WHERE r.status::text = 'fulfilled' AND r.fulfilled_date >= date_trunc(:period, NOW())) AS fulfilled
        ${REQUESTS_FROM}
        WHERE ${rs.sql}`,
-      { ...rs.replacements, actionStatuses: ACTION_STATUSES[auth.role] ?? ['none'], closed: CLOSED_REQUEST_STATUSES, period }
+      { ...rs.replacements, actionStatuses: awaitingRole(auth.role).length ? awaitingRole(auth.role) : ['none'], closed: CLOSED_REQUEST_STATUSES, period }
     ),
     // Issued and spent under the scope at issue time
     select<{ issued: string; spend: string }>(
@@ -97,11 +113,11 @@ const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['per
       { ...as.replacements, renewalDays: RENEWAL_WINDOW_DAYS }
     ),
     select<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM employees e JOIN sections sec ON sec.id = e."sectionId" WHERE e."isActive" AND ${as.sql}`,
+      `SELECT COUNT(*) AS count FROM employees e LEFT JOIN sections sec ON sec.id = e."sectionId" WHERE e."isActive" AND ${as.sql}`,
       as.replacements
     ),
     SEES_STOCK.has(auth.role) ? select<{ count: string }>(`SELECT COUNT(*) AS count ${LOW_STOCK_LINES}`, {}) : null,
-    SEES_STOCK.has(auth.role) ? stockValueSummary({}) : null,
+    SEES_STOCK_VALUE.has(auth.role) ? stockTotals() : null,
     SEES_BUDGET.has(auth.role) ? budgetSummary(auth, new Date().getFullYear()) : null,
   ]);
   const lowStock = low ? num(low[0]?.count) : null;
@@ -117,11 +133,7 @@ const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['per
     employees: num(people?.count),
     stockValue: stock ? stock.totalValue : null,
     outOfStock: stock ? stock.outOfStockCount : null,
-    // Null when no budget is set for the year, so the tile can say so instead of showing 0%
-    budget:
-      budget && budget.totals.allocated > 0
-        ? { allocated: budget.totals.allocated, spent: budget.totals.spent, utilisationPercent: budget.totals.utilisationPercent, fiscalYear: budget.fiscalYear }
-        : null,
+    budget: budgetTile(budget),
   };
 };
 
@@ -249,8 +261,9 @@ export const dashboardSummary = async (auth: AuthContext, q: DashboardQuery) => 
     renewalsTop(scope),
     scopeLabel(scope),
     select<{ start: Date }>(`SELECT date_trunc(:period, NOW()) AS start`, { period: q.period }),
-    actionQueue(scope, ACTION_STATUSES[role] ?? []),
-    recentRequests(scope),
+    actionQueue(scope, awaitingRole(role)),
+    // Only roles without a failures or forecast panel show the latest requests
+    !SEES_FAILURES.has(role) && !SEES_FORECAST.has(role) ? recentRequests(scope) : [],
     SEES_FAILURES.has(role) ? failurePanel(scope) : null,
     SEES_FORECAST.has(role) ? forecastShortfall(auth) : null,
     role === ROLES.ADMIN ? recentActivity() : null,

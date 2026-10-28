@@ -1,6 +1,7 @@
 import { QueryTypes } from 'sequelize';
 import { ROLES, type AuthContext, type Role } from '../../core/auth';
 import { sequelize } from '../../core/db';
+import { OPEN_STATUSES } from '../failures/service';
 import { listForecast } from '../valuation/forecast';
 import { forecastQuery } from '../valuation/schemas';
 import { REQUEST_DEPARTMENT, REQUEST_SECTION, scopeSql, type Scope } from './scope';
@@ -64,16 +65,16 @@ export const recentRequests = async (scope: Scope) => {
   return rows.map(toRequest);
 };
 
-const OPEN_FAILURES = ['pending-sheq-review', 'sheq-approved', 'stores-processing'];
+// Left join: the failures page keeps reports for employees without a section, so the counts agree
 const FAILURES_FROM = `
   FROM failure_reports f
   JOIN employees e ON e.id = f.employee_id
-  JOIN sections sec ON sec.id = e."sectionId"`;
+  LEFT JOIN sections sec ON sec.id = e."sectionId"`;
 
 /** Open failure reports by severity, and the newest few, for roles that act on them. */
 export const failurePanel = async (scope: Scope) => {
   const s = scopeSql(scope, 'sec.id', 'sec.department_id');
-  const replacements = { ...s.replacements, open: OPEN_FAILURES, top: TOP };
+  const replacements = { ...s.replacements, open: OPEN_STATUSES, top: TOP };
   const [severities, recent] = await Promise.all([
     select<{ severity: string; count: string }>(
       `SELECT f.severity, COUNT(*) AS count ${FAILURES_FROM} WHERE ${s.sql} AND f.status::text IN (:open) GROUP BY 1`,
@@ -114,7 +115,7 @@ export const failurePanel = async (scope: Scope) => {
 
 /** Items whose renewals in the next 90 days the shelf cannot cover, largest gap first. */
 export const forecastShortfall = async (auth: AuthContext) => {
-  const { rows } = await listForecast(auth, forecastQuery.parse({ days: 90, pageSize: TOP, sort: 'shortage' }));
+  const { rows } = await listForecast(auth, forecastQuery.parse({ days: 90, pageSize: TOP, sort: 'shortage' }), { count: false });
   return rows
     .filter((r) => r.shortage > 0)
     .map((r) => ({
@@ -133,7 +134,7 @@ export const recentActivity = async () => {
      FROM audit_logs l LEFT JOIN users u ON u.id = l.user_id
      WHERE l.action <> 'LOGIN'
      ORDER BY l.created_at DESC LIMIT :top`,
-    { top: TOP + 1 }
+    { top: TOP }
   );
   return rows.map((r) => ({
     id: r.id,
@@ -146,4 +147,17 @@ export const recentActivity = async () => {
 
 export const SEES_FAILURES = new Set<Role>([ROLES.ADMIN, ROLES.SHEQ, ROLES.STORES]);
 export const SEES_FORECAST = new Set<Role>([ROLES.ADMIN, ROLES.STORES]);
-export const SEES_BUDGET = new Set<Role>([ROLES.ADMIN, ROLES.STORES, ROLES.SHEQ, ROLES.HOD, ROLES.DEPARTMENT_REP]);
+/** Roles whose tiles include the budget, and the stock value; nothing is queried for the others. */
+export const SEES_BUDGET = new Set<Role>([ROLES.ADMIN, ROLES.HOD, ROLES.DEPARTMENT_REP]);
+export const SEES_STOCK_VALUE = new Set<Role>([ROLES.ADMIN, ROLES.STORES]);
+
+/** Total stock value and empty lines, valued as the valuation page values them. */
+export const stockTotals = async () => {
+  const [r] = await select<{ value: string; empty: string }>(
+    `SELECT COALESCE(SUM(COALESCE(st.quantity * st.unit_price_u_s_d, st.total_value_u_s_d, 0)), 0) AS value,
+            COUNT(*) FILTER (WHERE st.quantity <= 0) AS empty
+     FROM stocks st JOIN ppe_items i ON i.id = st.ppe_item_id`,
+    {}
+  );
+  return { totalValue: Math.round(Number(r?.value ?? 0) * 100) / 100, outOfStockCount: Number(r?.empty ?? 0) };
+};

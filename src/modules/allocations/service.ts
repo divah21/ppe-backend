@@ -321,6 +321,7 @@ const renewalWindow = (auth: AuthContext, q: RenewalsQuery) => {
       SELECT * FROM due
       WHERE due_date <= now() + make_interval(days => :days)
       ${q.includeOverdue ? '' : 'AND due_date >= now()'}
+      ${q.onlyOverdue ? 'AND due_date < now()' : ''}
     )`;
   return { cte, replacements };
 };
