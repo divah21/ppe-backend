@@ -4,6 +4,7 @@ import { listQuery } from '../../core/http';
 export const MAX_QUANTITY = 999;
 export const MAX_MONTHS = 120;
 export const MAX_BATCH = 1000;
+export const MATRIX_IMPORT_MAX = 5000;
 
 const uuid = z.string().uuid();
 const optionalUuid = uuid.optional();
@@ -132,7 +133,8 @@ export const matrixImportBody = z.object({
   dryRun: z.boolean().default(true),
   /** Remove an owner's items that the file does not list (v1 section upload replaced each section) */
   replace: z.boolean().default(false),
-  rows: z.array(z.record(z.unknown())).min(1, 'The file has no rows').max(MAX_BATCH, `Upload at most ${MAX_BATCH} rows at a time`),
+  // A whole department's template can exceed one grid save; the import saves it in one transaction
+  rows: z.array(z.record(z.unknown())).min(1, 'The file has no rows').max(MATRIX_IMPORT_MAX, `Upload at most ${MATRIX_IMPORT_MAX} rows at a time`),
 });
 export type MatrixImportInput = z.infer<typeof matrixImportBody>;
 

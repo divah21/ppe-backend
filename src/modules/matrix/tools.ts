@@ -4,8 +4,17 @@ import type { AuthContext } from '../../core/auth';
 import { models, sequelize } from '../../core/db';
 import { AppError } from '../../core/errors';
 import { sectionScope } from './policy';
-import { MAX_MONTHS, MAX_QUANTITY, type MatrixCopyInput, type MatrixImportInput, type MatrixKind } from './schemas';
-import { getJobTitleMatrix, getSectionMatrix, saveJobTitleMatrix, saveSectionMatrix } from './service';
+import { MAX_BATCH, MAX_MONTHS, MAX_QUANTITY, type MatrixCopyInput, type MatrixImportInput, type MatrixKind } from './schemas';
+import {
+  JOB_TITLE_ENTRIES,
+  SECTION_ENTRIES,
+  getJobTitleMatrix,
+  getSectionMatrix,
+  loadJobTitleEntries,
+  loadSectionEntries,
+  saveJobTitleMatrix,
+  saveSectionMatrix,
+} from './service';
 
 const norm = (s: unknown) => String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 const OWNER_KEY = { 'job-titles': 'jobTitleId', sections: 'sectionId' } as const;
@@ -29,17 +38,26 @@ const rowSchema = z.object({
   quantity: whole('Quantity', 1, MAX_QUANTITY).nullish().transform((v) => v ?? 1),
   months: whole('Replacement months', 1, MAX_MONTHS).nullish(),
   heavyUse: whole('Heavy-use months', 1, MAX_MONTHS).nullish(),
-  mandatory: z.unknown().transform((v) => (v === undefined || v === null || String(v).trim() === '' ? true : /^(y|yes|true|1)$/i.test(String(v).trim()))),
+  mandatory: z.unknown().transform((v, ctx) => {
+    const s = String(v ?? '').trim();
+    if (s === '' || /^(y|yes|true|1)$/i.test(s)) return true;
+    if (/^(n|no|false|0)$/i.test(s)) return false;
+    ctx.addIssue({ code: 'custom', message: 'Mandatory must be Yes or No' });
+    return z.NEVER;
+  }),
 });
 
 type Owner = { id: string; name: string; section: string };
 
-/** Job titles or sections the user may edit, keyed by name (and by "section / job title"). */
+/** Job titles or sections the user may edit, keyed by name (and sections by code), as the grid lists them. */
 const ownersInScope = async (auth: AuthContext, kind: MatrixKind) => {
   const byName = new Map<string, Owner[]>();
-  const push = (key: string, o: Owner) => byName.set(key, [...(byName.get(key) ?? []), o]);
+  const push = (key: string, o: Owner) => {
+    const list = byName.get(key) ?? [];
+    if (!list.some((x) => x.id === o.id)) byName.set(key, [...list, o]);
+  };
   if (kind === 'sections') {
-    const rows = await models.Section.findAll({ where: { [Op.and]: [sectionScope(auth), { isActive: { [Op.ne]: false } }] }, attributes: ['id', 'name', 'code'] });
+    const rows = await models.Section.findAll({ where: sectionScope(auth), attributes: ['id', 'name', 'code'] });
     for (const s of rows) {
       const o = { id: s.id as string, name: s.name as string, section: s.name as string };
       push(norm(s.name), o);
@@ -47,21 +65,24 @@ const ownersInScope = async (auth: AuthContext, kind: MatrixKind) => {
     }
   } else {
     const rows = await models.JobTitle.findAll({
-      where: { isActive: { [Op.ne]: false } },
       attributes: ['id', 'name'],
       include: [{ model: models.Section, as: 'section', required: true, attributes: ['id', 'name', 'code'], where: sectionScope(auth) }],
     });
-    for (const j of rows) {
-      const o = { id: j.id as string, name: j.name as string, section: j.section.name as string };
-      push(norm(j.name), o);
-    }
+    for (const j of rows) push(norm(j.name), { id: j.id as string, name: j.name as string, section: j.section.name as string });
   }
   return byName;
 };
 
-const currentEntries = async (auth: AuthContext, kind: MatrixKind, id: string) => {
-  const row = kind === 'job-titles' ? await getJobTitleMatrix(auth, id) : await getSectionMatrix(auth, id);
-  return row.entries.map((e) => e.ppeItemId);
+/** Current entries of many owners in one pass, for "replace". */
+const currentEntries = async (kind: MatrixKind, ids: string[]) => {
+  if (kind === 'job-titles') {
+    const owners = await models.JobTitle.findAll({ where: { id: ids }, attributes: ['id', 'name'] });
+    const entries = await loadJobTitleEntries(owners);
+    return new Map([...entries].map(([id, rows]) => [id, rows.map((r) => r.ppeItemId as string)]));
+  }
+  const owners = await models.Section.findAll({ where: { id: ids }, attributes: ['id'] });
+  const entries = await loadSectionEntries(owners);
+  return new Map([...entries].map(([id, rows]) => [id, rows.map((r) => r.ppeItemId as string)]));
 };
 
 const save = (auth: AuthContext, kind: MatrixKind, upserts: Array<Record<string, unknown>>, deletes: Array<Record<string, string>>) =>
@@ -120,10 +141,9 @@ export const importMatrix = async (auth: AuthContext, kind: MatrixKind, input: M
 
   const deletes: Array<Record<string, string>> = [];
   if (input.replace && !errors.length) {
+    const current = await currentEntries(kind, [...touched.keys()]);
     for (const [ownerId, keep] of touched) {
-      for (const ppeItemId of await currentEntries(auth, kind, ownerId)) {
-        if (!keep.has(ppeItemId)) deletes.push({ [ownerKey]: ownerId, ppeItemId });
-      }
+      for (const ppeItemId of current.get(ownerId) ?? []) if (!keep.has(ppeItemId)) deletes.push({ [ownerKey]: ownerId, ppeItemId });
     }
   }
   const report = { dryRun: input.dryRun, owners: touched.size, entries: upserts.size, removals: deletes.length, errors };
@@ -136,10 +156,13 @@ export const importMatrix = async (auth: AuthContext, kind: MatrixKind, input: M
 export const copyMatrix = async (auth: AuthContext, kind: MatrixKind, input: MatrixCopyInput) => {
   const ownerKey = OWNER_KEY[kind];
   const source = kind === 'job-titles' ? await getJobTitleMatrix(auth, input.fromId) : await getSectionMatrix(auth, input.fromId);
-  const targets = input.toIds.filter((id) => id !== input.fromId);
+  const targets = [...new Set(input.toIds)].filter((id) => id !== input.fromId);
   if (!targets.length) throw new AppError('VALIDATION_FAILED', 'Choose somewhere other than the source', { fieldErrors: { toIds: ['Choose somewhere other than the source'] } });
   const entries = source.entries.filter((e) => e.ppeItem?.isActive !== false);
   if (!entries.length) throw new AppError('VALIDATION_FAILED', `${source.name} has no PPE to copy`);
+  if (targets.length * entries.length > MAX_BATCH) {
+    throw new AppError('VALIDATION_FAILED', `That copies more than ${MAX_BATCH} entries at once. Choose fewer targets.`);
+  }
   const upserts = targets.flatMap((id) =>
     entries.map((e) => ({
       [ownerKey]: id,
@@ -153,36 +176,31 @@ export const copyMatrix = async (auth: AuthContext, kind: MatrixKind, input: Mat
   const deletes: Array<Record<string, string>> = [];
   if (input.replace) {
     const wanted = new Set(entries.map((e) => e.ppeItemId));
+    const current = await currentEntries(kind, targets);
     for (const id of targets) {
-      for (const ppeItemId of await currentEntries(auth, kind, id)) if (!wanted.has(ppeItemId)) deletes.push({ [ownerKey]: id, ppeItemId });
+      for (const ppeItemId of current.get(id) ?? []) if (!wanted.has(ppeItemId)) deletes.push({ [ownerKey]: id, ppeItemId });
     }
   }
   return save(auth, kind, upserts, deletes);
 };
 
-/** Owners set up or not, and entries, for the matrix cards. */
+/** Owners set up or not, and entries, for the matrix cards; counted by the grid's own entry rules. */
 export const matrixSummary = async (auth: AuthContext, kind: MatrixKind) => {
   const scope = sectionScope(auth) as Record<string, string>;
-  const where: string[] = [];
-  const replacements: Record<string, unknown> = {};
-  if (scope.id) (where.push('s.id = :scopeId'), (replacements.scopeId = scope.id));
-  if (scope.departmentId) (where.push('s.department_id = :scopeId'), (replacements.scopeId = scope.departmentId));
-  const scoped = where.length ? `AND ${where.join(' AND ')}` : '';
+  const scoped = scope.id ? 's.id = :scopeId' : scope.departmentId ? 's.department_id = :scopeId' : 'TRUE';
+  const replacements = { scopeId: scope.id ?? scope.departmentId };
   const sql =
     kind === 'sections'
-      ? `SELECT COUNT(*) AS owners,
-                COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM section_ppe_matrix m WHERE m.section_id = s.id AND m.is_active IS NOT FALSE)) AS configured,
-                (SELECT COUNT(*) FROM section_ppe_matrix m JOIN sections s2 ON s2.id = m.section_id
-                  WHERE m.is_active IS NOT FALSE ${scoped.replaceAll('s.', 's2.')}) AS entries
-         FROM sections s WHERE s.is_active IS NOT FALSE ${scoped}`
-      : `SELECT COUNT(*) AS owners,
-                COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM job_title_ppe_matrix m WHERE m."jobTitleId" = j.id AND m.is_active IS NOT FALSE)) AS configured,
-                (SELECT COUNT(*) FROM job_title_ppe_matrix m JOIN job_titles j2 ON j2.id = m."jobTitleId" JOIN sections s2 ON s2.id = j2."sectionId"
-                  WHERE m.is_active IS NOT FALSE ${scoped.replaceAll('s.', 's2.')}) AS entries
-         FROM job_titles j JOIN sections s ON s.id = j."sectionId" WHERE j."isActive" IS NOT FALSE ${scoped}`;
+      ? `SELECT COUNT(*) AS owners, COUNT(*) FILTER (WHERE n > 0) AS configured, COALESCE(SUM(n), 0) AS entries FROM (
+           SELECT (SELECT COUNT(*) ${SECTION_ENTRIES()}) AS n
+           FROM sections "Section" JOIN sections s ON s.id = "Section".id
+           WHERE "Section".is_active IS NOT FALSE AND ${scoped}) x`
+      : `SELECT COUNT(*) AS owners, COUNT(*) FILTER (WHERE n > 0) AS configured, COALESCE(SUM(n), 0) AS entries FROM (
+           SELECT (SELECT COUNT(*) ${JOB_TITLE_ENTRIES()}) AS n
+           FROM job_titles "JobTitle" JOIN sections s ON s.id = "JobTitle"."sectionId"
+           WHERE "JobTitle"."isActive" IS NOT FALSE AND ${scoped}) x`;
   const [r] = await sequelize.query<Record<string, string>>(sql, { replacements, type: QueryTypes.SELECT });
   const owners = Number(r?.owners ?? 0);
   const configured = Number(r?.configured ?? 0);
   return { owners, configured, notConfigured: owners - configured, entries: Number(r?.entries ?? 0) };
 };
-

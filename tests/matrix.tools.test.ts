@@ -66,9 +66,11 @@ describe('POST /matrix/:kind/import', () => {
         { owner: `${fx.tag} Twin`, item: gloves.itemCode },
         { owner: driver.name, item: `${fx.tag}-NOPE` },
         { owner: driver.name, item: gloves.itemCode, quantity: 0 },
+        { owner: driver.name, item: boots.itemCode, mandatory: 'Yse' },
       ],
     });
-    expect(res.body.data.errors.map((e: { row: number }) => e.row)).toEqual([1, 2, 3, 4]);
+    expect(res.body.data.errors.map((e: { row: number }) => e.row)).toEqual([1, 2, 3, 4, 5]);
+    expect(res.body.data.errors[4].message).toBe('Mandatory must be Yes or No');
     expect(res.body.data.errors[1].message).toMatch(/Section column/);
   });
 
@@ -98,6 +100,9 @@ describe('POST /matrix/:kind/copy', () => {
     const res = await write(sheq, 'post', '/api/v2/matrix/job-titles/copy').send({ fromId: fitter.id, toIds: [driver.id], replace: true });
     expect(res.status).toBe(200);
     expect((await own(driver.id)).map((r) => r.ppeItemId)).toEqual([boots.id]);
+    const twice = await write(sheq, 'post', '/api/v2/matrix/job-titles/copy').send({ fromId: fitter.id, toIds: [driver.id, driver.id] });
+    expect(twice.status).toBe(200);
+    expect(await own(driver.id)).toHaveLength(1);
     const empty = await write(sheq, 'post', '/api/v2/matrix/job-titles/copy').send({ fromId: fitter.id, toIds: [fitter.id] });
     expect(empty.status).toBe(422);
     expect((await write(hod, 'post', '/api/v2/matrix/job-titles/copy').send({ fromId: fitter.id, toIds: [driver.id] })).status).toBe(403);
