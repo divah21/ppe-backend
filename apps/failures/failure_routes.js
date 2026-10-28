@@ -4,6 +4,8 @@ const { FailureReport, Employee, PPEItem, Allocation, Section, Department, Stock
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
+const { sequelize } = require('../../database/db');
+const { deductStock } = require('../../helpers/stock_helper');
 const { body, param } = require('express-validator');
 const { validate } = require('../../middlewares/validation_middleware');
 const { Op } = require('sequelize');
@@ -389,63 +391,46 @@ router.post(
   auditLog('UPDATE', 'FailureReport'),
   async (req, res, next) => {
     try {
-      const { Stock } = require('../../models');
       const { replacementStockId, actionTaken } = req.body;
 
-      const report = await FailureReport.findByPk(req.params.id, {
-        include: [
-          { model: Employee, as: 'employee' },
-          { model: PPEItem, as: 'ppeItem' },
-          { model: Allocation, as: 'allocation' }
-        ]
-      });
+      const outcome = await sequelize.transaction(async (transaction) => {
+        const report = await FailureReport.findByPk(req.params.id, { transaction, lock: transaction.LOCK.UPDATE });
 
-      if (!report) {
-        return res.status(404).json({
-          success: false,
-          message: 'Failure report not found'
-        });
-      }
+        if (!report) {
+          return { status: 404, message: 'Failure report not found' };
+        }
+        if (report.status === 'replaced') {
+          return { status: 400, message: 'This failure has already been processed and replaced' };
+        }
 
-      if (report.status === 'replaced') {
-        return res.status(400).json({
-          success: false,
-          message: 'This failure has already been processed and replaced'
-        });
-      }
+        let stockDeducted = false;
+        if (report.stockId) {
+          stockDeducted = (await deductStock(report.stockId, 1, { transaction })) !== null;
+        }
 
-      // Deduct from stock if stockId is provided
-      if (report.stockId) {
-        const stock = await Stock.findByPk(report.stockId);
-        if (stock) {
-          if (stock.quantity > 0) {
-            await stock.update({
-              quantity: stock.quantity - 1
-            });
-            console.log(`Deducted 1 unit from stock ${stock.id}. New quantity: ${stock.quantity - 1}`);
+        if (report.allocationId) {
+          const allocation = await Allocation.findByPk(report.allocationId, { transaction });
+          if (allocation) {
+            await allocation.update({
+              status: 'replaced',
+              notes: (allocation.notes || '') + `\nReplaced due to ${report.failureType} (Failure Report #${report.id.substring(0, 8)})`
+            }, { transaction });
           }
         }
+
+        await report.update({
+          status: replacementStockId ? 'replaced' : 'investigating',
+          actionTaken: actionTaken || `Stock deducted. ${replacementStockId ? 'Replacement allocated.' : 'Awaiting replacement allocation.'}`,
+          replacementStockId
+        }, { transaction });
+
+        return { report, stockDeducted };
+      });
+
+      if (outcome.status) {
+        return res.status(outcome.status).json({ success: false, message: outcome.message });
       }
-
-      // Update the allocation status if exists
-      if (report.allocationId) {
-        const allocation = await Allocation.findByPk(report.allocationId);
-        if (allocation) {
-          await allocation.update({
-            status: 'replaced',
-            notes: (allocation.notes || '') + `\nReplaced due to ${report.failureType} (Failure Report #${report.id.substring(0, 8)})`
-          });
-        }
-      }
-
-      // Update failure report
-      const updateData = {
-        status: replacementStockId ? 'replaced' : 'investigating',
-        actionTaken: actionTaken || `Stock deducted. ${replacementStockId ? 'Replacement allocated.' : 'Awaiting replacement allocation.'}`,
-        replacementStockId
-      };
-
-      await report.update(updateData);
+      const { report, stockDeducted } = outcome;
 
       const updatedReport = await FailureReport.findByPk(report.id, {
         include: [
@@ -461,7 +446,7 @@ router.post(
           ? 'Failure processed, stock deducted, and replacement allocated'
           : 'Failure processed and stock deducted. Ready for replacement allocation.',
         data: updatedReport,
-        stockDeducted: !!report.stockId
+        stockDeducted
       });
     } catch (error) {
       next(error);
@@ -707,106 +692,81 @@ router.post(
   async (req, res, next) => {
     try {
       const { Stock, PPEItem } = require('../../models');
-      const { stockId, quantity = 1, size, notes } = req.body;
+      const { stockId, size, notes } = req.body;
+      const quantity = Number(req.body.quantity || 1);
 
-      // Find the failure report
-      const report = await FailureReport.findByPk(req.params.id, {
-        include: [
-          { model: Employee, as: 'employee' },
-          { model: PPEItem, as: 'ppeItem' },
-          { model: Allocation, as: 'allocation' }
-        ]
-      });
+      // One transaction with the report row locked, so a retry or a concurrent
+      // call cannot reallocate twice and a failure part-way leaves stock untouched.
+      const outcome = await sequelize.transaction(async (transaction) => {
+        const report = await FailureReport.findByPk(req.params.id, { transaction, lock: transaction.LOCK.UPDATE });
 
-      if (!report) {
-        return res.status(404).json({
-          success: false,
-          message: 'Failure report not found'
-        });
-      }
-
-      if (report.status === 'replaced') {
-        return res.status(400).json({
-          success: false,
-          message: 'This failure has already been reallocated'
-        });
-      }
-
-      // Check if SHEQ has approved the failure report
-      if (report.status === 'pending-sheq-review') {
-        return res.status(400).json({
-          success: false,
-          message: 'Failure report must be approved by SHEQ before reallocation'
-        });
-      }
-
-      // Verify stock exists and has sufficient quantity
-      const stock = await Stock.findByPk(stockId, {
-        include: [{ model: PPEItem, as: 'ppeItem' }]
-      });
-
-      if (!stock) {
-        return res.status(404).json({
-          success: false,
-          message: 'Stock item not found'
-        });
-      }
-
-      if (stock.quantity < quantity) {
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock. Available: ${stock.quantity}, Requested: ${quantity}`
-        });
-      }
-
-      // Calculate costs
-      const unitCost = stock.unitCost || 0;
-      const totalCost = unitCost * quantity;
-
-      // Calculate next renewal date based on replacement frequency
-      const replacementFrequency = stock.ppeItem?.replacementFrequency || 12;
-      const nextRenewalDate = new Date();
-      nextRenewalDate.setMonth(nextRenewalDate.getMonth() + replacementFrequency);
-
-      // Create new allocation record
-      const allocation = await Allocation.create({
-        employeeId: report.employeeId,
-        ppeItemId: report.ppeItemId,
-        stockId: stockId,
-        quantity,
-        size: size || stock.size,
-        unitCost,
-        totalCost,
-        issueDate: new Date(),
-        nextRenewalDate,
-        allocationType: 'replacement',
-        status: 'active',
-        replacementFrequency,
-        notes: notes || `Replacement due to ${report.failureType} - Failure Report #${report.id.substring(0, 8)}`
-      });
-
-      // Deduct from stock
-      await stock.update({
-        quantity: stock.quantity - quantity
-      });
-
-      // Mark old allocation as replaced if exists
-      if (report.allocationId) {
-        const oldAllocation = await Allocation.findByPk(report.allocationId);
-        if (oldAllocation) {
-          await oldAllocation.update({
-            status: 'replaced',
-            notes: (oldAllocation.notes || '') + `\nReplaced on ${new Date().toISOString().split('T')[0]} due to ${report.failureType}`
-          });
+        if (!report) {
+          return { status: 404, message: 'Failure report not found' };
         }
-      }
+        if (report.status === 'replaced') {
+          return { status: 400, message: 'This failure has already been reallocated' };
+        }
+        if (report.status === 'pending-sheq-review') {
+          return { status: 400, message: 'Failure report must be approved by SHEQ before reallocation' };
+        }
 
-      // Update failure report
-      await report.update({
-        status: 'replaced',
-        replacementStockId: stockId,
-        actionTaken: `Reallocated ${quantity} unit(s) from stock. New allocation created with ID: ${allocation.id.substring(0, 8)}`
+        const stock = await Stock.findByPk(stockId, {
+          include: [{ model: PPEItem, as: 'ppeItem' }],
+          transaction
+        });
+        if (!stock) {
+          return { status: 404, message: 'Stock item not found' };
+        }
+
+        const newStockQuantity = await deductStock(stock.id, quantity, { transaction });
+        if (newStockQuantity === null) {
+          return { status: 400, message: `Insufficient stock. Available: ${stock.quantity}, Requested: ${quantity}` };
+        }
+
+        const unitCost = stock.unitCost || 0;
+        const replacementFrequency = stock.ppeItem?.replacementFrequency || 12;
+        const nextRenewalDate = new Date();
+        nextRenewalDate.setMonth(nextRenewalDate.getMonth() + replacementFrequency);
+
+        const allocation = await Allocation.create({
+          employeeId: report.employeeId,
+          ppeItemId: report.ppeItemId,
+          stockId: stockId,
+          quantity,
+          size: size || stock.size,
+          unitCost,
+          totalCost: unitCost * quantity,
+          issueDate: new Date(),
+          nextRenewalDate,
+          allocationType: 'replacement',
+          status: 'active',
+          replacementFrequency,
+          notes: notes || `Replacement due to ${report.failureType} - Failure Report #${report.id.substring(0, 8)}`
+        }, { transaction });
+
+        if (report.allocationId) {
+          const oldAllocation = await Allocation.findByPk(report.allocationId, { transaction });
+          if (oldAllocation) {
+            await oldAllocation.update({
+              status: 'replaced',
+              notes: (oldAllocation.notes || '') + `\nReplaced on ${new Date().toISOString().split('T')[0]} due to ${report.failureType}`
+            }, { transaction });
+          }
+        }
+
+        await report.update({
+          status: 'replaced',
+          replacementStockId: stockId,
+          actionTaken: `Reallocated ${quantity} unit(s) from stock. New allocation created with ID: ${allocation.id.substring(0, 8)}`
+        }, { transaction });
+
+        return { report, allocation, newStockQuantity };
       });
+
+      if (outcome.status) {
+        return res.status(outcome.status).json({ success: false, message: outcome.message });
+      }
+      const { report, allocation, newStockQuantity } = outcome;
 
       // Fetch updated data
       const updatedReport = await FailureReport.findByPk(report.id, {
@@ -832,7 +792,7 @@ router.post(
           failureReport: updatedReport,
           allocation: newAllocation,
           stockDeducted: quantity,
-          newStockQuantity: stock.quantity - quantity
+          newStockQuantity
         }
       });
     } catch (error) {
