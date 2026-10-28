@@ -177,3 +177,35 @@ describe('backups', () => {
     expect((await sheqAgent.get(`/api/v2/settings/backups/${BACKUP_FILE}`)).status).toBe(403);
   });
 });
+
+describe('database figures and backup housekeeping', () => {
+  it('reports database figures', async () => {
+    const res = await adminAgent.get('/api/v2/settings/database');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ sizeBytes: expect.any(Number), tables: expect.any(Number), connections: expect.any(Number) });
+    expect(res.body.data.tables).toBeGreaterThan(10);
+    expect((await sheqAgent.get('/api/v2/settings/database')).status).toBe(403);
+  });
+
+  it('deletes a backup but never the newest, and cleans up by retention', async () => {
+    const older = `ppe_backup_${fx.tag}_old.sql`;
+    const newest = `ppe_backup_${fx.tag}_new.sql`;
+    fs.writeFileSync(path.join(backupDir, older), '-- old\n');
+    await new Promise((r) => setTimeout(r, 30));
+    fs.writeFileSync(path.join(backupDir, newest), '-- new\n');
+    try {
+      expect((await write(adminAgent, 'delete', `/api/v2/settings/backups/${older}`)).status).toBe(204);
+      expect(fs.existsSync(path.join(backupDir, older))).toBe(false);
+      const refused = await write(adminAgent, 'delete', `/api/v2/settings/backups/${newest}`);
+      expect(refused.status).toBe(409);
+      expect((await write(adminAgent, 'delete', '/api/v2/settings/backups/ppe_backup_missing.sql')).status).toBe(404);
+
+      const cleanup = await write(adminAgent, 'post', '/api/v2/settings/backups/cleanup');
+      expect(cleanup.status).toBe(200);
+      expect(cleanup.body.data).toMatchObject({ deleted: 0, retentionDays: expect.any(Number) });
+    } finally {
+      fs.rmSync(path.join(backupDir, older), { force: true });
+      fs.rmSync(path.join(backupDir, newest), { force: true });
+    }
+  });
+});
