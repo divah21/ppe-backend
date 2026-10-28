@@ -1,9 +1,12 @@
 import { QueryTypes } from 'sequelize';
 import { ROLES, type AuthContext, type Role } from '../../core/auth';
 import { sequelize } from '../../core/db';
+import { budgetSummary } from '../budgets/service';
 import { PRICE_CTE, allocationCost } from '../budgets/spend';
+import { stockValueSummary } from '../valuation/stock';
 import type { DashboardQuery } from './schemas';
 import { awaitingRenewal } from '../allocations/rules';
+import { SEES_BUDGET, SEES_FAILURES, SEES_FORECAST, actionQueue, failurePanel, forecastShortfall, recentActivity, recentRequests } from './panels';
 import { CLOSED_REQUEST_STATUSES, RENEWAL_SQL, REQUEST_DEPARTMENT, REQUEST_SECTION, scopeOf, scopeSql, type Scope } from './scope';
 
 /** Request stages each role acts on (v1 approval chain: section rep, dept rep, HOD, stores; SHEQ for replacements). */
@@ -67,14 +70,15 @@ const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['per
   const rs = requestScope(scope);
   const as = allocationScope(scope);
   const is = issuedScope(scope);
-  const [[requests], [issued], [renewals], low] = await Promise.all([
-    select<{ awaiting: string; open: string }>(
+  const [[requests], [issued], [renewals], [people], low, stock, budget] = await Promise.all([
+    select<{ awaiting: string; open: string; fulfilled: string }>(
       `SELECT
          COUNT(*) FILTER (WHERE r.status::text IN (:actionStatuses)) AS awaiting,
-         COUNT(*) FILTER (WHERE r.status::text NOT IN (:closed)) AS open
+         COUNT(*) FILTER (WHERE r.status::text NOT IN (:closed)) AS open,
+         COUNT(*) FILTER (WHERE r.status::text = 'fulfilled' AND r.fulfilled_date >= date_trunc(:period, NOW())) AS fulfilled
        ${REQUESTS_FROM}
        WHERE ${rs.sql}`,
-      { ...rs.replacements, actionStatuses: ACTION_STATUSES[auth.role] ?? ['none'], closed: CLOSED_REQUEST_STATUSES }
+      { ...rs.replacements, actionStatuses: ACTION_STATUSES[auth.role] ?? ['none'], closed: CLOSED_REQUEST_STATUSES, period }
     ),
     // Issued and spent under the scope at issue time
     select<{ issued: string; spend: string }>(
@@ -86,11 +90,19 @@ const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['per
       { ...is.replacements, period }
     ),
     // Renewals for the people in scope now
-    select<{ renewals: string }>(
-      `SELECT COUNT(*) AS renewals ${ALLOCATIONS_FROM} WHERE ${as.sql} AND ${RENEWAL_DUE}`,
+    select<{ renewals: string; overdue: string }>(
+      `SELECT COUNT(*) FILTER (WHERE ${RENEWAL_DUE}) AS renewals,
+              COUNT(*) FILTER (WHERE ${awaitingRenewal('a', 'e')} AND ${RENEWAL_SQL('a', 'p')} < NOW()) AS overdue
+       ${ALLOCATIONS_FROM} WHERE ${as.sql}`,
       { ...as.replacements, renewalDays: RENEWAL_WINDOW_DAYS }
     ),
+    select<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM employees e JOIN sections sec ON sec.id = e."sectionId" WHERE e."isActive" AND ${as.sql}`,
+      as.replacements
+    ),
     SEES_STOCK.has(auth.role) ? select<{ count: string }>(`SELECT COUNT(*) AS count ${LOW_STOCK_LINES}`, {}) : null,
+    SEES_STOCK.has(auth.role) ? stockValueSummary({}) : null,
+    SEES_BUDGET.has(auth.role) ? budgetSummary(auth, new Date().getFullYear()) : null,
   ]);
   const lowStock = low ? num(low[0]?.count) : null;
   return {
@@ -100,6 +112,16 @@ const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['per
     spendThisPeriod: Math.round(num(issued?.spend) * 100) / 100,
     lowStock,
     renewalsDue: num(renewals?.renewals),
+    renewalsOverdue: num(renewals?.overdue),
+    fulfilledThisPeriod: num(requests?.fulfilled),
+    employees: num(people?.count),
+    stockValue: stock ? stock.totalValue : null,
+    outOfStock: stock ? stock.outOfStockCount : null,
+    // Null when no budget is set for the year, so the tile can say so instead of showing 0%
+    budget:
+      budget && budget.totals.allocated > 0
+        ? { allocated: budget.totals.allocated, spent: budget.totals.spent, utilisationPercent: budget.totals.utilisationPercent, fiscalYear: budget.fiscalYear }
+        : null,
   };
 };
 
@@ -218,7 +240,8 @@ const scopeLabel = async (scope: Scope) => {
 export const dashboardSummary = async (auth: AuthContext, q: DashboardQuery) => {
   const scope = scopeOf(auth);
   const sees = SEES_STOCK.has(auth.role);
-  const [k, weeks, spend, low, renewals, label, [period]] = await Promise.all([
+  const role = auth.role;
+  const [k, weeks, spend, low, renewals, label, [period], queue, recent, failures, shortfall, activity] = await Promise.all([
     kpis(auth, scope, q.period),
     requestsPerWeek(scope),
     spendBreakdown(scope, q.period),
@@ -226,6 +249,11 @@ export const dashboardSummary = async (auth: AuthContext, q: DashboardQuery) => 
     renewalsTop(scope),
     scopeLabel(scope),
     select<{ start: Date }>(`SELECT date_trunc(:period, NOW()) AS start`, { period: q.period }),
+    actionQueue(scope, ACTION_STATUSES[role] ?? []),
+    recentRequests(scope),
+    SEES_FAILURES.has(role) ? failurePanel(scope) : null,
+    SEES_FORECAST.has(role) ? forecastShortfall(auth) : null,
+    role === ROLES.ADMIN ? recentActivity() : null,
   ]);
   return {
     role: auth.role,
@@ -236,6 +264,11 @@ export const dashboardSummary = async (auth: AuthContext, q: DashboardQuery) => 
     spendBreakdown: spend,
     lowStock: low,
     renewalsDue: renewals,
+    actionQueue: queue,
+    recentRequests: recent,
+    failures,
+    forecastShortfall: shortfall,
+    recentActivity: activity,
   };
 };
 
