@@ -6,7 +6,7 @@ import type { AccessLogQuery } from './schemas';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { rotateAccessLog, flushAccessLog } = require('../../../middlewares/audit_middleware') as {
-  rotateAccessLog: (o?: { maxBytes?: number }) => Promise<boolean>;
+  rotateAccessLog: (o?: { maxBytes?: number; keep?: number }) => Promise<boolean>;
   flushAccessLog: () => Promise<void>;
 };
 
@@ -84,7 +84,8 @@ export const listAccessLogs = async (q: AccessLogQuery) => {
 /** Archives the current access log and starts an empty one (v1 "clear access logs"). */
 export const archiveAccessLog = async () => {
   await flushAccessLog();
-  const archived = await rotateAccessLog({ maxBytes: 1 });
+  // Unlike size rotation, an archive asked for by an admin never prunes older archives
+  const archived = await rotateAccessLog({ maxBytes: 1, keep: Number.MAX_SAFE_INTEGER });
   return { archived };
 };
 
