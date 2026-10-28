@@ -5,7 +5,7 @@ import { inTransaction, models, sequelize, type Row } from '../../core/db';
 import { AppError, conflict, forbidden, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { seesInactive } from '../ppe-items/policy';
-import type { CreateSizeScaleInput, SizeInput, UpdateSizeScaleInput, sizeScaleListQuery } from './schemas';
+import type { CreateSizeScaleInput, SizeInput, SizeScaleImportInput, UpdateSizeScaleInput, sizeScaleListQuery } from './schemas';
 
 const SIZE_COUNT = literal('(SELECT COUNT(*) FROM sizes z WHERE z.scale_id = "SizeScale"."id")');
 const ITEM_COUNT = literal('(SELECT COUNT(*) FROM ppe_items p WHERE p.size_scale = "SizeScale"."code")');
@@ -248,4 +248,57 @@ export const replaceSizes = async (auth: AuthContext, id: string, sizes: SizeInp
     await syncItemSizes(scale.code, renamed, removed, t);
   });
   return getSizeScale(auth, id);
+};
+
+class DryRun extends Error {}
+
+/**
+ * Creates size scales from a spreadsheet (v1 size bulk upload), one row per scale with its sizes
+ * listed in order. An existing scale is left alone, or with updateExisting gains the sizes it lacks.
+ */
+export const importSizeScales = async (input: SizeScaleImportInput) => {
+  const report = { dryRun: input.dryRun, created: 0, extended: 0, unchanged: 0, sizesAdded: 0, errors: [] as Array<{ row: number; item: string; message: string }> };
+  try {
+    await inTransaction(async (t) => {
+      const seen = new Set<string>();
+      for (const [index, r] of input.rows.entries()) {
+        const row = index + 1;
+        if (seen.has(r.code)) {
+          report.errors.push({ row, item: r.code, message: 'This scale code is listed twice in the file' });
+          continue;
+        }
+        seen.add(r.code);
+        await lockScaleCodes(t);
+        const existing = await models.SizeScale.findOne({ where: sqlWhere(fn('upper', col('code')), r.code), transaction: t, lock: t.LOCK.UPDATE });
+        if (!existing) {
+          const scale = await models.SizeScale.create(
+            { code: r.code, name: r.name, categoryGroup: r.categoryGroup, description: r.description, isActive: true },
+            { transaction: t }
+          );
+          await models.Size.bulkCreate(r.sizes.map((value, i) => ({ scaleId: scale.id, value, sortOrder: i + 1 })), { transaction: t });
+          report.created += 1;
+          report.sizesAdded += r.sizes.length;
+          continue;
+        }
+        if (!input.updateExisting) {
+          report.unchanged += 1;
+          continue;
+        }
+        const current = await models.Size.findAll({ where: { scaleId: existing.id }, attributes: ['value', 'sortOrder'], transaction: t });
+        const have = new Set(current.map((z) => String(z.value).toLowerCase()));
+        const missing = r.sizes.filter((v) => !have.has(v.toLowerCase()));
+        const last = Math.max(0, ...current.map((z) => Number(z.sortOrder ?? 0)));
+        await existing.update({ name: r.name, categoryGroup: r.categoryGroup ?? existing.categoryGroup }, { transaction: t });
+        if (missing.length) {
+          await models.Size.bulkCreate(missing.map((value, i) => ({ scaleId: existing.id, value, sortOrder: last + i + 1 })), { transaction: t });
+        }
+        report.extended += 1;
+        report.sizesAdded += missing.length;
+      }
+      if (input.dryRun || report.errors.length) throw new DryRun();
+    });
+  } catch (e) {
+    if (!(e instanceof DryRun)) throw e;
+  }
+  return report;
 };

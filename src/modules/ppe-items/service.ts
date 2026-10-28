@@ -218,7 +218,7 @@ const invalid = (field: string, message: string) =>
 const lockItemCodes = (t: Transaction) =>
   sequelize.query(`SELECT pg_advisory_xact_lock(hashtext('ppe_items.item_code'))`, { transaction: t });
 
-const assertCodesFree = async (input: PpeItemInput, exceptId: string | null, t: Transaction) => {
+export const assertCodesFree = async (input: PpeItemInput, exceptId: string | null, t: Transaction) => {
   await lockItemCodes(t);
   const not = exceptId ? [{ id: { [Op.ne]: exceptId } }] : [];
   const sameCode = await models.PPEItem.findOne({
@@ -247,7 +247,7 @@ const assertCodesFree = async (input: PpeItemInput, exceptId: string | null, t: 
  * Resolves the chosen scale (case-insensitive) to its stored code and checks the available sizes
  * belong to it. The scale row is share-locked so it cannot be deleted while being assigned.
  */
-const resolveScale = async (input: PpeItemInput, currentCode: string | null, t: Transaction) => {
+export const resolveScale = async (input: PpeItemInput, currentCode: string | null, t: Transaction) => {
   if (!input.sizeScale) return { code: null, values: [] as string[], availableSizes: null };
   const scale = await models.SizeScale.findOne({
     where: sqlWhere(fn('upper', col('code')), input.sizeScale.toUpperCase()),

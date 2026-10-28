@@ -65,6 +65,30 @@ export const updateSizeScaleBody = z.object(scaleFields);
 
 export const replaceSizesBody = z.object({ sizes: sizeList });
 
+export const sizeScaleImportBody = z.object({
+  dryRun: z.boolean().default(true),
+  /** Add the file's new sizes to scales that already exist (sizes are never removed) */
+  updateExisting: z.boolean().default(false),
+  rows: z
+    .array(
+      z.object({
+        code: scaleFields.code,
+        name: scaleFields.name,
+        categoryGroup: optionalText(50),
+        description: optionalText(1000),
+        sizes: z
+          .string()
+          .max(2000)
+          .transform((v) => [...new Set(v.split(/[,;|]/).map((s) => s.trim()).filter(Boolean))])
+          .refine((v) => v.length > 0, 'List at least one size')
+          .refine((v) => v.length <= 100, 'A scale can have at most 100 sizes'),
+      })
+    )
+    .min(1, 'The file has no rows')
+    .max(200),
+});
+export type SizeScaleImportInput = z.infer<typeof sizeScaleImportBody>;
+
 export type SizeInput = z.infer<typeof sizeBody>;
 export type CreateSizeScaleInput = z.infer<typeof createSizeScaleBody>;
 export type UpdateSizeScaleInput = z.infer<typeof updateSizeScaleBody>;

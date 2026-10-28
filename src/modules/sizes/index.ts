@@ -1,13 +1,15 @@
 import { Router } from 'express';
+import { audit, skipAudit } from '../../core/audit';
 import { ROLES, authenticate, getAuth, requireRole } from '../../core/auth';
 import { ok, paged, parse, route, uuidParam } from '../../core/http';
 import { defineModule } from '../../core/module';
 import { CATALOGUE_EDITORS } from '../ppe-items/policy';
-import { createSizeScaleBody, replaceSizesBody, sizeScaleListQuery, updateSizeScaleBody } from './schemas';
+import { createSizeScaleBody, replaceSizesBody, sizeScaleImportBody, sizeScaleListQuery, updateSizeScaleBody } from './schemas';
 import {
   createSizeScale,
   deleteSizeScale,
   getSizeScale,
+  importSizeScales,
   listSizeScales,
   replaceSizes,
   sizeScaleOptions,
@@ -16,6 +18,18 @@ import {
 
 const router = Router();
 router.use(authenticate);
+
+router.post(
+  '/import',
+  requireRole(...CATALOGUE_EDITORS),
+  route(async (req, res) => {
+    const input = parse(sizeScaleImportBody, req.body);
+    const report = await importSizeScales(input);
+    if (input.dryRun || report.errors.length) skipAudit(req);
+    else await audit(req, 'BULK_IMPORT', 'SizeScale', null, { created: report.created, extended: report.extended, sizesAdded: report.sizesAdded });
+    return ok(res, report, input.dryRun || report.errors.length ? 200 : 201);
+  })
+);
 
 router.get(
   '/',
