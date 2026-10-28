@@ -69,10 +69,10 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
       lock: t.LOCK.UPDATE,
       transaction: t,
     });
-    const substituteIds = [...new Set(stocks.map((s) => s.ppeItemId as string))].filter((pid) => !items.some((i) => i.ppeItemId === pid));
-    const substitutes = new Map(
-      (substituteIds.length ? await models.PPEItem.findAll({ where: { id: substituteIds }, transaction: t }) : []).map((p) => [p.id as string, p])
-    );
+    // Items a substitute stock line may hold: those already on the request, plus any other item
+    const known = new Map(items.filter((i) => i.ppeItem).map((i) => [i.ppeItemId as string, i.ppeItem]));
+    const otherIds = [...new Set(stocks.map((s) => s.ppeItemId as string))].filter((pid) => !known.has(pid));
+    for (const p of otherIds.length ? await models.PPEItem.findAll({ where: { id: otherIds }, transaction: t }) : []) known.set(p.id, p);
     const stockById = new Map(stocks.map((s) => [s.id as string, s]));
 
     const outstanding = new Map(items.map((i) => [i.id as string, Number(i.quantity) - Number(i.approvedQuantity ?? 0)]));
@@ -95,7 +95,7 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
         throw invalid(`Choose a stock line of ${item.ppeItem?.name ?? 'the requested item'}`);
       }
       // What is actually handed over: the requested item, or the substitute stores chose
-      const issuedItem = swapped ? substitutes.get(stock.ppeItemId) : item.ppeItem;
+      const issuedItem = swapped ? known.get(stock.ppeItemId) : item.ppeItem;
       if (swapped && (!issuedItem || issuedItem.isActive === false)) throw invalid('The substitute item is no longer available');
 
       const left = outstanding.get(item.id) ?? 0;
@@ -107,7 +107,7 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
         const fresh = await models.Stock.findByPk(stock.id, { attributes: ['quantity'], transaction: t });
         throw new AppError(
           'INSUFFICIENT_STOCK',
-          `Not enough ${item.ppeItem?.name ?? 'stock'}${stock.size ? ` (size ${stock.size})` : ''} in stock: ${fresh?.quantity ?? 0} available, ${quantity} needed`,
+          `Not enough ${issuedItem?.name ?? 'stock'}${stock.size ? ` (size ${stock.size})` : ''} in stock: ${fresh?.quantity ?? 0} available, ${quantity} needed`,
           { requestItemId: item.id, stockId: stock.id, available: Number(fresh?.quantity ?? 0), requested: quantity }
         );
       }
@@ -301,7 +301,7 @@ export const substituteOptions = async (auth: AuthContext, id: string, q: string
         as: 'ppeItem',
         required: true,
         attributes: ['id', 'name', 'itemCode', 'category'],
-        where: { isActive: true, [Op.or]: [{ name: { [Op.iLike]: term } }, { itemCode: { [Op.iLike]: term } }] },
+        where: { isActive: { [Op.ne]: false }, [Op.or]: [{ name: { [Op.iLike]: term } }, { itemCode: { [Op.iLike]: term } }] },
       },
     ],
     order: [

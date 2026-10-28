@@ -212,6 +212,7 @@ const STALE_DAYS = 7;
 /** Figures for the cards above the list, under the same filters as the list. */
 export const requestSummary = async (auth: AuthContext, q: RequestCountsQuery) => {
   const open = OPEN.map((st) => sequelize.escape(st)).join(', ');
+  const mine = viewStatuses('mine', auth.role) ?? [];
   const isOpen = `"Request"."status" IN (${open})`;
   const row = (await models.Request.findOne({
     where: { [Op.and]: baseWhere(auth, q) },
@@ -219,12 +220,13 @@ export const requestSummary = async (auth: AuthContext, q: RequestCountsQuery) =
       [literal(`COUNT(*) FILTER (WHERE ${isOpen} AND "Request"."created_at" < NOW() - make_interval(days => ${STALE_DAYS}))`), 'stale'],
       [literal(`COALESCE(SUM(${ESTIMATED_COST_SQL}) FILTER (WHERE ${isOpen}), 0)`), 'openValue'],
       [literal(`COUNT(*) FILTER (WHERE "Request"."status" = 'fulfilled' AND "Request"."fulfilled_date" >= date_trunc('month', NOW()))`), 'issuedThisMonth'],
+      [literal(mine.length ? `COUNT(*) FILTER (WHERE "Request"."status" IN (${mine.map((st) => sequelize.escape(st)).join(', ')}))` : '0'), 'mine'],
     ],
     include: [{ ...employeeInclude(), attributes: [], include: [] }],
     raw: true,
   })) as Record<string, string | number> | null;
   return {
-    mine: (await countRequests(auth, q)).mine,
+    mine: Number(row?.mine ?? 0),
     staleDays: STALE_DAYS,
     stale: Number(row?.stale ?? 0),
     openValue: Math.round(Number(row?.openValue ?? 0) * 100) / 100,

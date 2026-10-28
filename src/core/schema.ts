@@ -40,7 +40,8 @@ export const ensureTransferSchema = () =>
         END IF;
         -- Visitor issues have no employee: they count against the section that raised the request
         IF NEW.section_id IS NULL AND NEW.request_id IS NOT NULL THEN
-          SELECT r.section_id, r.department_id INTO NEW.section_id, NEW.department_id FROM requests r WHERE r.id = NEW.request_id;
+          SELECT r.section_id, COALESCE(NEW.department_id, r.department_id) INTO NEW.section_id, NEW.department_id
+            FROM requests r WHERE r.id = NEW.request_id;
         END IF;
         IF NEW.department_id IS NULL THEN
           SELECT s.department_id INTO NEW.department_id FROM sections s WHERE s.id = NEW.section_id;

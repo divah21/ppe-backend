@@ -129,6 +129,20 @@ describe('substitution', () => {
     expect(alloc!.notes).toMatch(/in place of/);
   });
 
+  it('can substitute with an item that is also on the request', async () => {
+    const r = await w.insertRequest('approved', w.employees.empA1, [
+      { ppeItemId: w.ppe.helmet.id, quantity: 1 },
+      { ppeItemId: w.ppe.gloves.id, quantity: 1 },
+    ], { storesApprovalDate: new Date() });
+    const rows = await models.RequestItem.findAll({ where: { requestId: r.id } });
+    const helmet = rows.find((i) => i.ppeItemId === w.ppe.helmet.id)!.id as string;
+    const res = await write(w.agents.stores, 'post', `${URL}/${r.id}/fulfil`).send({
+      items: [{ requestItemId: helmet, stockId: w.stock.gloves.id, quantity: 1, substitute: true }],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.data.status).toBe('partially-fulfilled');
+  });
+
   it('lists in-stock substitutes to stores only', async () => {
     const r = await approved([{ ppeItemId: w.ppe.helmet.id, quantity: 1 }]);
     const res = await w.agents.stores.get(`${URL}/${r.id}/substitutes`).query({ q: w.fx.tag });
