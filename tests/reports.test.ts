@@ -51,7 +51,7 @@ describe('GET /api/v2/reports', () => {
     const keys = async (agent: Agent) => (await agent.get('/api/v2/reports')).body.data.map((r: { key: string }) => r.key);
     expect(await keys(stores)).toEqual(['allocations', 'requests', 'stock', 'matrix', 'ppe-cards']);
     expect(await keys(hod)).toEqual(['allocations', 'requests', 'ppe-cards']);
-    expect(await keys(sectionRep)).toEqual([]);
+    expect(await keys(sectionRep)).toEqual(['allocations', 'requests', 'ppe-cards']);
   });
 
   it('offers only in-scope departments and sections as filters', async () => {
@@ -151,8 +151,8 @@ describe('report validation and access', () => {
   it('forbids roles without the report', async () => {
     expect((await hod.get('/api/v2/reports/stock')).status).toBe(403);
     expect((await hod.get('/api/v2/reports/matrix')).status).toBe(403);
-    expect((await sectionRep.get('/api/v2/reports/allocations')).status).toBe(403);
-    expect((await sectionRep.get('/api/v2/reports/options')).status).toBe(403);
+    expect((await sectionRep.get('/api/v2/reports/stock')).status).toBe(403);
+    expect((await sectionRep.get('/api/v2/reports/matrix')).status).toBe(403);
   });
 
   it('requires a session', async () => {

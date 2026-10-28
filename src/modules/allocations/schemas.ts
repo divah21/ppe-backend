@@ -31,6 +31,24 @@ export const allocationListQuery = listQuery(['issueDate', 'dueDate', 'status', 
 
 export type AllocationListQuery = z.infer<typeof allocationListQuery>;
 
+const narrowing = {
+  departmentId: z.string().uuid().optional(),
+  sectionId: z.string().uuid().optional(),
+};
+
+export const employeeSummaryQuery = listQuery(['employee', 'active', 'issued', 'nextDue'], narrowing);
+export type EmployeeSummaryQuery = z.infer<typeof employeeSummaryQuery>;
+
+export const COMPLIANCE_LEVELS = ['full', 'partial', 'none', 'no-matrix'] as const;
+export const complianceQuery = listQuery(['rate', 'employee', 'missing', 'expired'], {
+  ...narrowing,
+  level: z.enum(COMPLIANCE_LEVELS).optional(),
+});
+export type ComplianceQuery = z.infer<typeof complianceQuery>;
+
+export const templateQuery = z.object({ ...narrowing, jobTitleId: z.string().uuid().optional() });
+export type TemplateQuery = z.infer<typeof templateQuery>;
+
 export const employeeHistoryQuery = listQuery(['issueDate', 'dueDate', 'status', 'item'], {
   status: z.enum(ALLOCATION_STATUSES).optional(),
 });
