@@ -104,7 +104,7 @@ cp .env.example .env
 ### 3. Create PostgreSQL Database
 
 ```sql
-CREATE DATABASE ppe_system;
+CREATE DATABASE ppe;
 ```
 
 ### 4. Sync Database Tables
@@ -292,51 +292,9 @@ curl -X POST http://localhost:5000/api/v1/auth/login \
 
 ## 📝 Environment Variables
 
-```env
-# Server
-NODE_ENV=development
-PORT=5000
-API_VERSION=v1
+See [`.env.example`](.env.example) for every variable the code reads, with comments.
 
-# Database
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=ppe_system
-DB_USER=postgres
-DB_PASSWORD=your_password
-
-# JWT
-JWT_SECRET=your_jwt_secret_key
-JWT_EXPIRE=7d
-JWT_REFRESH_SECRET=your_refresh_secret
-JWT_REFRESH_EXPIRE=30d
-
-# CORS
-# Comma-separated. Production: https://ppesystem.earekasystems.biz
-ALLOWED_ORIGINS=http://localhost:3000
-
-# Frontend base URL used to build links in outgoing emails.
-# Production: https://ppesystem.earekasystems.biz
-FRONTEND_URL=http://localhost:3000
-
-# Email (Gmail SMTP)
-EMAIL_HOST=smtp.gmail.com
-EMAIL_PORT=587
-EMAIL_SECURE=false
-EMAIL_USER=your_account@gmail.com
-# Must be a Google App Password (16 chars, 2FA required) - a normal
-# account password is rejected by Gmail SMTP.
-EMAIL_PASSWORD=your_16_char_app_password
-
-# Optional. Defaults to "PPE Management System" <EMAIL_USER>.
-# Gmail rejects any From address that is not EMAIL_USER (or a verified
-# "Send mail as" alias) with: 553 ... not owned by user.
-# EMAIL_FROM="PPE Management System" <your_account@gmail.com>
-
-# Rate Limiting
-RATE_LIMIT_WINDOW_MS=900000
-RATE_LIMIT_MAX_REQUESTS=100
-```
+In production set `ALLOWED_ORIGINS` and `FRONTEND_URL` to the deployed frontend URL.
 
 ## 🛠️ Next Steps
 
