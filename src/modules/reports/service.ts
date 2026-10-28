@@ -13,6 +13,7 @@ import type {
   StockReportQuery,
 } from './schemas';
 import { DATE_FMT, MONEY_FMT, type Cell, type Column, type Sheet } from './xlsx';
+import { ppeHeldSql } from '../employees/service';
 
 /** Larger exports time out in the browser and in Excel; ask for narrower filters instead. */
 export const MAX_ROWS = 50_000;
@@ -670,14 +671,17 @@ export const employeesReport = async (auth: AuthContext, q: EmployeesReportQuery
   const scope = scopeOf(auth);
   const f = filterSql(scope, q, 'sec.id', 'sec.department_id');
   const parts = [f.sql];
-  if (q.status) parts.push(q.status === 'active' ? 'e."isActive"' : 'NOT e."isActive"');
+  // The same filters as the Employees list, so an export is what the list shows
+  if (q.status) parts.push(q.status === 'active' ? 'e."isActive"' : 'e."isActive" = FALSE');
+  if (q.jobTitleId) parts.push('e."jobTitleId" = :jobTitleId');
+  if (q.jobType) parts.push('UPPER(TRIM(e."jobType")) = UPPER(:jobType)');
   if (q.q) parts.push(`(e."firstName" || ' ' || e."lastName" ILIKE :term OR e."worksNumber" ILIKE :term)`);
   const rows = capped(
     await select<Record<string, any>>(
       `SELECT e."worksNumber" AS works_number, e."firstName" AS first_name, e."lastName" AS last_name, sec.name AS section,
               d.name AS department, COALESCE(jt.name, e."jobTitle") AS job_title, e."jobType" AS job_type, e.gender, e.email,
               e."phoneNumber" AS phone, e."dateJoined" AS joined, e."isActive" AS active,
-              (SELECT COALESCE(SUM(a.quantity), 0) FROM allocations a WHERE a.employee_id = e.id AND a.status = 'active') AS held
+              ${ppeHeldSql('e')} AS held
        FROM employees e
        JOIN sections sec ON sec.id = e."sectionId"
        LEFT JOIN departments d ON d.id = sec.department_id
@@ -685,7 +689,7 @@ export const employeesReport = async (auth: AuthContext, q: EmployeesReportQuery
        WHERE ${parts.join(' AND ')}
        ORDER BY sec.name, e."lastName", e."firstName"
        LIMIT :limit`,
-      { ...f.replacements, term: q.q ? likeTerm(q.q) : null, limit: MAX_ROWS + 1 }
+      { ...f.replacements, jobTitleId: q.jobTitleId, jobType: q.jobType, term: q.q ? likeTerm(q.q) : null, limit: MAX_ROWS + 1 }
     )
   );
   const data = rows.map((r) => ({
@@ -706,7 +710,10 @@ export const employeesReport = async (auth: AuthContext, q: EmployeesReportQuery
     {
       name: 'Employees',
       title: 'Employees Report',
-      infoLines: await describe(auth, scope, { ...q, extra: q.status ? [`Status: ${q.status}`] : [] }),
+      infoLines: await describe(auth, scope, {
+        ...q,
+        extra: [q.status && `Status: ${q.status}`, q.jobType && `Job type: ${q.jobType}`].filter(Boolean) as string[],
+      }),
       columns: EMPLOYEE_COLUMNS,
       rows: data,
       totalLabel: `Employees: ${data.length}   |   Active: ${data.filter((r) => r.status === 'Active').length}`,

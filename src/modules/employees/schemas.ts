@@ -8,7 +8,7 @@ export const employeeListQuery = listQuery(EMPLOYEE_SORTS, {
   sectionId: z.string().uuid().optional(),
   jobTitleId: z.string().uuid().optional(),
   status: z.enum(['active', 'inactive']).optional(),
-  jobType: z.string().trim().max(50).optional(),
+  jobType: z.string().trim().max(100).optional(),
 });
 
 export const employeeSummaryQuery = z.object({

@@ -28,7 +28,7 @@ afterAll(async () => {
 
 describe('employees list and summary', () => {
   it('filters by job type and says how much PPE each person holds', async () => {
-    const res = await sectionRep.get('/api/v2/employees').query({ jobType: 'NEC', sectionId: section.id });
+    const res = await sectionRep.get('/api/v2/employees').query({ jobType: 'nec', sectionId: section.id });
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(1);
     expect(res.body.data[0]).toMatchObject({ id: worker.id, ppeHeld: 3, jobType: 'NEC' });
@@ -57,6 +57,13 @@ describe('employee import options', () => {
     expect(check.body.data).toMatchObject({ created: 0, updated: 0, skipped: 2 });
     await write(admin, 'post', '/api/v2/employees/import').send({ skipExisting: true, rows: changed });
     expect((await models.Employee.findOne({ where: { worksNumber: `${fx.tag}-IMP1` } }))!.firstName).toBe('Ann');
+    // A skipped row's problems do not block the rest
+    const mixed = await write(admin, 'post', '/api/v2/employees/import').send({
+      dryRun: true,
+      skipExisting: true,
+      rows: [{ ...rows()[0], section: 'No such section' }, { worksNumber: `${fx.tag}-IMP3`, firstName: 'Cy', lastName: 'Three', section: section.name }],
+    });
+    expect(mixed.body.data).toMatchObject({ valid: true, created: 1, skipped: 1, errors: [] });
   });
 });
 

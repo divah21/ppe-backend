@@ -30,6 +30,8 @@ export const REQUEST_TYPES = ['new', 'replacement', 'emergency', 'annual'] as co
 export const employeesReportQuery = z.object({
   departmentId: id,
   sectionId: id,
+  jobTitleId: id,
+  jobType: text,
   q: text,
   status: z.enum(['active', 'inactive']).optional(),
 });
