@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { User, Role, Employee, Section, Department, JobTitle, CostCenter } = require('../../models');
-const { generateAccessToken, generateRefreshToken, verifyToken } = require('../../helpers/jwt_helpers');
+const { generateAccessToken, generateRefreshToken, verifyToken, passwordVersion, matchesPasswordVersion } = require('../../helpers/jwt_helpers');
 const { authenticate } = require('../../middlewares/auth_middleware');
 const { validate } = require('../../middlewares/validation_middleware');
 const { createAuditLog } = require('../../middlewares/audit_middleware');
@@ -76,7 +76,8 @@ router.post('/login', loginValidation, validate, async (req, res, next) => {
       roleName: user.role.name,
       employeeId: user.employeeId,
       sectionId: user.employee?.sectionId,
-      departmentId: user.employee?.section?.departmentId
+      departmentId: user.employee?.section?.departmentId,
+      pv: passwordVersion(user.passwordHash)
     };
 
     const accessToken = generateAccessToken(payload);
@@ -147,7 +148,7 @@ router.post('/refresh', async (req, res, next) => {
       ]
     });
 
-    if (!user || !user.isActive) {
+    if (!user || !user.isActive || !matchesPasswordVersion(decoded, user.passwordHash)) {
       return res.status(401).json({
         success: false,
         message: 'User not found or inactive'
@@ -162,7 +163,8 @@ router.post('/refresh', async (req, res, next) => {
       roleName: user.role.name,
       employeeId: user.employeeId,
       sectionId: user.employee?.sectionId,
-      departmentId: user.employee?.section?.departmentId
+      departmentId: user.employee?.section?.departmentId,
+      pv: passwordVersion(user.passwordHash)
     };
 
     const accessToken = generateAccessToken(payload);

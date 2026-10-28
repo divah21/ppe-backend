@@ -2,11 +2,12 @@ const express = require('express');
 const router = express.Router();
 const { Allocation, Employee, PPEItem, User, Request, RequestItem, Stock, Section, Department, Budget, Role, JobTitlePPEMatrix, SectionPPEMatrix, JobTitle } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
+const { ownedByEmployeeInScope } = require('../../middlewares/scope_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { Op, fn, col, literal } = require('sequelize');
 const db = require('../../database/db');
-const { sendBudgetThresholdWarning, sendLowStockAlert, sendPPEReadyForCollection, sendTemplatedEmail, FRONTEND_URL } = require('../../helpers/email_helper');
+const { sendBudgetThresholdWarning, sendLowStockAlert, sendPPEReadyForCollection, sendTemplatedEmail, FRONTEND_URL, escapeHtml, toEmailRecipient } = require('../../helpers/email_helper');
 const { buildAllocationExcel, buildAllocationPdf } = require('../../helpers/allocation_report_helper');
 const { deductStock, restoreStock } = require('../../helpers/stock_helper');
 
@@ -291,7 +292,8 @@ router.get('/', authenticate, async (req, res, next) => {
     const needsEmployeeFilter = hasEmployeeFilter || hasSectionFilter;
 
     const { count, rows: allocations } = await Allocation.findAndCountAll({
-      where,
+      // Query filters only narrow; the caller's role scope always applies on top
+      where: { [Op.and]: [where, ownedByEmployeeInScope(req)] },
       include: [
         { 
           model: Employee, 
@@ -1076,9 +1078,9 @@ router.post(
       // Post-commit: Notify employee and section rep(s) about allocations
       try {
         const allocatedItems = fullAllocations.map(a => ({
-          ppeName: a.ppeItem?.name || a.ppeItemId,
+          ppeName: escapeHtml(a.ppeItem?.name || a.ppeItemId),
           quantity: a.quantity,
-          size: a.size || 'Standard'
+          size: escapeHtml(a.size || 'Standard')
         }));
 
         const pending = pendingItems || [];
@@ -1086,13 +1088,13 @@ router.post(
         // Send to employee
         try {
           if (pending.length === 0) {
-            await sendPPEReadyForCollection(request, request.targetEmployee || request.employee, allocatedItems);
+            await sendPPEReadyForCollection(request, toEmailRecipient(request.targetEmployee || request.employee), allocatedItems);
           } else {
             const allocatedRows = allocatedItems.map(i => `<tr><td style="padding:10px;border-bottom:1px solid #E5E7EB;">${i.ppeName}</td><td style="padding:10px;border-bottom:1px solid #E5E7EB;text-align:center;">${i.quantity}</td><td style="padding:10px;border-bottom:1px solid #E5E7EB;">${i.size}</td></tr>`).join('') || '<tr><td colspan="3" style="padding:10px;">No items allocated</td></tr>';
-            const pendingRows = pending.map(p => `<tr><td style="padding:10px;border-bottom:1px solid #E5E7EB;">${p.name}</td><td style="padding:10px;border-bottom:1px solid #E5E7EB;text-align:center;">${p.requested}</td><td style="padding:10px;border-bottom:1px solid #E5E7EB;">${p.size || 'N/A'}</td></tr>`).join('') || '<tr><td colspan="3" style="padding:10px;">No pending items</td></tr>';
+            const pendingRows = pending.map(p => `<tr><td style="padding:10px;border-bottom:1px solid #E5E7EB;">${escapeHtml(p.name)}</td><td style="padding:10px;border-bottom:1px solid #E5E7EB;text-align:center;">${p.requested}</td><td style="padding:10px;border-bottom:1px solid #E5E7EB;">${escapeHtml(p.size || 'N/A')}</td></tr>`).join('') || '<tr><td colspan="3" style="padding:10px;">No pending items</td></tr>';
 
             const content = `
-              <p style="color: #374151; line-height: 1.6;">Hello <strong>${(request.targetEmployee && (request.targetEmployee.firstName + ' ' + request.targetEmployee.lastName)) || 'Employee'}</strong>,</p>
+              <p style="color: #374151; line-height: 1.6;">Hello <strong>${(request.targetEmployee && escapeHtml(request.targetEmployee.firstName + ' ' + request.targetEmployee.lastName)) || 'Employee'}</strong>,</p>
               <p style="color: #374151; line-height: 1.6;">Your PPE request has been <strong>partially fulfilled</strong>. Some items have been allocated and are ready for collection; others are pending due to insufficient stock.</p>
               <h3 style="color: #2563EB; margin-top: 18px;">Items Allocated</h3>
               <table style="width:100%; border-collapse: collapse; margin: 8px 0;">
@@ -1132,10 +1134,10 @@ router.post(
                 const recipients = sectionReps.map(u => u.employee?.email || u.email).filter(Boolean);
                 if (recipients.length > 0) {
                   const allocSummary = allocatedItems.map(i => `${i.ppeName} x${i.quantity} (${i.size})`).join(', ') || 'None';
-                  const pendingSummary = pending.map(p => `${p.name} x${p.requested} (${p.size || 'N/A'})`).join(', ') || 'None';
+                  const pendingSummary = pending.map(p => `${escapeHtml(p.name)} x${p.requested} (${escapeHtml(p.size || 'N/A')})`).join(', ') || 'None';
                   const content = `
                     <p style="color:#374151;">Hello,</p>
-                    <p style="color:#374151;">The PPE request <strong>#${request.requestNumber || request.id}</strong> for ${(request.targetEmployee && (request.targetEmployee.firstName + ' ' + request.targetEmployee.lastName)) || 'an employee'} has been processed by Stores.</p>
+                    <p style="color:#374151;">The PPE request <strong>#${request.requestNumber || request.id}</strong> for ${(request.targetEmployee && escapeHtml(request.targetEmployee.firstName + ' ' + request.targetEmployee.lastName)) || 'an employee'} has been processed by Stores.</p>
                     <div style="margin-top:12px;">
                       <p><strong>Allocated:</strong> ${allocSummary}</p>
                       <p><strong>Pending:</strong> ${pendingSummary}</p>

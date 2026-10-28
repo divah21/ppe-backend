@@ -11,7 +11,7 @@ const DB_USER = process.env.DB_USER || 'postgres';
 const DB_PASSWORD = process.env.DB_PASSWORD || '';
 
 // Default backup directory
-const DEFAULT_BACKUP_PATH = path.join(__dirname, '..', 'backups');
+const DEFAULT_BACKUP_PATH = path.join(process.cwd(), 'backups');
 
 // Store reference to scheduled job
 let scheduledBackupJob = null;

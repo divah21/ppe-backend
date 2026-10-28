@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { FailureReport, Employee, PPEItem, Allocation, Section, Department, Stock, JobTitle } = require('../../models');
 const { authenticate } = require('../../middlewares/auth_middleware');
+const { ownedByEmployeeInScope } = require('../../middlewares/scope_middleware');
 const { requireRole } = require('../../middlewares/role_middleware');
 const { auditLog } = require('../../middlewares/audit_middleware');
 const { sequelize } = require('../../database/db');
@@ -47,7 +48,7 @@ router.get('/', authenticate, requireRole('section-rep', 'hod', 'department-rep'
     const offset = (page - 1) * limit;
 
     const { count, rows: reports } = await FailureReport.findAndCountAll({
-      where,
+      where: { [Op.and]: [where, ownedByEmployeeInScope(req)] },
       include: [
         {
           model: Employee,
@@ -104,7 +105,8 @@ router.get('/', authenticate, requireRole('section-rep', 'hod', 'department-rep'
  */
 router.get('/:id', authenticate, async (req, res, next) => {
   try {
-    const report = await FailureReport.findByPk(req.params.id, {
+    const report = await FailureReport.findOne({
+      where: { [Op.and]: [{ id: req.params.id }, ownedByEmployeeInScope(req)] },
       include: [
         {
           model: Employee,
@@ -868,7 +870,7 @@ router.get('/history', authenticate, requireRole('section-rep', 'hod', 'departme
     }
 
     const { count, rows: reports } = await FailureReport.findAndCountAll({
-      where,
+      where: { [Op.and]: [where, ownedByEmployeeInScope(req)] },
       include: [
         employeeInclude,
         {
