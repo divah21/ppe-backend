@@ -8,6 +8,12 @@ export const employeeListQuery = listQuery(EMPLOYEE_SORTS, {
   sectionId: z.string().uuid().optional(),
   jobTitleId: z.string().uuid().optional(),
   status: z.enum(['active', 'inactive']).optional(),
+  jobType: z.string().trim().max(50).optional(),
+});
+
+export const employeeSummaryQuery = z.object({
+  departmentId: z.string().uuid().optional(),
+  sectionId: z.string().uuid().optional(),
 });
 
 export const employeeOptionsQuery = z.object({
@@ -81,6 +87,10 @@ export const IMPORT_MAX_ROWS = 2000;
 
 export const importBody = z.object({
   dryRun: z.boolean().default(false),
+  /** Leave employees whose works number exists as they are, instead of updating them */
+  skipExisting: z.boolean().default(false),
+  /** Email new employees who have an address, as adding one by hand does (v1 option) */
+  sendOnboardingEmails: z.boolean().default(false),
   rows: z
     .array(z.record(z.unknown()))
     .min(1, 'The file has no employee rows')

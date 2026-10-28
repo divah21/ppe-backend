@@ -2,7 +2,7 @@ import { Op, type Transaction } from 'sequelize';
 import { inTransaction, models, type Row } from '../../core/db';
 import { AppError } from '../../core/errors';
 import { importRow, type ImportRow } from './schemas';
-import { localToday } from './service';
+import { localToday, onboardEmployees } from './service';
 import { placementOf, recordTransfer } from './transfer';
 
 export interface ImportIssue {
@@ -195,10 +195,23 @@ const counts = (planned: Planned[]) => ({
   updated: planned.filter((p) => p.existing).length,
 });
 
-export const importEmployees = async (rows: Array<Record<string, unknown>>, dryRun: boolean, actorId: string | null = null) => {
+export interface ImportOptions {
+  dryRun: boolean;
+  skipExisting?: boolean;
+  sendOnboardingEmails?: boolean;
+}
+
+export const importEmployees = async (
+  rows: Array<Record<string, unknown>>,
+  { dryRun, skipExisting = false, sendOnboardingEmails = false }: ImportOptions,
+  actorId: string | null = null
+) => {
+  // Skipped rows are still checked, so a bad row is reported even if it would have been left alone
+  const keep = (planned: Planned[]) => (skipExisting ? planned.filter((p) => !p.existing) : planned);
+  const tally = (planned: Planned[]) => ({ ...counts(keep(planned)), skipped: planned.length - keep(planned).length });
   if (dryRun) {
     const { errors, warnings, planned } = await plan(rows);
-    return { dryRun: true, valid: errors.length === 0, total: rows.length, ...counts(planned), errors, warnings };
+    return { dryRun: true, valid: errors.length === 0, total: rows.length, ...tally(planned), errors, warnings };
   }
 
   return inTransaction(async (t) => {
@@ -209,18 +222,23 @@ export const importEmployees = async (rows: Array<Record<string, unknown>>, dryR
       });
     }
     const creates = planned.filter((p) => !p.existing);
-    const updates = planned.filter((p) => p.existing);
-    if (creates.length > 0) {
-      await models.Employee.bulkCreate(
-        creates.map((p) => ({ dateJoined: localToday(), isActive: true, ...p.values })),
-        { transaction: t }
-      );
+    const updates = keep(planned).filter((p) => p.existing);
+    const created = creates.length
+      ? await models.Employee.bulkCreate(
+          creates.map((p) => ({ dateJoined: localToday(), isActive: true, ...p.values })),
+          { transaction: t }
+        )
+      : [];
+    if (sendOnboardingEmails && created.length) {
+      const ids = created.filter((e) => e.email).map((e) => e.id as string);
+      // After the commit, so nobody is emailed about a row that was rolled back
+      t.afterCommit(() => void onboardEmployees(ids));
     }
     for (const p of updates) {
       const from = placementOf(p.existing!);
       await p.existing!.update(p.values, { transaction: t });
       await recordTransfer(t, p.existing!.id, from, placementOf(p.existing!), { actorId, departments: sectionDepartment });
     }
-    return { dryRun: false, valid: true, total: rows.length, ...counts(planned), errors: [] as ImportIssue[], warnings };
+    return { dryRun: false, valid: true, total: rows.length, ...tally(planned), errors: [] as ImportIssue[], warnings };
   });
 };

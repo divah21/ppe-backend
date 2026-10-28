@@ -115,15 +115,54 @@ export const listEmployees = async (auth: AuthContext, q: z.infer<typeof employe
   if (q.sectionId) where.push({ sectionId: q.sectionId });
   if (q.jobTitleId) where.push({ jobTitleId: q.jobTitleId });
   if (q.status) where.push({ isActive: q.status === 'active' });
+  if (q.jobType) where.push({ jobType: q.jobType });
 
   const sorted = !!q.sort;
   const { rows, count } = await models.Employee.findAndCountAll({
     where: { [Op.and]: where },
     include: INCLUDE,
+    attributes: { include: [[PPE_HELD, 'ppeHeld']] },
     order: orderFor(q.sort, sorted ? (q.order.toUpperCase() as 'ASC' | 'DESC') : 'ASC'),
     ...pageWindow(q),
   });
-  return { rows: rows.map((r) => toEmployee(r, auth)), count };
+  return { rows: rows.map((r) => ({ ...toEmployee(r, auth), ppeHeld: Number(r.get('ppeHeld') ?? 0) })), count };
+};
+
+// Items the employee holds now, as the profile's "PPE in use" counts them
+const PPE_HELD = literal(`(SELECT COALESCE(SUM(a.quantity), 0) FROM allocations a WHERE a.employee_id = "Employee"."id" AND a.status = 'active')`);
+
+/** Figures for the employees cards, within the user's scope and the chosen department or section. */
+export const employeeSummary = async (auth: AuthContext, q: { departmentId?: string; sectionId?: string }) => {
+  const where: WhereOptions[] = [employeeScope(auth)];
+  if (q.departmentId) where.push({ sectionId: { [Op.in]: inDepartment(q.departmentId) } });
+  if (q.sectionId) where.push({ sectionId: q.sectionId });
+  const [r] = (await models.Employee.findAll({
+    where: { [Op.and]: where },
+    attributes: [
+      [literal('COUNT(*)'), 'total'],
+      [literal('COUNT(*) FILTER (WHERE "Employee"."isActive")'), 'active'],
+      [literal(`COUNT(*) FILTER (WHERE "Employee"."isActive" AND UPPER(COALESCE("Employee"."jobType", '')) = 'NEC')`), 'nec'],
+      [literal(`COUNT(*) FILTER (WHERE "Employee"."isActive" AND UPPER(COALESCE("Employee"."jobType", '')) = 'SALARIED')`), 'salaried'],
+      [
+        literal(`COUNT(*) FILTER (WHERE "Employee"."isActive" AND NOT EXISTS (
+          SELECT 1 FROM allocations a WHERE a.employee_id = "Employee"."id" AND a.status = 'active'))`),
+        'withoutPpe',
+      ],
+    ],
+    raw: true,
+  })) as unknown as Array<Record<string, string>>;
+  const n = (k: string) => Number(r?.[k] ?? 0);
+  return { total: n('total'), active: n('active'), inactive: n('total') - n('active'), nec: n('nec'), salaried: n('salaried'), withoutPpe: n('withoutPpe') };
+};
+
+/** Job types in use, for the list filter. */
+export const employeeJobTypes = async (auth: AuthContext) => {
+  const rows = (await models.Employee.findAll({
+    where: { [Op.and]: [employeeScope(auth), { jobType: { [Op.ne]: null } }] },
+    attributes: [[literal('DISTINCT "Employee"."jobType"'), 'jobType']],
+    raw: true,
+  })) as unknown as Array<{ jobType: string }>;
+  return rows.map((r) => r.jobType).filter(Boolean).sort();
 };
 
 export const OPTIONS_LIMIT = 20;
@@ -348,11 +387,18 @@ export const onboardingEmail = (employee: EmployeeDto) => ({
   jobTitle: escapeHtml(employee.jobTitle?.name ?? employee.jobType),
 });
 
-const sendOnboarding = (employee: EmployeeDto) => {
+export const sendOnboarding = (employee: EmployeeDto) => {
   if (!employee.email || config.env === 'test') return;
   Promise.resolve(sendEmployeeOnboardedEmail(onboardingEmail(employee))).catch((err: unknown) =>
     logger.warn({ err }, 'Employee onboarding email failed')
   );
+};
+
+/** Emails each new employee who has an address, for imports (v1 "send onboarding emails"). */
+export const onboardEmployees = async (ids: string[]) => {
+  const rows = await models.Employee.findAll({ where: { id: ids }, include: INCLUDE });
+  // Only the employee's own details go into the email, so the role passed here does not matter
+  for (const row of rows) sendOnboarding(toEmployee(row, { role: ROLES.ADMIN } as AuthContext));
 };
 
 export const createEmployee = async (auth: AuthContext, input: EmployeeInput) => {

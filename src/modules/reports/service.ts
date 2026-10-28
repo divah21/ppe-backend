@@ -6,6 +6,7 @@ import { likeTerm } from '../../core/http';
 import { COST_SQL, RENEWAL_SQL, REQUEST_DEPARTMENT, REQUEST_SECTION, filterSql, scopeOf, scopeSql, type Scope } from '../dashboard/scope';
 import type {
   AllocationsReportQuery,
+  EmployeesReportQuery,
   MatrixReportQuery,
   PpeCardsReportQuery,
   RequestsReportQuery,
@@ -22,6 +23,13 @@ const MANAGERS: readonly Role[] = [...WHOLE_MINE, ROLES.HOD, ROLES.DEPARTMENT_RE
 const ALL_ROLES: readonly Role[] = [...MANAGERS, ROLES.SECTION_REP];
 
 export const REPORTS = [
+  {
+    key: 'employees',
+    title: 'Employees',
+    description: 'Employees with their section, job title, contact details and the PPE they hold.',
+    filters: ['departmentId', 'sectionId', 'q', 'status'],
+    roles: ALL_ROLES,
+  },
   {
     key: 'allocations',
     title: 'Allocations',
@@ -638,4 +646,70 @@ export const reportOptions = async (auth: AuthContext) => {
     categories: categories.map((c) => c.category),
     locations: locations.map((l) => l.location),
   };
+};
+
+// ---------------------------------------------------------------------------------------------
+
+const EMPLOYEE_COLUMNS: Column[] = [
+  { header: 'Works no.', key: 'worksNumber', width: 12 },
+  { header: 'Employee', key: 'employee', width: 26 },
+  { header: 'Section', key: 'section', width: 22 },
+  { header: 'Department', key: 'department', width: 20 },
+  { header: 'Job title', key: 'jobTitle', width: 22 },
+  { header: 'Job type', key: 'jobType', width: 10 },
+  { header: 'Gender', key: 'gender', width: 9 },
+  { header: 'Email', key: 'email', width: 26 },
+  { header: 'Phone', key: 'phone', width: 14 },
+  { header: 'Date joined', key: 'joined', width: 13, numFmt: DATE_FMT },
+  { header: 'Status', key: 'status', width: 10, align: 'center' },
+  { header: 'PPE held', key: 'held', width: 10, align: 'right' },
+];
+
+/** The employee list, scoped as the Employees page is. */
+export const employeesReport = async (auth: AuthContext, q: EmployeesReportQuery): Promise<Sheet[]> => {
+  const scope = scopeOf(auth);
+  const f = filterSql(scope, q, 'sec.id', 'sec.department_id');
+  const parts = [f.sql];
+  if (q.status) parts.push(q.status === 'active' ? 'e."isActive"' : 'NOT e."isActive"');
+  if (q.q) parts.push(`(e."firstName" || ' ' || e."lastName" ILIKE :term OR e."worksNumber" ILIKE :term)`);
+  const rows = capped(
+    await select<Record<string, any>>(
+      `SELECT e."worksNumber" AS works_number, e."firstName" AS first_name, e."lastName" AS last_name, sec.name AS section,
+              d.name AS department, COALESCE(jt.name, e."jobTitle") AS job_title, e."jobType" AS job_type, e.gender, e.email,
+              e."phoneNumber" AS phone, e."dateJoined" AS joined, e."isActive" AS active,
+              (SELECT COALESCE(SUM(a.quantity), 0) FROM allocations a WHERE a.employee_id = e.id AND a.status = 'active') AS held
+       FROM employees e
+       JOIN sections sec ON sec.id = e."sectionId"
+       LEFT JOIN departments d ON d.id = sec.department_id
+       LEFT JOIN job_titles jt ON jt.id = e."jobTitleId"
+       WHERE ${parts.join(' AND ')}
+       ORDER BY sec.name, e."lastName", e."firstName"
+       LIMIT :limit`,
+      { ...f.replacements, term: q.q ? likeTerm(q.q) : null, limit: MAX_ROWS + 1 }
+    )
+  );
+  const data = rows.map((r) => ({
+    worksNumber: r.works_number,
+    employee: fullName(r.first_name, r.last_name),
+    section: r.section,
+    department: r.department ?? '',
+    jobTitle: r.job_title ?? '',
+    jobType: r.job_type ?? '',
+    gender: r.gender ?? '',
+    email: r.email ?? '',
+    phone: r.phone ?? '',
+    joined: date(r.joined),
+    status: r.active ? 'Active' : 'Inactive',
+    held: Number(r.held),
+  }));
+  return [
+    {
+      name: 'Employees',
+      title: 'Employees Report',
+      infoLines: await describe(auth, scope, { ...q, extra: q.status ? [`Status: ${q.status}`] : [] }),
+      columns: EMPLOYEE_COLUMNS,
+      rows: data,
+      totalLabel: `Employees: ${data.length}   |   Active: ${data.filter((r) => r.status === 'Active').length}`,
+    },
+  ];
 };

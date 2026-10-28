@@ -27,6 +27,14 @@ export const REQUEST_STATUSES = [
 ] as const;
 export const REQUEST_TYPES = ['new', 'replacement', 'emergency', 'annual'] as const;
 
+export const employeesReportQuery = z.object({
+  departmentId: id,
+  sectionId: id,
+  q: text,
+  status: z.enum(['active', 'inactive']).optional(),
+});
+export type EmployeesReportQuery = z.infer<typeof employeesReportQuery>;
+
 export const allocationsReportQuery = z
   .object({
     departmentId: id,
