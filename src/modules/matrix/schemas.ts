@@ -123,6 +123,26 @@ export const sectionSaveBody = z
   });
 
 export type JobTitleSaveInput = z.infer<typeof jobTitleSaveBody>;
+
+export const MATRIX_KINDS = ['job-titles', 'sections'] as const;
+export type MatrixKind = (typeof MATRIX_KINDS)[number];
+export const kindParam = z.object({ kind: z.enum(MATRIX_KINDS) });
+
+export const matrixImportBody = z.object({
+  dryRun: z.boolean().default(true),
+  /** Remove an owner's items that the file does not list (v1 section upload replaced each section) */
+  replace: z.boolean().default(false),
+  rows: z.array(z.record(z.unknown())).min(1, 'The file has no rows').max(MAX_BATCH, `Upload at most ${MAX_BATCH} rows at a time`),
+});
+export type MatrixImportInput = z.infer<typeof matrixImportBody>;
+
+export const matrixCopyBody = z.object({
+  fromId: uuid,
+  toIds: z.array(uuid).min(1, 'Choose where to copy to').max(200),
+  /** Also remove the targets' items the source does not have */
+  replace: z.boolean().default(false),
+});
+export type MatrixCopyInput = z.infer<typeof matrixCopyBody>;
 export type SectionSaveInput = z.infer<typeof sectionSaveBody>;
 
 export const eligibilityQuery = z.object({ employeeId: uuid });

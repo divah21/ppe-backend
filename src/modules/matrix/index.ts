@@ -1,12 +1,16 @@
-import { Router } from 'express';
-import { audit } from '../../core/audit';
-import { authenticate, getAuth, requireRole } from '../../core/auth';
+import { Router, type RequestHandler } from 'express';
+import { audit, skipAudit } from '../../core/audit';
+import { authenticate, getAuth, requireRole, type Role } from '../../core/auth';
 import { ok, paged, parse, route, uuidParam } from '../../core/http';
 import { defineModule } from '../../core/module';
 import { JOB_TITLE_EDITORS, SECTION_EDITORS } from './policy';
+import { copyMatrix, importMatrix, matrixSummary } from './tools';
 import {
   eligibilityQuery,
   jobTitleMatrixQuery,
+  kindParam,
+  matrixCopyBody,
+  matrixImportBody,
   jobTitleSaveBody,
   sectionMatrixQuery,
   sectionOptionsQuery,
@@ -28,6 +32,40 @@ import {
 
 const router = Router();
 router.use(authenticate);
+
+const EDITORS: Record<'job-titles' | 'sections', readonly Role[]> = { 'job-titles': JOB_TITLE_EDITORS, sections: SECTION_EDITORS };
+/** Who may change a matrix depends on which one: job titles or sections. */
+const editorsOf: RequestHandler = (req, res, next) => requireRole(...EDITORS[parse(kindParam, req.params).kind])(req, res, next);
+
+router.get(
+  '/:kind/summary',
+  route(async (req, res) => ok(res, await matrixSummary(getAuth(req), parse(kindParam, req.params).kind)))
+);
+
+router.post(
+  '/:kind/import',
+  editorsOf,
+  route(async (req, res) => {
+    const { kind } = parse(kindParam, req.params);
+    const input = parse(matrixImportBody, req.body);
+    const report = await importMatrix(getAuth(req), kind, input);
+    if ('saved' in report) await audit(req, 'MATRIX_IMPORT', kind === 'job-titles' ? 'job_title_ppe_matrix' : 'section_ppe_matrix', null, { ...report.saved, replace: input.replace });
+    else skipAudit(req);
+    return ok(res, report, 'saved' in report ? 201 : 200);
+  })
+);
+
+router.post(
+  '/:kind/copy',
+  editorsOf,
+  route(async (req, res) => {
+    const { kind } = parse(kindParam, req.params);
+    const input = parse(matrixCopyBody, req.body);
+    const result = await copyMatrix(getAuth(req), kind, input);
+    await audit(req, 'MATRIX_COPY', kind === 'job-titles' ? 'job_title_ppe_matrix' : 'section_ppe_matrix', input.fromId, { ...result, toIds: input.toIds, replace: input.replace });
+    return ok(res, result);
+  })
+);
 
 router.get(
   '/eligibility',
