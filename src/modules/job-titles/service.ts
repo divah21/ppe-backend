@@ -5,6 +5,7 @@ import { AppError, conflict, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { DEPARTMENT_BOUND, NO_ID, WHOLE_MINE } from '../sections/policy';
 import { assertUnreferenced, type Reference } from '../sections/references';
+import { assertCategory } from './categories';
 import type { JobTitleInput, JobTitleListQuery } from './schemas';
 
 /** Job titles follow their section: whole mine, the user's department, or the user's section. */
@@ -18,7 +19,10 @@ const scope = (auth: AuthContext): WhereOptions => {
 const EMPLOYEE_COUNT = literal(
   '(SELECT COUNT(*) FROM employees e WHERE e."jobTitleId" = "JobTitle"."id" AND e."isActive" = true)'
 );
-const COUNTS = { include: [[EMPLOYEE_COUNT, 'employeeCount']] } as never;
+const HAS_MATRIX = 'EXISTS (SELECT 1 FROM job_title_ppe_matrix m WHERE m."jobTitleId" = "JobTitle"."id" AND m.is_active)';
+const COUNTS = { include: [[EMPLOYEE_COUNT, 'employeeCount'], [literal(HAS_MATRIX), 'hasMatrix']] } as never;
+
+const categoryInclude = () => ({ model: models.JobTitle, as: 'ppeCategory', attributes: ['id', 'name'], required: false });
 
 const sectionInclude = () => ({
   model: models.Section,
@@ -41,6 +45,8 @@ export const toJobTitle = (row: Row) => ({
     ? { id: row.section.department.id as string, name: row.section.department.name as string }
     : null,
   employeeCount: Number(row.get('employeeCount') ?? 0),
+  hasMatrix: !!row.get('hasMatrix'),
+  ppeCategory: row.ppeCategory ? { id: row.ppeCategory.id as string, name: row.ppeCategory.name as string } : null,
   createdAt: row.createdAt as Date,
 });
 
@@ -59,10 +65,13 @@ export const listJobTitles = async (auth: AuthContext, q: JobTitleListQuery) => 
   if (q.status) where.push({ isActive: q.status === 'active' });
   if (q.sectionId) where.push({ sectionId: q.sectionId });
   if (q.departmentId) where.push({ '$section.department_id$': q.departmentId });
+  if (q.category === 'mapped') where.push({ ppeCategoryId: { [Op.ne]: null } });
+  if (q.category === 'unmapped') where.push({ ppeCategoryId: null }, literal(`NOT ${HAS_MATRIX}`));
+  if (q.category === 'categories') where.push(literal(HAS_MATRIX));
 
   const { rows, count } = await models.JobTitle.findAndCountAll({
     where: { [Op.and]: where },
-    include: [sectionInclude()],
+    include: [sectionInclude(), categoryInclude()],
     attributes: COUNTS,
     order: [[...sortKey(q.sort), q.sort ? q.order.toUpperCase() : 'ASC'], ['id', 'ASC']] as never,
     ...pageWindow(q),
@@ -86,7 +95,7 @@ export const jobTitleOptions = async (auth: AuthContext, filter: { sectionId?: s
 export const getJobTitle = async (auth: AuthContext, id: string) => {
   const row = await models.JobTitle.findOne({
     where: { [Op.and]: [scope(auth), { id }] },
-    include: [sectionInclude()],
+    include: [sectionInclude(), categoryInclude()],
     attributes: COUNTS,
   });
   if (!row) throw notFound('Job title');
@@ -130,6 +139,7 @@ export const createJobTitle = async (auth: AuthContext, input: JobTitleInput) =>
   const id = await inTransaction(async (t) => {
     await lockSection(input.sectionId, t);
     await assertUnique(input, t);
+    await assertCategory(input.ppeCategoryId, null, t);
     const row = await models.JobTitle.create(input, { transaction: t });
     return row.id as string;
   });
@@ -142,6 +152,14 @@ export const updateJobTitle = async (auth: AuthContext, id: string, input: JobTi
     if (!row) throw notFound('Job title');
     await lockSection(input.sectionId, t);
     await assertUnique(input, t, row);
+    if (input.ppeCategoryId && input.ppeCategoryId !== row.ppeCategoryId) {
+      await assertCategory(input.ppeCategoryId, id, t);
+      if (await models.JobTitle.count({ where: { ppeCategoryId: id }, transaction: t })) {
+        throw new AppError('VALIDATION_FAILED', 'Some fields are invalid', {
+          fieldErrors: { ppeCategoryId: ['Other job titles take their PPE from this one, so it cannot take another category'] },
+        });
+      }
+    }
     await row.update(input, { transaction: t });
   });
   return getJobTitle(auth, id);

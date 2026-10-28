@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { ROLES, authenticate, getAuth, requireRole } from '../../core/auth';
 import { ok, paged, parse, route, uuidParam } from '../../core/http';
 import { defineModule } from '../../core/module';
-import { jobTitleBody, jobTitleListQuery, jobTitleOptionsQuery } from './schemas';
+import { applyCategories, listCategories, suggestCategories } from './categories';
+import { categoryMappingBody, jobTitleBody, jobTitleListQuery, jobTitleOptionsQuery } from './schemas';
 import { createJobTitle, deleteJobTitle, getJobTitle, jobTitleOptions, listJobTitles, updateJobTitle } from './service';
 
 const router = Router();
@@ -20,6 +21,16 @@ router.get(
 router.get(
   '/options',
   route(async (req, res) => ok(res, await jobTitleOptions(getAuth(req), parse(jobTitleOptionsQuery, req.query))))
+);
+
+router.get('/categories', route(async (_req, res) => ok(res, await listCategories())));
+
+router.post('/categories/suggest', requireRole(ROLES.ADMIN), route(async (_req, res) => ok(res, await suggestCategories())));
+
+router.put(
+  '/categories',
+  requireRole(ROLES.ADMIN),
+  route(async (req, res) => ok(res, await applyCategories(parse(categoryMappingBody, req.body))))
 );
 
 router.get(
