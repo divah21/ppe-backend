@@ -1,7 +1,7 @@
 import { Op, literal, type WhereOptions } from 'sequelize';
 import { ROLES, type AuthContext } from '../../core/auth';
 import { inTransaction, models, type Row } from '../../core/db';
-import { conflict, notFound } from '../../core/errors';
+import { conflict, fieldErrors, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { assertUnreferenced, type Reference } from '../sections/references';
 import type { DepartmentInput, departmentListQuery } from './schemas';
@@ -59,7 +59,21 @@ export const getDepartment = async (auth: AuthContext, id: string) => {
   return toDepartment(row);
 };
 
+/** Names and codes are unique; say which one clashes instead of the database's generic conflict. */
+const assertUnique = async (input: DepartmentInput, exceptId?: string) => {
+  const others = exceptId ? { id: { [Op.ne]: exceptId } } : {};
+  const [byName, byCode] = await Promise.all([
+    models.Department.findOne({ where: { name: input.name, ...others }, attributes: ['id'] }),
+    input.code ? models.Department.findOne({ where: { code: input.code, ...others }, attributes: ['id'] }) : null,
+  ]);
+  const clashes: Record<string, string> = {};
+  if (byName) clashes.name = `Another department is already called ${input.name}`;
+  if (byCode) clashes.code = `Another department already uses the code ${input.code}`;
+  if (byName || byCode) throw fieldErrors(clashes);
+};
+
 export const createDepartment = async (input: DepartmentInput) => {
+  await assertUnique(input);
   const row = await models.Department.create(input);
   return toDepartment(row);
 };
@@ -67,6 +81,7 @@ export const createDepartment = async (input: DepartmentInput) => {
 export const updateDepartment = async (auth: AuthContext, id: string, input: DepartmentInput) => {
   const row = await models.Department.findByPk(id);
   if (!row) throw notFound('Department');
+  await assertUnique(input, id);
   await row.update(input);
   return getDepartment(auth, id);
 };
