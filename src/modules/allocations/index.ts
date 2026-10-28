@@ -41,7 +41,9 @@ router.get(
 
 router.get(
   '/summary',
-  route(async (req, res) => ok(res, await allocationSummary(getAuth(req), parse(allocationListQuery, req.query))))
+  route(async (req, res) =>
+    ok(res, await allocationSummary(getAuth(req), parse(allocationListQuery, req.query), { activeOnly: req.query.activeOnly === 'true' }))
+  )
 );
 
 router.get(
@@ -58,7 +60,7 @@ router.get(
   route(async (req, res) => {
     const q = parse(complianceQuery, req.query);
     const { rows, count, summary } = await compliance(getAuth(req), q);
-    return res.json({ data: rows, meta: { page: q.page, pageSize: q.pageSize, total: count, pageCount: Math.max(1, Math.ceil(count / q.pageSize)), summary } });
+    return paged(res, rows, count, q, { summary });
   })
 );
 

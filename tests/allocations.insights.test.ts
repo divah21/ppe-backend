@@ -88,12 +88,29 @@ describe('GET /allocations/compliance', () => {
   });
 });
 
+describe('compliance with category-mapped job titles', () => {
+  it('counts items from the job title’s PPE category, as the PPE cards report does', async () => {
+    const category = await fx.make('JobTitle', { name: `${fx.tag} category`, sectionId: secA1.id });
+    const title = await fx.make('JobTitle', { name: `${fx.tag} fitter`, sectionId: secA1.id, ppeCategoryId: category.id });
+    const item3 = await af.item({ replacementFrequency: 12 });
+    await fx.make('JobTitlePPEMatrix', { jobTitleId: category.id, ppeItemId: item3.id, quantityRequired: 1, isActive: true });
+    const person = await fx.employee(secA1.id, { jobTitleId: title.id });
+    const res = await stores.get('/api/v2/allocations/compliance').query({ q: fx.tag, sectionId: secA1.id });
+    const row = res.body.data.find((r: { employee: { id: string } }) => r.employee.id === person.id);
+    expect(row).toMatchObject({ required: 3, missing: 3, level: 'none' });
+    const empty = await stores.get('/api/v2/allocations/compliance').query({ q: fx.tag, level: 'full' });
+    expect(empty.body.data).toEqual([]);
+    expect(empty.body.meta.total).toBe(0);
+    expect(empty.body.meta.summary.none).toBeGreaterThan(0);
+  });
+});
+
 describe('GET /allocations/import/template', () => {
   it('gives stores the chosen employees and the items in their matrices', async () => {
     const res = await stores.get('/api/v2/allocations/import/template').query({ sectionId: secA1.id });
     expect(res.status).toBe(200);
-    expect(res.body.data.employees).toHaveLength(1);
-    expect(res.body.data.items.map((i: { name: string }) => i.name).sort()).toEqual([item1.name, item2.name].sort());
+    expect(res.body.data.employees.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.data.items.map((i: { name: string }) => i.name)).toEqual(expect.arrayContaining([item1.name, item2.name]));
     expect((await hod.get('/api/v2/allocations/import/template')).status).toBe(403);
   });
 });

@@ -3,7 +3,7 @@ import type { AuthContext } from '../../core/auth';
 import { sequelize } from '../../core/db';
 import { likeTerm, pageWindow } from '../../core/http';
 import { PRICE_CTE, allocationCost } from '../budgets/spend';
-import { scopeOf, type Scope } from './policy';
+import { filterSql, scopeOf } from '../dashboard/scope';
 import { awaitingRenewal, dueSql } from './rules';
 import type { AllocationListQuery, ComplianceQuery, EmployeeSummaryQuery, TemplateQuery } from './schemas';
 
@@ -13,28 +13,36 @@ const EXPIRING_DAYS = 30;
 const select = <T extends object>(sql: string, replacements: Record<string, unknown>) =>
   sequelize.query<T>(sql, { replacements, type: QueryTypes.SELECT });
 
-/** Scope and narrowing filters on employees e joined to sections s. */
-const employeeFilters = (scope: Scope, f: { departmentId?: string; sectionId?: string; employeeId?: string }) => {
-  const parts: string[] = [];
-  const replacements: Record<string, unknown> = {};
-  if (scope.kind === 'section') parts.push('e."sectionId" = :scopeId');
-  if (scope.kind === 'department') parts.push('s.department_id = :scopeId');
-  if (scope.kind !== 'all') replacements.scopeId = scope.id;
-  if (f.departmentId) (parts.push('s.department_id = :departmentId'), (replacements.departmentId = f.departmentId));
-  if (f.sectionId) (parts.push('e."sectionId" = :sectionId'), (replacements.sectionId = f.sectionId));
+/** The user's scope plus narrowing filters on employees e joined to sections s, shared with the reports. */
+const employeeFilters = (auth: AuthContext, f: { departmentId?: string; sectionId?: string; employeeId?: string }) => {
+  const base = filterSql(scopeOf(auth), f, 'e."sectionId"', 's.department_id');
+  const parts = [base.sql];
+  const replacements: Record<string, unknown> = { ...base.replacements };
   if (f.employeeId) (parts.push('e.id = :employeeId'), (replacements.employeeId = f.employeeId));
   return { parts, replacements };
 };
 
+const DAY = 86_400_000;
+/** Local midnight, as the list filters issue dates, so cards and list agree on boundary days. */
+const startOfDay = (iso: string) => new Date(`${iso}T00:00:00`);
+
+/** An employee's required items: section matrix, the job title's own entries and its PPE category's (as the reports read it). */
+const REQUIRED = (e: string) => `
+  SELECT m.ppe_item_id FROM section_ppe_matrix m WHERE m.section_id = ${e}.section_id AND m.is_active IS NOT FALSE
+  UNION
+  SELECT j.ppe_item_id FROM job_title_ppe_matrix j
+  WHERE j."jobTitleId" IN (${e}.job_title_id, ${e}.category_id) AND j.is_active IS NOT FALSE`;
+
 const DUE = dueSql('a', 'p');
 
 /** Figures for the cards above the issued list, under the list's filters. */
-export const allocationSummary = async (auth: AuthContext, q: AllocationListQuery) => {
-  const { parts, replacements } = employeeFilters(scopeOf(auth), q);
+export const allocationSummary = async (auth: AuthContext, q: AllocationListQuery, { activeOnly = false } = {}) => {
+  const { parts, replacements } = employeeFilters(auth, q);
+  if (activeOnly) parts.push('e."isActive" IS NOT FALSE');
   if (q.status) (parts.push('a.status = :status'), (replacements.status = q.status));
   if (q.ppeItemId) (parts.push('a.ppe_item_id = :ppeItemId'), (replacements.ppeItemId = q.ppeItemId));
-  if (q.from) (parts.push('a.issue_date >= :from::date'), (replacements.from = q.from));
-  if (q.to) (parts.push(`a.issue_date < :to::date + interval '1 day'`), (replacements.to = q.to));
+  if (q.from) (parts.push('a.issue_date >= :from'), (replacements.from = startOfDay(q.from)));
+  if (q.to) (parts.push('a.issue_date < :to'), (replacements.to = new Date(startOfDay(q.to).getTime() + DAY)));
   if (q.q) {
     parts.push(`(e."worksNumber" ILIKE :q OR concat(e."firstName", ' ', e."lastName") ILIKE :q OR p.name ILIKE :q OR p.item_code ILIKE :q)`);
     replacements.q = likeTerm(q.q);
@@ -52,7 +60,7 @@ export const allocationSummary = async (auth: AuthContext, q: AllocationListQuer
      JOIN employees e ON e.id = a.employee_id
      JOIN sections s ON s.id = e."sectionId"
      LEFT JOIN price pr ON pr.ppe_item_id = a.ppe_item_id
-     ${parts.length ? `WHERE ${parts.join(' AND ')}` : ''}`,
+     WHERE ${parts.join(' AND ')}`,
     { ...replacements, expiring: EXPIRING_DAYS }
   );
   return {
@@ -75,15 +83,15 @@ const SUMMARY_SORT = {
 
 /** Each employee in scope with what they hold now, everything ever issued and their next renewal (v1 summaries). */
 export const employeeSummaries = async (auth: AuthContext, q: EmployeeSummaryQuery) => {
-  const { parts, replacements } = employeeFilters(scopeOf(auth), q);
+  const { parts, replacements } = employeeFilters(auth, q);
   parts.push('e."isActive" IS NOT FALSE');
   if (q.q) {
     parts.push(`(e."worksNumber" ILIKE :q OR concat(e."firstName", ' ', e."lastName") ILIKE :q)`);
     replacements.q = likeTerm(q.q);
   }
   const where = `WHERE ${parts.join(' AND ')}`;
-  const dir = q.order === 'asc' ? 'ASC' : 'DESC';
-  const order = (q.sort ? SUMMARY_SORT[q.sort] : SUMMARY_SORT.employee.replaceAll(':dir', 'ASC')).replaceAll(':dir', dir);
+  // No sort chosen: alphabetical
+  const order = SUMMARY_SORT[q.sort ?? 'employee'].replaceAll(':dir', q.sort && q.order === 'desc' ? 'DESC' : 'ASC');
   const rows = await select<{
     id: string;
     works_number: string;
@@ -142,16 +150,14 @@ export const employeeSummaries = async (auth: AuthContext, q: EmployeeSummaryQue
 const complianceCte = (where: string) => `
   WITH emp AS (
     SELECT e.id, e."worksNumber" AS works_number, e."firstName" AS first_name, e."lastName" AS last_name,
-           e."sectionId" AS section_id, e."jobTitleId" AS job_title_id, e."isActive", s.name AS section_name,
+           e."sectionId" AS section_id, e."jobTitleId" AS job_title_id, jt."ppeCategoryId" AS category_id, e."isActive", s.name AS section_name,
            COALESCE(jt.name, e."jobTitle") AS job_title
     FROM employees e
     JOIN sections s ON s.id = e."sectionId"
     LEFT JOIN job_titles jt ON jt.id = e."jobTitleId"
     ${where}
   ), req AS (
-    SELECT emp.id AS employee_id, m.ppe_item_id FROM emp JOIN section_ppe_matrix m ON m.section_id = emp.section_id AND m.is_active
-    UNION
-    SELECT emp.id, j.ppe_item_id FROM emp JOIN job_title_ppe_matrix j ON j."jobTitleId" = emp.job_title_id AND j.is_active
+    SELECT emp.id AS employee_id, r.ppe_item_id FROM emp CROSS JOIN LATERAL (${REQUIRED('emp')}) r
   ), held AS (
     SELECT DISTINCT ON (a.employee_id, a.ppe_item_id) a.employee_id, a.ppe_item_id, ${DUE} AS due
     FROM allocations a
@@ -168,7 +174,7 @@ const complianceCte = (where: string) => `
     FROM emp
     LEFT JOIN req r ON r.employee_id = emp.id
     LEFT JOIN held h ON h.employee_id = r.employee_id AND h.ppe_item_id = r.ppe_item_id
-    GROUP BY emp.id, emp.works_number, emp.first_name, emp.last_name, emp.section_id, emp.job_title_id, emp."isActive", emp.section_name, emp.job_title
+    GROUP BY emp.id, emp.works_number, emp.first_name, emp.last_name, emp.section_id, emp.job_title_id, emp.category_id, emp."isActive", emp.section_name, emp.job_title
   ), rated AS (
     SELECT per.*,
            CASE WHEN required = 0 THEN NULL ELSE ROUND(100.0 * current / required) END AS rate,
@@ -184,33 +190,35 @@ const COMPLIANCE_SORT = {
 } as const;
 
 export const compliance = async (auth: AuthContext, q: ComplianceQuery) => {
-  const { parts, replacements } = employeeFilters(scopeOf(auth), q);
+  const { parts, replacements } = employeeFilters(auth, q);
   parts.push('e."isActive" IS NOT FALSE');
   if (q.q) {
     parts.push(`(e."worksNumber" ILIKE :q OR concat(e."firstName", ' ', e."lastName") ILIKE :q)`);
     replacements.q = likeTerm(q.q);
   }
   const cte = complianceCte(`WHERE ${parts.join(' AND ')}`);
-  const levelWhere = q.level ? 'WHERE level = :level' : '';
-  const dir = q.order === 'desc' ? 'DESC' : 'ASC';
-  // Worst first by default, so the people needing PPE are at the top
-  const order = (q.sort ? COMPLIANCE_SORT[q.sort] : COMPLIANCE_SORT.rate).replaceAll(':dir', q.sort ? dir : 'ASC');
-  const [rows, [summary]] = await Promise.all([
-    select<Record<string, string | number | null>>(
-      `${cte} SELECT * FROM rated ${levelWhere} ORDER BY ${order}, id LIMIT :limit OFFSET :offset`,
-      { ...replacements, level: q.level, ...pageWindow(q) }
-    ),
-    select<Record<string, string | null>>(
-      `${cte} SELECT COUNT(*) FILTER (WHERE ${q.level ? 'level = :level' : 'TRUE'}) AS total,
-                     ROUND(AVG(rate)) AS average,
-                     COUNT(*) FILTER (WHERE level = 'full') AS full,
-                     COUNT(*) FILTER (WHERE level = 'partial') AS partial,
-                     COUNT(*) FILTER (WHERE level = 'none') AS none,
-                     COUNT(*) FILTER (WHERE level = 'no-matrix') AS no_matrix
-              FROM rated`,
-      { ...replacements, level: q.level }
-    ),
-  ]);
+  const order = COMPLIANCE_SORT[q.sort ?? 'rate'].replaceAll(':dir', q.sort && q.order === 'desc' ? 'DESC' : 'ASC');
+  // Summary over everyone in scope, the page over the chosen level: one pass, totals as window aggregates
+  const sql = (limit: string, filtered = true) => `${cte}
+    SELECT * FROM (
+      SELECT rated.*,
+             COUNT(*) FILTER (WHERE :level IS NULL OR level = :level) OVER () AS total,
+             ROUND(AVG(rate) OVER ()) AS average,
+             COUNT(*) FILTER (WHERE level = 'full') OVER () AS n_full,
+             COUNT(*) FILTER (WHERE level = 'partial') OVER () AS n_partial,
+             COUNT(*) FILTER (WHERE level = 'none') OVER () AS n_none,
+             COUNT(*) FILTER (WHERE level = 'no-matrix') OVER () AS n_no_matrix
+      FROM rated
+    ) x
+    ${filtered ? 'WHERE :level IS NULL OR level = :level' : ''}
+    ORDER BY ${order}, id ${limit}`;
+  const params = { ...replacements, level: q.level ?? null, ...pageWindow(q) };
+  const rows = await select<Record<string, string | number | null>>(sql('LIMIT :limit OFFSET :offset'), params);
+  // An empty page (past the end, or no one at this level) has no row to carry the totals
+  const totals = rows[0] ?? (await select<Record<string, string | number | null>>(sql('LIMIT 1', false), params))[0];
+  const summary = totals
+    ? { total: totals.total, average: totals.average, full: totals.n_full, partial: totals.n_partial, none: totals.n_none, no_matrix: totals.n_no_matrix }
+    : undefined;
   return {
     rows: rows.map((r) => ({
       employee: {
@@ -243,7 +251,7 @@ export const compliance = async (auth: AuthContext, q: ComplianceQuery) => {
  * (section and job title) and the employees themselves, as v1's template offered.
  */
 export const importTemplate = async (auth: AuthContext, q: TemplateQuery) => {
-  const { parts, replacements } = employeeFilters(scopeOf(auth), q);
+  const { parts, replacements } = employeeFilters(auth, q);
   parts.push('e."isActive" IS NOT FALSE');
   if (q.jobTitleId) (parts.push('e."jobTitleId" = :jobTitleId'), (replacements.jobTitleId = q.jobTitleId));
   const where = `WHERE ${parts.join(' AND ')}`;
@@ -257,11 +265,9 @@ export const importTemplate = async (auth: AuthContext, q: TemplateQuery) => {
     select<{ name: string; item_code: string | null }>(
       `SELECT DISTINCT p.name, p.item_code FROM employees e
        JOIN sections s ON s.id = e."sectionId"
-       JOIN LATERAL (
-         SELECT m.ppe_item_id FROM section_ppe_matrix m WHERE m.section_id = e."sectionId" AND m.is_active
-         UNION
-         SELECT j.ppe_item_id FROM job_title_ppe_matrix j WHERE j."jobTitleId" = e."jobTitleId" AND j.is_active
-       ) req ON TRUE
+       LEFT JOIN job_titles jt ON jt.id = e."jobTitleId"
+       CROSS JOIN LATERAL (SELECT e."sectionId" AS section_id, e."jobTitleId" AS job_title_id, jt."ppeCategoryId" AS category_id) emp
+       CROSS JOIN LATERAL (${REQUIRED('emp')}) req
        JOIN ppe_items p ON p.id = req.ppe_item_id AND p.is_active IS NOT FALSE
        ${where}
        ORDER BY p.name`,

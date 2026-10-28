@@ -163,7 +163,9 @@ export const allocationsReport = async (auth: AuthContext, q: AllocationsReportQ
   const parts = [f.sql];
   if (q.employeeId) parts.push('e.id = :employeeId');
   if (q.status) parts.push('a.status::text = :status');
-  if (q.q) parts.push(`(e."firstName" || ' ' || e."lastName" ILIKE :term OR e."worksNumber" ILIKE :term)`);
+  if (q.ppeItemId) parts.push('a.ppe_item_id = :ppeItemId');
+  // Same search as the Issued list: employee, works number, item name or code
+  if (q.q) parts.push(`(e."firstName" || ' ' || e."lastName" ILIKE :term OR e."worksNumber" ILIKE :term OR p.name ILIKE :term OR p.item_code ILIKE :term)`);
   dateRangeSql('a.issue_date', q, parts);
 
   const rows = capped(
