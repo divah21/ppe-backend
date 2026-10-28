@@ -14,6 +14,14 @@ const scope = (auth: AuthContext): WhereOptions =>
   WHOLE_MINE.has(auth.role) ? {} : { id: auth.departmentId ?? '00000000-0000-0000-0000-000000000000' };
 
 const SECTION_COUNT = literal('(SELECT COUNT(*) FROM sections s WHERE s.department_id = "Department"."id")');
+const EMPLOYEE_COUNT = literal(
+  '(SELECT COUNT(*) FROM employees e JOIN sections s ON s.id = e."sectionId" WHERE s.department_id = "Department"."id" AND e."isActive" = true)'
+);
+const ACTIVE_ISSUES = literal(
+  `(SELECT COUNT(*) FROM allocations a JOIN employees e ON e.id = a.employee_id JOIN sections s ON s.id = e."sectionId"
+    WHERE s.department_id = "Department"."id" AND a.status = 'active')`
+);
+const COUNTS = { include: [[SECTION_COUNT, 'sectionCount'], [EMPLOYEE_COUNT, 'employeeCount'], [ACTIVE_ISSUES, 'activeIssueCount']] };
 
 export const toDepartment = (row: Row) => ({
   id: row.id as string,
@@ -22,6 +30,8 @@ export const toDepartment = (row: Row) => ({
   description: (row.description as string | null) ?? null,
   isActive: !!row.isActive,
   sectionCount: Number(row.get('sectionCount') ?? 0),
+  employeeCount: Number(row.get('employeeCount') ?? 0),
+  activeIssueCount: Number(row.get('activeIssueCount') ?? 0),
   createdAt: row.createdAt as Date,
 });
 
@@ -34,7 +44,7 @@ export const listDepartments = async (auth: AuthContext, q: z.infer<typeof depar
 
   const { rows, count } = await models.Department.findAndCountAll({
     where: { [Op.and]: where },
-    attributes: { include: [[SECTION_COUNT, 'sectionCount']] },
+    attributes: COUNTS as never,
     order: [[q.sort ?? 'name', q.sort ? q.order.toUpperCase() : 'ASC']],
     ...pageWindow(q),
   });
@@ -53,7 +63,7 @@ export const departmentOptions = async (auth: AuthContext) => {
 export const getDepartment = async (auth: AuthContext, id: string) => {
   const row = await models.Department.findOne({
     where: { [Op.and]: [scope(auth), { id }] },
-    attributes: { include: [[SECTION_COUNT, 'sectionCount']] },
+    attributes: COUNTS as never,
   });
   if (!row) throw notFound('Department');
   return toDepartment(row);
