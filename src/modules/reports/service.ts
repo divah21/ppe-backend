@@ -25,13 +25,6 @@ const ALL_ROLES: readonly Role[] = [...MANAGERS, ROLES.SECTION_REP];
 
 export const REPORTS = [
   {
-    key: 'employees',
-    title: 'Employees',
-    description: 'Employees with their section, job title, contact details and the PPE they hold.',
-    filters: ['departmentId', 'sectionId', 'q', 'status'],
-    roles: ALL_ROLES,
-  },
-  {
     key: 'allocations',
     title: 'Allocations',
     description: 'PPE issued to each employee with dates, sizes, renewals and cost.',
@@ -64,6 +57,13 @@ export const REPORTS = [
     title: 'Employee PPE cards',
     description: 'Each employee’s required PPE with last issue, next renewal and what is overdue.',
     filters: ['departmentId', 'sectionId', 'q'],
+    roles: ALL_ROLES,
+  },
+  {
+    key: 'employees',
+    title: 'Employees',
+    description: 'Employees with their section, job title, contact details and the PPE they hold.',
+    filters: ['departmentId', 'sectionId', 'q', 'status'],
     roles: ALL_ROLES,
   },
 ] as const;
