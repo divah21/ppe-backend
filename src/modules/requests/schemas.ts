@@ -8,6 +8,7 @@ const filters = {
   type: z.enum(REQUEST_TYPES).optional(),
   departmentId: z.string().uuid().optional(),
   sectionId: z.string().uuid().optional(),
+  employeeId: z.string().uuid().optional(),
 };
 
 export const requestListQuery = listQuery(['createdAt', 'updatedAt', 'status', 'requestType'], filters);
@@ -28,22 +29,36 @@ const optionalText = (max: number) =>
     .nullable()
     .transform((v) => (v ? v : null));
 
-export const createRequestBody = z.object({
-  employeeId: z.string().uuid('Choose an employee'),
-  requestType: z.enum(REQUEST_TYPES).default('replacement'),
-  comment: optionalText(1000),
-  items: z
-    .array(
-      z.object({
-        ppeItemId: z.string().uuid('Choose a PPE item'),
-        quantity: z.coerce.number().int('Enter a whole number').min(1, 'Enter at least 1').max(100, 'Enter 100 or fewer'),
-        size: optionalText(50),
-        reason: optionalText(500),
+export const createRequestBody = z
+  .object({
+    employeeId: z.string().uuid('Choose an employee').optional(),
+    /** An emergency issue to someone with no employee record, such as a visitor or contractor */
+    visitor: z
+      .object({
+        name: z.string({ required_error: 'Enter the visitor’s name' }).trim().min(1, 'Enter the visitor’s name').max(120),
+        company: optionalText(120),
+        sectionId: z.string().uuid().optional(),
       })
-    )
-    .min(1, 'Add at least one item')
-    .max(50, 'Add 50 items or fewer'),
-});
+      .optional(),
+    requestType: z.enum(REQUEST_TYPES).default('replacement'),
+    comment: optionalText(1000),
+    items: z
+      .array(
+        z.object({
+          ppeItemId: z.string().uuid('Choose a PPE item'),
+          quantity: z.coerce.number().int('Enter a whole number').min(1, 'Enter at least 1').max(100, 'Enter 100 or fewer'),
+          size: optionalText(50),
+          reason: optionalText(500),
+        })
+      )
+      .min(1, 'Add at least one item')
+      .max(50, 'Add 50 items or fewer'),
+  })
+  .superRefine((v, ctx) => {
+    if (!v.employeeId && !v.visitor) ctx.addIssue({ code: 'custom', path: ['employeeId'], message: 'Choose an employee' });
+    if (v.employeeId && v.visitor)
+      ctx.addIssue({ code: 'custom', path: ['visitor'], message: 'Choose an employee or a visitor, not both' });
+  });
 export type CreateRequestInput = z.infer<typeof createRequestBody>;
 
 export const approveBody = z.object({ comment: optionalText(1000) });
@@ -63,6 +78,8 @@ export const fulfilBody = z.object({
         quantity: z.coerce.number().int('Enter a whole number').min(1, 'Enter at least 1').max(1000),
         /** What the client saw already issued on the item; a mismatch means someone issued meanwhile */
         issued: z.number().int().min(0).optional(),
+        /** Issue a different PPE item in place of the one requested */
+        substitute: z.boolean().optional(),
       })
     )
     .min(1, 'Issue at least one item')
@@ -70,6 +87,8 @@ export const fulfilBody = z.object({
   note: optionalText(1000),
 });
 export type FulfilInput = z.infer<typeof fulfilBody>;
+
+export const substituteQuery = z.object({ q: z.string().trim().min(2, 'Type at least 2 letters').max(100) });
 
 export const employeeSearchQuery = z.object({ q: z.string().trim().max(100).optional() });
 export const employeeIdParam = z.object({ employeeId: z.string().uuid() });

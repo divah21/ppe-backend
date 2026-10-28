@@ -8,6 +8,7 @@ import { employeeScope, inDepartment, inSection, requestScope } from './policy';
 import type { CreateRequestInput, RequestCountsQuery, RequestListQuery } from './schemas';
 import {
   APPROVE,
+  OPEN,
   REJECT,
   STAGES,
   TERMINAL,
@@ -84,6 +85,22 @@ const ITEM_COUNT = Sequelize.literal('(SELECT COUNT(*) FROM request_items ri WHE
 const ITEM_QUANTITY = Sequelize.literal(
   '(SELECT COALESCE(SUM(ri.quantity), 0) FROM request_items ri WHERE ri.request_id = "Request"."id")'
 );
+// Requested quantities at the average stock price, as the budget pages price unpriced issues
+const ESTIMATED_COST_SQL = `(
+  SELECT COALESCE(SUM(ri.quantity * p.avg_price), 0) FROM request_items ri
+  LEFT JOIN (SELECT ppe_item_id, AVG(unit_price_u_s_d) AS avg_price FROM stocks WHERE unit_price_u_s_d IS NOT NULL GROUP BY ppe_item_id) p
+    ON p.ppe_item_id = ri.ppe_item_id
+  WHERE ri.request_id = "Request"."id")`;
+const ESTIMATED_COST = Sequelize.literal(ESTIMATED_COST_SQL);
+const SUMMARY_ATTRIBUTES = {
+  include: [
+    [ITEM_COUNT, 'itemCount'],
+    [ITEM_QUANTITY, 'totalQuantity'],
+    [ESTIMATED_COST, 'estimatedCost'],
+    [Sequelize.literal('"Request"."visitor_name"'), 'visitorName'],
+    [Sequelize.literal('"Request"."visitor_company"'), 'visitorCompany'],
+  ] as Array<[ReturnType<typeof Sequelize.literal>, string]>,
+};
 
 const placement = (r: Row) => {
   const employeeSection = r.targetEmployee?.section;
@@ -105,9 +122,11 @@ export const toRequestSummary = (r: Row, auth: AuthContext) => {
     requestType: r.requestType as RequestType,
     isEmergencyVisitor: !!r.isEmergencyVisitor,
     employee: toEmployeeSummary(r.targetEmployee),
+    visitor: r.get('visitorName') ? { name: r.get('visitorName') as string, company: (r.get('visitorCompany') as string | null) ?? null } : null,
     ...placement(r),
     itemCount: Number(r.get('itemCount') ?? 0),
     totalQuantity: Number(r.get('totalQuantity') ?? 0),
+    estimatedCost: Math.round(Number(r.get('estimatedCost') ?? 0) * 100) / 100,
     createdAt: r.createdAt as Date,
     updatedAt: r.updatedAt as Date,
     stageSince: since,
@@ -127,6 +146,7 @@ const baseWhere = (auth: AuthContext, q: RequestCountsQuery): WhereOptions[] => 
   if (q.type) where.push({ requestType: q.type });
   if (q.departmentId) where.push(inDepartment(q.departmentId));
   if (q.sectionId) where.push(inSection(q.sectionId));
+  if (q.employeeId) where.push({ employeeId: q.employeeId });
   if (q.q) {
     const term = q.q.replace(/^req-?/i, '');
     const like = { [Op.iLike]: containsTerm(q.q) };
@@ -136,6 +156,7 @@ const baseWhere = (auth: AuthContext, q: RequestCountsQuery): WhereOptions[] => 
         { '$targetEmployee.worksNumber$': like },
         { '$targetEmployee.firstName$': like },
         { '$targetEmployee.lastName$': like },
+        Sequelize.where(Sequelize.col('Request.visitor_name'), like),
         Sequelize.where(
           Sequelize.fn('concat', Sequelize.col('targetEmployee.firstName'), ' ', Sequelize.col('targetEmployee.lastName')),
           like
@@ -154,7 +175,7 @@ const withView = (auth: AuthContext, where: WhereOptions[], view: View): WhereOp
 export const listRequests = async (auth: AuthContext, q: RequestListQuery) => {
   const { rows, count } = await models.Request.findAndCountAll({
     where: withView(auth, baseWhere(auth, q), q.view),
-    attributes: { include: [[ITEM_COUNT, 'itemCount'], [ITEM_QUANTITY, 'totalQuantity']] },
+    attributes: SUMMARY_ATTRIBUTES,
     include: [
       employeeInclude(),
       { model: models.Section, as: 'section', attributes: ['id', 'name'] },
@@ -184,6 +205,31 @@ export const countRequests = async (auth: AuthContext, q: RequestCountsQuery) =>
     raw: true,
   })) as Record<View, string | number> | null;
   return Object.fromEntries(VIEWS.map((v) => [v, Number(row?.[v] ?? 0)])) as Record<View, number>;
+};
+
+const STALE_DAYS = 7;
+
+/** Figures for the cards above the list, under the same filters as the list. */
+export const requestSummary = async (auth: AuthContext, q: RequestCountsQuery) => {
+  const open = OPEN.map((st) => sequelize.escape(st)).join(', ');
+  const isOpen = `"Request"."status" IN (${open})`;
+  const row = (await models.Request.findOne({
+    where: { [Op.and]: baseWhere(auth, q) },
+    attributes: [
+      [literal(`COUNT(*) FILTER (WHERE ${isOpen} AND "Request"."created_at" < NOW() - make_interval(days => ${STALE_DAYS}))`), 'stale'],
+      [literal(`COALESCE(SUM(${ESTIMATED_COST_SQL}) FILTER (WHERE ${isOpen}), 0)`), 'openValue'],
+      [literal(`COUNT(*) FILTER (WHERE "Request"."status" = 'fulfilled' AND "Request"."fulfilled_date" >= date_trunc('month', NOW()))`), 'issuedThisMonth'],
+    ],
+    include: [{ ...employeeInclude(), attributes: [], include: [] }],
+    raw: true,
+  })) as Record<string, string | number> | null;
+  return {
+    mine: (await countRequests(auth, q)).mine,
+    staleDays: STALE_DAYS,
+    stale: Number(row?.stale ?? 0),
+    openValue: Math.round(Number(row?.openValue ?? 0) * 100) / 100,
+    issuedThisMonth: Number(row?.issuedThisMonth ?? 0),
+  };
 };
 
 const loadActors = async (ids: Array<string | null | undefined>) => {
@@ -263,7 +309,7 @@ const buildTimeline = (r: Row, actors: Map<string, { id: string; name: string }>
 export const getRequest = async (auth: AuthContext, id: string) => {
   const r = await models.Request.findOne({
     where: { [Op.and]: [requestScope(auth), { id }] },
-    attributes: { include: [[ITEM_COUNT, 'itemCount'], [ITEM_QUANTITY, 'totalQuantity']] },
+    attributes: SUMMARY_ATTRIBUTES,
     include: [
       employeeInclude([{ model: models.JobTitle, as: 'jobTitleRef', attributes: ['id', 'name'], required: false }]),
       { model: models.Section, as: 'section', attributes: ['id', 'name'] },
@@ -282,9 +328,10 @@ export const getRequest = async (auth: AuthContext, id: string) => {
 
   const allocations = await models.Allocation.findAll({
     where: { requestId: id },
-    include: [{ model: models.PPEItem, as: 'ppeItem', attributes: ['id', 'name'] }],
+    include: [{ model: models.PPEItem, as: 'ppeItem', attributes: ['id', 'name', 'itemCode'] }],
     order: [['issueDate', 'ASC']],
   });
+  const requestedItem = new Map((r.items as Row[]).map((i) => [i.id as string, i.ppeItemId as string]));
 
   const actors = await loadActors([
     r.requestedById,
@@ -295,6 +342,7 @@ export const getRequest = async (auth: AuthContext, id: string) => {
     r.storesApproverId,
     r.fulfilledByUserId,
     r.rejectedById,
+    ...allocations.map((a) => a.issuedById as string | null),
   ]);
 
   const e = r.targetEmployee;
@@ -336,12 +384,16 @@ export const getRequest = async (auth: AuthContext, id: string) => {
       id: a.id as string,
       requestItemId: (a.requestItemId as string | null) ?? null,
       ppeItemName: (a.ppeItem?.name as string | undefined) ?? null,
+      itemCode: (a.ppeItem?.itemCode as string | null | undefined) ?? null,
       quantity: Number(a.quantity),
       size: (a.size as string | null) ?? null,
       issueDate: a.issueDate as Date,
       nextRenewalDate: (a.nextRenewalDate as Date | null) ?? null,
       totalCost: a.totalCost === null ? null : Number(a.totalCost),
+      issuedBy: actors.get(a.issuedById) ?? null,
+      substituted: !!a.requestItemId && requestedItem.get(a.requestItemId) !== a.ppeItemId,
     })),
+    issuedCost: Math.round(allocations.reduce((s, a) => s + Number(a.totalCost ?? 0), 0) * 100) / 100,
     timeline: buildTimeline(r, actors),
     rejection:
       r.status === 'rejected' || r.status === 'cancelled'
@@ -354,27 +406,71 @@ export type RequestDetail = Awaited<ReturnType<typeof getRequest>>;
 const invalid = (field: string, message: string) =>
   new AppError('VALIDATION_FAILED', message, { fieldErrors: { [field]: [message] } });
 
-export const createRequest = async (auth: AuthContext, input: CreateRequestInput) => {
-  const employee = await models.Employee.findOne({
-    where: { [Op.and]: [employeeScope(auth), { id: input.employeeId }] },
-    include: [
-      { model: models.Section, as: 'section', attributes: ['id', 'departmentId'] },
-    ],
-  });
-  if (!employee) throw notFound('Employee');
-  if (employee.isActive === false) throw invalid('employeeId', 'This employee is no longer active');
-
-  const keys = input.items.map((i) => `${i.ppeItemId}|${(i.size ?? '').toLowerCase()}`);
+const checkItems = async (items: CreateRequestInput['items']) => {
+  const keys = items.map((i) => `${i.ppeItemId}|${(i.size ?? '').toLowerCase()}`);
   if (new Set(keys).size !== keys.length) throw invalid('items', 'Each item and size can only be listed once');
 
-  const ids = [...new Set(input.items.map((i) => i.ppeItemId))];
+  const ids = [...new Set(items.map((i) => i.ppeItemId))];
   const ppeItems = await models.PPEItem.findAll({ where: { id: ids } });
   const byId = new Map(ppeItems.map((p) => [p.id as string, p]));
-  for (const item of input.items) {
+  for (const item of items) {
     const p = byId.get(item.ppeItemId);
     if (!p || p.isActive === false) throw invalid('items', 'One or more PPE items are no longer available');
     if (p.hasSizeVariants && !item.size) throw invalid('items', `Choose a size for ${p.name}`);
   }
+  return { ids, byId };
+};
+
+const insertRequest = (
+  auth: AuthContext,
+  input: CreateRequestInput,
+  placed: { employeeId: string | null; sectionId: string | null; departmentId: string | null }
+) =>
+  inTransaction(async (t) => {
+    const request = await models.Request.create(
+      {
+        ...placed,
+        requestedById: auth.userId,
+        comment: input.comment,
+        requestType: placed.employeeId ? input.requestType : 'emergency',
+        status: 'pending',
+        isEmergencyVisitor: !placed.employeeId,
+      },
+      { transaction: t }
+    );
+    if (input.visitor) {
+      await sequelize.query('UPDATE requests SET visitor_name = :name, visitor_company = :company WHERE id = :id', {
+        replacements: { name: input.visitor.name, company: input.visitor.company, id: request.id },
+        transaction: t,
+      });
+    }
+    await models.RequestItem.bulkCreate(
+      input.items.map((i) => ({ requestId: request.id, ppeItemId: i.ppeItemId, quantity: i.quantity, size: i.size, reason: i.reason })),
+      { transaction: t }
+    );
+    return request.id as string;
+  });
+
+/** v1 emergency visitor request: no employee, no matrix check, owned by the raising section. */
+const createVisitorRequest = async (auth: AuthContext, input: CreateRequestInput) => {
+  const sectionId = auth.role === ROLES.SECTION_REP ? auth.sectionId : (input.visitor?.sectionId ?? auth.sectionId);
+  if (!sectionId) throw invalid('visitor.sectionId', 'Choose the section the visitor is with');
+  const section = await models.Section.findByPk(sectionId, { attributes: ['id', 'departmentId'] });
+  if (!section) throw invalid('visitor.sectionId', 'Choose the section the visitor is with');
+  await checkItems(input.items);
+  return insertRequest(auth, input, { employeeId: null, sectionId: section.id, departmentId: section.departmentId ?? null });
+};
+
+export const createRequest = async (auth: AuthContext, input: CreateRequestInput) => {
+  if (!input.employeeId) return createVisitorRequest(auth, input);
+  const employee = await models.Employee.findOne({
+    where: { [Op.and]: [employeeScope(auth), { id: input.employeeId }] },
+    include: [{ model: models.Section, as: 'section', attributes: ['id', 'departmentId'] }],
+  });
+  if (!employee) throw notFound('Employee');
+  if (employee.isActive === false) throw invalid('employeeId', 'This employee is no longer active');
+
+  const { ids, byId } = await checkItems(input.items);
 
   // v1 eligibility: annual and replacement items must be in the job-title or section matrix,
   // and an annual issue only once the last issue is due for renewal
@@ -395,25 +491,10 @@ export const createRequest = async (auth: AuthContext, input: CreateRequestInput
     }
   }
 
-  return inTransaction(async (t) => {
-    const request = await models.Request.create(
-      {
-        employeeId: employee.id,
-        requestedById: auth.userId,
-        sectionId: employee.sectionId,
-        departmentId: employee.section?.departmentId ?? null,
-        comment: input.comment,
-        requestType: input.requestType,
-        status: 'pending',
-        isEmergencyVisitor: false,
-      },
-      { transaction: t }
-    );
-    await models.RequestItem.bulkCreate(
-      input.items.map((i) => ({ requestId: request.id, ppeItemId: i.ppeItemId, quantity: i.quantity, size: i.size, reason: i.reason })),
-      { transaction: t }
-    );
-    return request.id as string;
+  return insertRequest(auth, input, {
+    employeeId: employee.id,
+    sectionId: employee.sectionId,
+    departmentId: employee.section?.departmentId ?? null,
   });
 };
 

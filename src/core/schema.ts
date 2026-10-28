@@ -38,6 +38,10 @@ export const ensureTransferSchema = () =>
         IF NEW.section_id IS NULL THEN
           SELECT e."sectionId" INTO NEW.section_id FROM employees e WHERE e.id = NEW.employee_id;
         END IF;
+        -- Visitor issues have no employee: they count against the section that raised the request
+        IF NEW.section_id IS NULL AND NEW.request_id IS NOT NULL THEN
+          SELECT r.section_id, r.department_id INTO NEW.section_id, NEW.department_id FROM requests r WHERE r.id = NEW.request_id;
+        END IF;
         IF NEW.department_id IS NULL THEN
           SELECT s.department_id INTO NEW.department_id FROM sections s WHERE s.id = NEW.section_id;
         END IF;
@@ -49,6 +53,14 @@ export const ensureTransferSchema = () =>
         CREATE TRIGGER allocations_issue_scope BEFORE INSERT ON allocations
           FOR EACH ROW EXECUTE PROCEDURE ppe_allocation_issue_scope();
       `);
+    }
+    // Visitor requests name the person, who has no employee record
+    const [visitor] = await sequelize.query<{ n: string }>(
+      `SELECT COUNT(*) AS n FROM information_schema.columns WHERE table_name = 'requests' AND column_name = 'visitor_name'`,
+      { type: QueryTypes.SELECT, transaction: t }
+    );
+    if (Number(visitor?.n) === 0) {
+      await run(`ALTER TABLE requests ADD COLUMN IF NOT EXISTS visitor_name VARCHAR(120), ADD COLUMN IF NOT EXISTS visitor_company VARCHAR(120)`);
     }
     await run(`
       CREATE TABLE IF NOT EXISTS employee_transfers (

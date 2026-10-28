@@ -3,8 +3,8 @@ import { audit } from '../../core/audit';
 import { ROLES, authenticate, getAuth, requireRole } from '../../core/auth';
 import { ok, paged, parse, route, uuidParam } from '../../core/http';
 import { defineModule } from '../../core/module';
-import { employeeEligibility, searchEmployees } from './eligibility';
-import { fulfilRequest, stockOptions } from './fulfil';
+import { employeeEligibility, requestCatalogue, searchEmployees } from './eligibility';
+import { fulfilRequest, stockOptions, substituteOptions } from './fulfil';
 import { notifyHods, notifyIssued, notifyRejected, notifyStores } from './notify';
 import {
   approveBody,
@@ -16,6 +16,7 @@ import {
   rejectBody,
   requestCountsQuery,
   requestListQuery,
+  substituteQuery,
 } from './schemas';
 import {
   approveRequest,
@@ -25,6 +26,7 @@ import {
   getRequest,
   listRequests,
   rejectRequest,
+  requestSummary,
 } from './service';
 
 const router = Router();
@@ -45,9 +47,20 @@ router.get(
 );
 
 router.get(
+  '/summary',
+  route(async (req, res) => ok(res, await requestSummary(getAuth(req), parse(requestCountsQuery, req.query))))
+);
+
+router.get(
   '/employees',
   requireRole(ROLES.SECTION_REP),
   route(async (req, res) => ok(res, await searchEmployees(getAuth(req), parse(employeeSearchQuery, req.query).q)))
+);
+
+router.get(
+  '/catalogue',
+  requireRole(ROLES.SECTION_REP),
+  route(async (_req, res) => ok(res, await requestCatalogue()))
 );
 
 router.get(
@@ -67,6 +80,14 @@ router.get(
   '/:id/stock-options',
   requireRole(ROLES.STORES),
   route(async (req, res) => ok(res, await stockOptions(getAuth(req), parse(uuidParam, req.params).id)))
+);
+
+router.get(
+  '/:id/substitutes',
+  requireRole(ROLES.STORES),
+  route(async (req, res) =>
+    ok(res, await substituteOptions(getAuth(req), parse(uuidParam, req.params).id, parse(substituteQuery, req.query).q))
+  )
 );
 
 router.post(

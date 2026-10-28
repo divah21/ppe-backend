@@ -116,6 +116,43 @@ export const searchEmployees = async (auth: AuthContext, q?: string) => {
   }));
 };
 
+const ITEM_ATTRIBUTES = ['id', 'name', 'itemCode', 'category', 'unit', 'hasSizeVariants', 'sizeScale', 'availableSizes'];
+
+const activeCatalogue = () =>
+  models.PPEItem.findAll({
+    where: { isActive: { [Op.ne]: false }, itemType: 'PPE' },
+    attributes: ITEM_ATTRIBUTES,
+    order: [['name', 'ASC']],
+  });
+
+const toItem = (
+  p: Row,
+  sizes: Map<string, string[]>,
+  entry?: { source: 'job-title' | 'section'; quantityRequired: number | null; isMandatory: boolean },
+  next: Date | null = null
+) => ({
+  ppeItemId: p.id as string,
+  name: p.name as string,
+  itemCode: (p.itemCode as string | null) ?? null,
+  category: (p.category as string | null) ?? null,
+  unit: (p.unit as string | null) ?? null,
+  hasSizeVariants: !!p.hasSizeVariants,
+  sizes: sizes.get(p.id) ?? [],
+  inMatrix: !!entry,
+  matrixSource: entry?.source ?? null,
+  quantityRequired: entry?.quantityRequired ?? null,
+  isMandatory: entry?.isMandatory ?? false,
+  nextRenewalDate: next,
+  isDue: !next || next.getTime() <= Date.now(),
+});
+
+/** The active PPE catalogue, for emergency issues to visitors who have no matrix. */
+export const requestCatalogue = async () => {
+  const items = await activeCatalogue();
+  const sizes = await sizesFor(items);
+  return { employeeId: null, items: items.map((p) => toItem(p, sizes)) };
+};
+
 /** What the employee may be issued: matrix items (with due dates) and the active catalogue. */
 export const employeeEligibility = async (auth: AuthContext, employeeId: string) => {
   const employee = await models.Employee.findOne({
@@ -124,47 +161,17 @@ export const employeeEligibility = async (auth: AuthContext, employeeId: string)
   });
   if (!employee) throw notFound('Employee');
 
-  const [matrix, due, catalogue] = await Promise.all([
-    matrixFor(employee.id),
-    dueDates(employee.id),
-    models.PPEItem.findAll({
-      where: { isActive: { [Op.ne]: false }, itemType: 'PPE' },
-      attributes: ['id', 'name', 'itemCode', 'category', 'unit', 'hasSizeVariants', 'sizeScale', 'availableSizes'],
-      order: [['name', 'ASC']],
-    }),
-  ]);
+  const [matrix, due, catalogue] = await Promise.all([matrixFor(employee.id), dueDates(employee.id), activeCatalogue()]);
   // Matrix items stay requestable even if their type is not PPE
   const missing = [...matrix.keys()].filter((id) => !catalogue.some((c) => c.id === id));
   const extra = missing.length
-    ? await models.PPEItem.findAll({
-        where: { id: missing, isActive: { [Op.ne]: false } },
-        attributes: ['id', 'name', 'itemCode', 'category', 'unit', 'hasSizeVariants', 'sizeScale', 'availableSizes'],
-      })
+    ? await models.PPEItem.findAll({ where: { id: missing, isActive: { [Op.ne]: false } }, attributes: ITEM_ATTRIBUTES })
     : [];
   const items = [...catalogue, ...extra];
   const sizes = await sizesFor(items);
-  const now = Date.now();
 
   return {
     employeeId: employee.id as string,
-    items: items.map((p) => {
-      const entry = matrix.get(p.id);
-      const next = due.get(p.id) ?? null;
-      return {
-        ppeItemId: p.id as string,
-        name: p.name as string,
-        itemCode: (p.itemCode as string | null) ?? null,
-        category: (p.category as string | null) ?? null,
-        unit: (p.unit as string | null) ?? null,
-        hasSizeVariants: !!p.hasSizeVariants,
-        sizes: sizes.get(p.id) ?? [],
-        inMatrix: !!entry,
-        matrixSource: entry?.source ?? null,
-        quantityRequired: entry?.quantityRequired ?? null,
-        isMandatory: entry?.isMandatory ?? false,
-        nextRenewalDate: next,
-        isDue: !next || next.getTime() <= now,
-      };
-    }),
+    items: items.map((p) => toItem(p, sizes, matrix.get(p.id), due.get(p.id) ?? null)),
   };
 };
