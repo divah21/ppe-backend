@@ -52,6 +52,8 @@ export const toFailureSummary = (row: Row, auth: AuthContext) => ({
   description: row.description as string,
   reportedDate: iso(row.reportedDate),
   failureDate: iso(row.failureDate),
+  observedAt: (row.observedAt as string | null) ?? null,
+  brand: (row.brand as string | null) ?? null,
   employee: toEmployee(row.employee),
   ppeItem: row.ppeItem
     ? { id: row.ppeItem.id as string, name: row.ppeItem.name as string, itemCode: (row.ppeItem.itemCode as string | null) ?? null }
