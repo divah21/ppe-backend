@@ -39,6 +39,18 @@ const REFERENCES: Reference[] = [
   { key: 'issues', sql: 'SELECT COUNT(*) FROM allocations WHERE issued_by_id = :id', one: 'PPE issue', many: 'PPE issues' },
   { key: 'audit', sql: 'SELECT COUNT(*) FROM audit_logs WHERE user_id = :id', one: 'audit log entry', many: 'audit log entries' },
   { key: 'budgets', sql: 'SELECT COUNT(*) FROM company_budgets WHERE created_by_id = :id', one: 'company budget', many: 'company budgets' },
+  {
+    key: 'consumableRequests',
+    sql: 'SELECT COUNT(*) FROM consumable_requests WHERE :id IN (requested_by_id, hod_approver_id, stores_approver_id)',
+    one: 'consumable request',
+    many: 'consumable requests',
+  },
+  {
+    key: 'consumableIssues',
+    sql: 'SELECT COUNT(*) FROM consumable_allocations WHERE :id IN (issued_by_id, received_by_id)',
+    one: 'consumable issue',
+    many: 'consumable issues',
+  },
   { key: 'documents', sql: 'SELECT COUNT(*) FROM documents WHERE uploaded_by_id = :id', one: 'document', many: 'documents' },
 ];
 
