@@ -12,3 +12,16 @@ export const auditListQuery = listQuery(['createdAt', 'action', 'entityType'], {
 }).refine((q) => !q.from || !q.to || q.from <= q.to, { message: 'The start date must be on or before the end date', path: ['to'] });
 
 export type AuditListQuery = z.infer<typeof auditListQuery>;
+
+export const accessLogQuery = z
+  .object({
+    page: z.coerce.number().int().min(1).default(1),
+    pageSize: z.coerce.number().int().min(1).max(200).default(50),
+    q: z.string().trim().max(200).optional(),
+    userId: z.string().uuid().optional(),
+    from: day.optional(),
+    to: day.optional(),
+  })
+  .refine((q) => !q.from || !q.to || q.from <= q.to, { message: 'The start date must be on or before the end date', path: ['to'] });
+
+export type AccessLogQuery = z.infer<typeof accessLogQuery>;

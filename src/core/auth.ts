@@ -132,8 +132,8 @@ const attachAuth = async (req: Request) => {
   }
 
   req.auth = toAuthContext(user, claims.sid);
-  // v1 audit middleware reads req.user
-  (req as Request & { user?: Row }).user = user;
+  // v1 audit and access-log middleware read req.user and req.userRole
+  Object.assign(req as Request & { user?: Row; userRole?: string }, { user, userRole: req.auth.role });
 };
 
 /** Allows only the listed roles. Admin always passes. */
