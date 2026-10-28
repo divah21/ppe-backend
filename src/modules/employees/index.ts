@@ -1,17 +1,18 @@
 import { Router } from 'express';
-import { audit } from '../../core/audit';
+import { audit, skipAudit } from '../../core/audit';
 import { ROLES, authenticate, getAuth, requireRole } from '../../core/auth';
 import { ok, paged, parse, route, uuidParam } from '../../core/http';
 import { defineModule } from '../../core/module';
 import { importEmployees } from './import';
 import { EDITOR_ROLES } from './policy';
-import { employeeBody, employeeListQuery, employeeOptionsQuery, importBody } from './schemas';
+import { employeeBody, employeeListQuery, employeeOptionsQuery, employeeUpdateBody, importBody, transferQuery } from './schemas';
 import {
   createEmployee,
   employeeLookups,
   employeeOptions,
   getEmployee,
   listEmployees,
+  previewTransfer,
   setEmployeeActive,
   updateEmployee,
 } from './service';
@@ -43,10 +44,19 @@ router.post(
   requireRole(ROLES.ADMIN),
   route(async (req, res) => {
     const { rows, dryRun } = parse(importBody, req.body);
-    const result = await importEmployees(rows, dryRun);
-    if (!dryRun) await audit(req, 'BULK_IMPORT', 'Employee', null, { created: result.created, updated: result.updated });
+    const result = await importEmployees(rows, dryRun, getAuth(req).userId);
+    if (dryRun) skipAudit(req);
+    else await audit(req, 'BULK_IMPORT', 'Employee', null, { created: result.created, updated: result.updated });
     return ok(res, result);
   })
+);
+
+router.get(
+  '/:id/transfer-preview',
+  requireRole(...EDITOR_ROLES),
+  route(async (req, res) =>
+    ok(res, await previewTransfer(getAuth(req), parse(uuidParam, req.params).id, parse(transferQuery, req.query)))
+  )
 );
 
 router.get(
@@ -63,9 +73,13 @@ router.post(
 router.put(
   '/:id',
   requireRole(...EDITOR_ROLES),
-  route(async (req, res) =>
-    ok(res, await updateEmployee(getAuth(req), parse(uuidParam, req.params).id, parse(employeeBody, req.body)))
-  )
+  route(async (req, res) => {
+    const input = parse(employeeUpdateBody, req.body);
+    const { employee, transfer } = await updateEmployee(getAuth(req), parse(uuidParam, req.params).id, input);
+    // Replaces the generic UPDATE entry, so it carries the submitted fields too
+    if (transfer) await audit(req, 'TRANSFER', 'Employee', employee.id, { ...transfer, changes: input });
+    return ok(res, { ...employee, transfer });
+  })
 );
 
 router.post(
@@ -74,6 +88,7 @@ router.post(
   route(async (req, res) => {
     const { employee, changed } = await setEmployeeActive(getAuth(req), parse(uuidParam, req.params).id, false);
     if (changed) await audit(req, 'DEACTIVATE', 'Employee', employee.id);
+    else skipAudit(req);
     return ok(res, employee);
   })
 );
@@ -84,6 +99,7 @@ router.post(
   route(async (req, res) => {
     const { employee, changed } = await setEmployeeActive(getAuth(req), parse(uuidParam, req.params).id, true);
     if (changed) await audit(req, 'ACTIVATE', 'Employee', employee.id);
+    else skipAudit(req);
     return ok(res, employee);
   })
 );

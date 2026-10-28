@@ -9,6 +9,8 @@ const INDEXES = [
   ['allocations_issue_date_idx', 'allocations (issue_date)'],
   ['allocations_request_idx', 'allocations (request_id)'],
   ['allocations_request_item_idx', 'allocations (request_item_id)'],
+  ['allocations_department_issue_idx', 'allocations (department_id, issue_date)'],
+  ['allocations_section_issue_idx', 'allocations (section_id, issue_date)'],
   ['requests_employee_idx', 'requests (employee_id)'],
   ['requests_created_idx', 'requests (created_at DESC, id DESC)'],
   ['requests_status_idx', 'requests (status)'],

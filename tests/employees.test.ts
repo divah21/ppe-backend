@@ -125,7 +125,9 @@ describe('GET /employees/lookups', () => {
     expect(rep.sections.map((s: { id: string }) => s.id)).toEqual([w.mine.section.id]);
     expect(rep.departments).toEqual([{ id: w.mine.department.id, name: w.mine.department.name }]);
     expect(rep.jobTitles).toEqual([{ id: w.jobTitle.id, name: `${fx.tag}-Fitter`, sectionId: w.mine.section.id }]);
-    expect(rep.costCentres).toEqual(expect.arrayContaining([{ id: w.costCentre.id, code: `${fx.tag}-CC`, name: `${fx.tag} Plant` }]));
+    expect(rep.costCentres).toEqual(
+      expect.arrayContaining([{ id: w.costCentre.id, code: `${fx.tag}-CC`, name: `${fx.tag} Plant`, departmentId: w.mine.department.id }])
+    );
 
     const hod = (await w.agents.hod.get(`${URL}/lookups`)).body.data;
     expect(hod.sections.map((s: { id: string }) => s.id).sort()).toEqual([w.mine.section.id, w.sectionB.id].sort());

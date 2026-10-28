@@ -6,17 +6,17 @@ import { effectiveDepartment } from '../budgets/policy';
 import { PRICE_CTE, allocationCost, allocationCostIsEstimated, money, nextDay, round2 } from '../budgets/spend';
 import type { SpendingQuery, SpendingTotalsQuery } from './schemas';
 
-/** Allocations in range and in the user's scope, each with what it cost. */
+/** Allocations in range and in the user's scope, each with what it cost, under the section it was issued to. */
 const base = (auth: AuthContext, f: SpendingTotalsQuery) => {
   const parts: string[] = [];
   const replacements: Record<string, unknown> = {};
   const dept = effectiveDepartment(auth, f.departmentId);
   if (dept) {
-    parts.push('s.department_id = :dept');
+    parts.push('a.department_id = :dept');
     replacements.dept = dept;
   }
   if (f.sectionId) {
-    parts.push('s.id = :sectionId');
+    parts.push('a.section_id = :sectionId');
     replacements.sectionId = f.sectionId;
   }
   if (f.from) {
@@ -33,9 +33,8 @@ const base = (auth: AuthContext, f: SpendingTotalsQuery) => {
            i.name AS item_name, i.item_code, i.category,
            ${allocationCost()} AS cost, ${allocationCostIsEstimated()} AS estimated
     FROM allocations a
-    JOIN employees e ON e.id = a.employee_id
-    LEFT JOIN sections s ON s.id = e."sectionId"
-    LEFT JOIN departments d ON d.id = s.department_id
+    LEFT JOIN sections s ON s.id = a.section_id
+    LEFT JOIN departments d ON d.id = a.department_id
     LEFT JOIN ppe_items i ON i.id = a.ppe_item_id
     LEFT JOIN price p ON p.ppe_item_id = a.ppe_item_id
     ${parts.length ? `WHERE ${parts.join(' AND ')}` : ''}

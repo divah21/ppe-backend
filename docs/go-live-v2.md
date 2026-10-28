@@ -43,9 +43,11 @@ The web script runs `npm ci`, the v2 typecheck and `next build` in place, so the
 
 On first start the API:
 - Creates the `auth_sessions` table.
-- Adds 18 secondary indexes (`database/indexes.js`). They are built with `CREATE INDEX CONCURRENTLY`, so tables stay writable. On a large database, the first start can take a few minutes before all of them exist; the API serves requests meanwhile.
+- Adds `section_id` and `department_id` to `allocations`, with an insert trigger that fills them, and backfills existing rows from each employee's current section. Spend then stays with the department that issued it when an employee moves.
+- Creates the `employee_transfers` table (history of section, department and job title changes).
+- Adds 20 secondary indexes (`database/indexes.js`). They are built with `CREATE INDEX CONCURRENTLY`, so tables stay writable. On a large database, the first start can take a few minutes before all of them exist; the API serves requests meanwhile.
 
-These are the only schema changes.
+These are the only schema changes, and all are additive: v1 code ignores the new columns and table. The table-level changes on `allocations` wait at most 15 seconds for a lock; if something holds it longer, the start fails and PM2 retries.
 
 **Firewall:** the API listens on 127.0.0.1 only (`HOST` in `ecosystem.config.cjs`) and Next on 127.0.0.1:3000, so only nginx can reach them. Confirm from another machine that ports 5000 and 3000 do not answer, and keep a Windows Firewall inbound block on both as a second guard.
 
@@ -107,7 +109,7 @@ pm2 delete ppe-web
 pm2 save
 ```
 
-If data must be restored (not expected, since v2 only adds `auth_sessions` and indexes):
+If data must be restored (not expected, since v2 only adds tables, nullable columns, a trigger and indexes):
 
 ```powershell
 pg_restore -c -d <db> <backup.dump>
