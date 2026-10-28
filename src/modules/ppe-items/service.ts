@@ -350,3 +350,20 @@ export const setReplacementFrequency = async (input: ReplacementFrequencyInput) 
     );
     return { updatedCount, replacementFrequency: input.replacementFrequency };
   });
+
+/** Figures for the catalogue's cards. */
+export const catalogueSummary = async () => {
+  const [r] = await sequelize.query<Record<string, string>>(
+    `SELECT COUNT(*) FILTER (WHERE p.is_active IS NOT FALSE) AS active,
+            COUNT(*) FILTER (WHERE p.is_active = FALSE) AS inactive,
+            COUNT(DISTINCT p.category) FILTER (WHERE p.is_active IS NOT FALSE) AS categories,
+            COUNT(*) FILTER (WHERE p.is_active IS NOT FALSE AND p.has_size_variants) AS sized,
+            COUNT(*) FILTER (WHERE p.is_active IS NOT FALSE AND p.is_mandatory) AS mandatory,
+            COUNT(*) FILTER (WHERE p.is_active IS NOT FALSE
+                             AND NOT EXISTS (SELECT 1 FROM stocks s WHERE s.ppe_item_id = p.id AND s.quantity > 0)) AS no_stock
+     FROM ppe_items p`,
+    { type: QueryTypes.SELECT }
+  );
+  const n = (k: string) => Number(r?.[k] ?? 0);
+  return { active: n('active'), inactive: n('inactive'), categories: n('categories'), sized: n('sized'), mandatory: n('mandatory'), noStock: n('no_stock') };
+};

@@ -302,3 +302,17 @@ export const importSizeScales = async (input: SizeScaleImportInput) => {
   }
   return report;
 };
+
+/** Figures for the size scales cards. */
+export const sizeScaleSummary = async () => {
+  const [r] = await sequelize.query<Record<string, string>>(
+    `SELECT (SELECT COUNT(*) FROM size_scales) AS scales,
+            (SELECT COUNT(*) FROM size_scales WHERE is_active IS NOT FALSE) AS active,
+            (SELECT COUNT(*) FROM sizes) AS sizes,
+            (SELECT COUNT(*) FROM ppe_items p WHERE p.has_size_variants AND p.is_active IS NOT FALSE
+               AND EXISTS (SELECT 1 FROM size_scales sc WHERE sc.code = p.size_scale)) AS items`,
+    { type: QueryTypes.SELECT }
+  );
+  const n = (k: string) => Number(r?.[k] ?? 0);
+  return { scales: n('scales'), active: n('active'), sizes: n('sizes'), items: n('items') };
+};

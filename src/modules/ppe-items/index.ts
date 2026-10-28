@@ -7,6 +7,7 @@ import { CATALOGUE_EDITORS } from './policy';
 import { importPpeItems } from './import';
 import { ppeItemBody, ppeItemImportBody, ppeItemListQuery, ppeItemOptionsQuery, replacementFrequencyBody } from './schemas';
 import {
+  catalogueSummary,
   createPpeItem,
   getPpeItem,
   listPpeItems,
@@ -33,6 +34,11 @@ router.get(
 router.get(
   '/options',
   route(async (req, res) => ok(res, await ppeItemOptions(parse(ppeItemOptionsQuery, req.query))))
+);
+
+router.get(
+  '/summary',
+  route(async (_req, res) => ok(res, await catalogueSummary()))
 );
 
 router.get(

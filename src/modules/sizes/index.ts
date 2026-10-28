@@ -13,11 +13,17 @@ import {
   listSizeScales,
   replaceSizes,
   sizeScaleOptions,
+  sizeScaleSummary,
   updateSizeScale,
 } from './service';
 
 const router = Router();
 router.use(authenticate);
+
+router.get(
+  '/summary',
+  route(async (_req, res) => ok(res, await sizeScaleSummary()))
+);
 
 router.post(
   '/import',

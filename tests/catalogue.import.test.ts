@@ -98,3 +98,15 @@ describe('POST /size-scales/import', () => {
     expect((await write(stores, 'post', '/api/v2/size-scales/import').send({ rows: [{ code: 'x y', name: 'Bad', sizes: '' }] })).status).toBe(422);
   });
 });
+
+describe('catalogue summaries', () => {
+  it('counts items and scales for the cards', async () => {
+    const items = await stores.get('/api/v2/ppe-items/summary');
+    expect(items.status).toBe(200);
+    expect(items.body.data).toEqual(expect.objectContaining({ active: expect.any(Number), categories: expect.any(Number), noStock: expect.any(Number) }));
+    expect(items.body.data.active).toBeGreaterThan(0);
+    const scales = await hod.get('/api/v2/size-scales/summary');
+    expect(scales.status).toBe(200);
+    expect(scales.body.data.sizes).toBeGreaterThanOrEqual(2);
+  });
+});
