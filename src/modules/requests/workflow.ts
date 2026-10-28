@@ -66,6 +66,8 @@ export const FULFILLERS: readonly Role[] = [ROLES.STORES];
 export const CREATORS: readonly Role[] = [ROLES.SECTION_REP];
 
 export const IN_APPROVAL: RequestStatus[] = ['pending', 'sheq-review', 'dept-rep-review', 'hod-review', 'stores-review'];
+/** Raised and not yet closed: in approval or waiting to be issued. */
+export const OPEN: RequestStatus[] = [...IN_APPROVAL, ...FULFILLABLE];
 export const TERMINAL: RequestStatus[] = ['fulfilled', 'rejected', 'cancelled'];
 
 const can = (auth: AuthContext, roles: readonly Role[] | undefined) =>
@@ -86,7 +88,7 @@ export const allowedActions = (
   return actions;
 };
 
-export const VIEWS = ['mine', 'all', 'approval', 'ready', 'fulfilled', 'rejected'] as const;
+export const VIEWS = ['mine', 'all', 'open', 'approval', 'ready', 'fulfilled', 'rejected'] as const;
 export type View = (typeof VIEWS)[number];
 
 /** Statuses at which the role is the one expected to act next (approve or issue). */
@@ -102,6 +104,8 @@ export const viewStatuses = (view: View, role: Role): RequestStatus[] | null => 
   switch (view) {
     case 'mine':
       return awaitingRole(role);
+    case 'open':
+      return OPEN;
     case 'approval':
       return IN_APPROVAL;
     case 'ready':

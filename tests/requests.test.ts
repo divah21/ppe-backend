@@ -298,11 +298,12 @@ describe('GET /requests', () => {
 
     const counts = await w.agents.hod.get(`${URL}/counts`).query(q);
     expect(counts.status).toBe(200);
-    for (const view of ['mine', 'all', 'approval', 'ready', 'fulfilled', 'rejected']) {
+    for (const view of ['mine', 'all', 'open', 'approval', 'ready', 'fulfilled', 'rejected']) {
       const list = await w.agents.hod.get(URL).query({ ...q, view, pageSize: 1 });
       expect(counts.body.data[view]).toBe(list.body.meta.total);
     }
     expect(counts.body.data.ready).toBe(1);
+    expect(counts.body.data.open).toBe(counts.body.data.approval + counts.body.data.ready);
   });
 
   it('searches by request number and employee', async () => {
