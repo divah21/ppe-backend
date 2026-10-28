@@ -8,6 +8,7 @@ import { adjustBody, bulkTopupBody, shortfallQuery, stockCreateBody, stockImport
 import {
   adjustStock,
   bulkTopup,
+  checkTopup,
   createStock,
   deleteStock,
   getStock,
@@ -51,8 +52,18 @@ router.post(
   route(async (req, res) => {
     const input = parse(stockImportBody, req.body);
     const report = await importStock(input);
-    if (input.dryRun || report.errors.length) skipAudit(req);
-    else await audit(req, 'BULK_IMPORT', 'Stock', null, { created: report.created, added: report.added, updated: report.updated, units: report.units });
+    skipAudit(req);
+    // One entry per line, so each line's movements show what the import did to it
+    if (!input.dryRun && !report.errors.length) {
+      for (const l of report.lines) {
+        await audit(req, 'STOCK_IMPORT', 'Stock', l.stockId, {
+          quantity: l.newQuantity - l.previousQuantity,
+          previousQuantity: l.previousQuantity,
+          newQuantity: l.newQuantity,
+          reason: input.updateExisting ? 'Spreadsheet import (quantities replaced)' : 'Spreadsheet import',
+        });
+      }
+    }
     return ok(res, report, input.dryRun || report.errors.length ? 200 : 201);
   })
 );
@@ -112,6 +123,7 @@ router.post(
   canWrite,
   route(async (req, res) => {
     const input = parse(bulkTopupBody, req.body);
+    if (input.dryRun) return ok(res, await checkTopup(input));
     const results = await bulkTopup(input);
     for (const r of results) {
       await audit(req, 'STOCK_TOPUP', 'Stock', r.stockId, {

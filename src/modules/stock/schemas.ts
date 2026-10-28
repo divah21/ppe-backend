@@ -81,6 +81,8 @@ export const bulkTopupBody = z.object({
     .max(200)
     .refine((items) => new Set(items.map((i) => i.stockId)).size === items.length, 'Each stock line can appear only once'),
   reason: z.string().trim().max(500).optional().transform((v) => v || 'Bulk top-up'),
+  /** Check the lines exist and save nothing */
+  dryRun: z.boolean().default(false),
 });
 export type BulkTopupInput = z.infer<typeof bulkTopupBody>;
 
@@ -107,44 +109,12 @@ export const stockUpdateBody = z
   });
 export type StockUpdateInput = z.infer<typeof stockUpdateBody>;
 
-const importGender = z
-  .string()
-  .trim()
-  .toLowerCase()
-  .nullish()
-  .transform((v, ctx) => {
-    if (!v) return null;
-    if ((GENDERS as readonly string[]).includes(v)) return v as (typeof GENDERS)[number];
-    ctx.addIssue({ code: 'custom', message: 'Gender is MALE, FEMALE or UNISEX' });
-    return z.NEVER;
-  });
-
 export const stockImportBody = z.object({
   dryRun: z.boolean().default(true),
   /** Replace the quantity and price of lines that already exist, instead of adding to them */
   updateExisting: z.boolean().default(false),
-  rows: z
-    .array(
-      z
-        .object({
-          itemCode: optionalText(100),
-          itemName: optionalText(255),
-          quantity: z.coerce.number().int('Enter a whole number').min(0).max(1_000_000),
-          size: optionalText(50),
-          color: optionalText(50),
-          gender: importGender,
-          location: optionalText(100).transform((v) => v ?? 'Main Store'),
-          binLocation: optionalText(50),
-          minLevel: z.coerce.number().int().min(0).max(1_000_000).nullish().transform((v) => v ?? null),
-          unitPriceUSD: z.coerce.number().min(0).max(1_000_000_000).nullish().transform((v) => v ?? null),
-          stockAccount: optionalText(50),
-          batchNumber: optionalText(100),
-          expiryDate: z.coerce.date().nullish().transform((v) => v ?? null),
-        })
-        .refine((r) => r.itemCode || r.itemName, { message: 'Give the item code or name', path: ['itemCode'] })
-    )
-    .min(1, 'The file has no rows')
-    .max(2000, 'Upload at most 2000 rows at a time'),
+  // Each row is checked on its own in import.ts, so problems are reported per row
+  rows: z.array(z.record(z.unknown())).min(1, 'The file has no rows').max(2000, 'Upload at most 2000 rows at a time'),
 });
 export type StockImportInput = z.infer<typeof stockImportBody>;
 
