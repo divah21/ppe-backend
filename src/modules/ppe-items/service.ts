@@ -215,7 +215,7 @@ const invalid = (field: string, message: string) =>
  * The unique indexes on item codes are case-sensitive, so concurrent saves of "ab-1" and "AB-1"
  * would both pass the check below. Serialise code checks for the length of the transaction.
  */
-const lockItemCodes = (t: Transaction) =>
+export const lockItemCodes = (t: Transaction) =>
   sequelize.query(`SELECT pg_advisory_xact_lock(hashtext('ppe_items.item_code'))`, { transaction: t });
 
 export const assertCodesFree = async (input: PpeItemInput, exceptId: string | null, t: Transaction) => {
@@ -351,8 +351,8 @@ export const setReplacementFrequency = async (input: ReplacementFrequencyInput) 
     return { updatedCount, replacementFrequency: input.replacementFrequency };
   });
 
-/** Figures for the catalogue's cards. */
-export const catalogueSummary = async () => {
+/** Figures for the catalogue's cards; inactive items are counted only for those who can see them. */
+export const catalogueSummary = async (auth: AuthContext) => {
   const [r] = await sequelize.query<Record<string, string>>(
     `SELECT COUNT(*) FILTER (WHERE p.is_active IS NOT FALSE) AS active,
             COUNT(*) FILTER (WHERE p.is_active = FALSE) AS inactive,
@@ -365,5 +365,12 @@ export const catalogueSummary = async () => {
     { type: QueryTypes.SELECT }
   );
   const n = (k: string) => Number(r?.[k] ?? 0);
-  return { active: n('active'), inactive: n('inactive'), categories: n('categories'), sized: n('sized'), mandatory: n('mandatory'), noStock: n('no_stock') };
+  return {
+    active: n('active'),
+    inactive: seesInactive(auth) ? n('inactive') : null,
+    categories: n('categories'),
+    sized: n('sized'),
+    mandatory: n('mandatory'),
+    noStock: n('no_stock'),
+  };
 };

@@ -55,6 +55,21 @@ describe('POST /ppe-items/import', () => {
     expect((await models.PPEItem.findOne({ where: { itemCode: `${fx.tag}-A` } }))!.replacementFrequency).toBe(6);
   });
 
+  it('keeps columns the file leaves out when updating, and reads codes typed as numbers', async () => {
+    const res = await write(stores, 'post', '/api/v2/ppe-items/import').send({
+      dryRun: false,
+      updateExisting: true,
+      rows: [{ itemCode: `${fx.tag}-B`, supplier: 'Acme' }],
+    });
+    expect(res.body.data).toMatchObject({ updated: 1, errors: [] });
+    const boots = await models.PPEItem.findOne({ where: { itemCode: `${fx.tag}-B` } });
+    expect(boots).toMatchObject({ supplier: 'Acme', hasSizeVariants: true, sizeScale: scaleCode, targetGender: 'MALE', replacementFrequency: 12 });
+    const numeric = await write(stores, 'post', '/api/v2/ppe-items/import').send({
+      rows: [{ itemCode: 90001, name: `${fx.tag} Numbered`, category: 'FACE', replacementFrequency: 6, accountCode: 5100 }],
+    });
+    expect(numeric.body.data).toMatchObject({ created: 1, errors: [] });
+  });
+
   it('reports each bad row and saves nothing', async () => {
     const res = await write(stores, 'post', '/api/v2/ppe-items/import').send({
       dryRun: false,
@@ -95,7 +110,16 @@ describe('POST /size-scales/import', () => {
       rows: [{ code: scaleCode, name: `${fx.tag} scale`, sizes: '8, 9, 10' }],
     });
     expect(extend.body.data).toMatchObject({ extended: 1, sizesAdded: 1 });
-    expect((await write(stores, 'post', '/api/v2/size-scales/import').send({ rows: [{ code: 'x y', name: 'Bad', sizes: '' }] })).status).toBe(422);
+    const bad = await write(stores, 'post', '/api/v2/size-scales/import').send({
+      rows: [
+        { code: 'x y', name: 'Bad', sizes: 'A' },
+        { code: `${fx.tag}-OK`, name: 'Fine', sizes: 'S' },
+        { code: `${fx.tag}-DUP`, name: 'Duplicate sizes', sizes: 'm, M' },
+      ],
+    });
+    expect(bad.status).toBe(200);
+    expect(bad.body.data.errors.map((e: { row: number }) => e.row)).toEqual([1, 3]);
+    expect(bad.body.data.errors[1].message).toBe('M is listed twice');
   });
 });
 

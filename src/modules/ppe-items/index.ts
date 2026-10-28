@@ -38,7 +38,7 @@ router.get(
 
 router.get(
   '/summary',
-  route(async (_req, res) => ok(res, await catalogueSummary()))
+  route(async (req, res) => ok(res, await catalogueSummary(getAuth(req))))
 );
 
 router.get(
