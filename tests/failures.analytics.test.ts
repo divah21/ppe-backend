@@ -51,7 +51,7 @@ describe('GET /failures/analytics', () => {
     expect(d.topItems[0]).toMatchObject({ ppeItemId: gloves.id, failures: 2, premature: 1, issued: 2, rate: 100 });
     expect(d.byEnvironment.map((e: { name: string }) => e.name).sort()).toEqual(['Plant', 'Underground']);
     expect(d.trend).toHaveLength(12);
-    expect(d.trend.at(-1).count).toBe(2);
+    expect(d.trend.at(-1)).toEqual({ month: new Date().toISOString().slice(0, 7), count: 2 });
     expect(d.forecast).toHaveLength(6);
     expect((await otherHod.get('/api/v2/failures/analytics')).body.data.totals.total).toBe(1);
     expect((await sheq.get('/api/v2/failures/analytics').query({ months: 2 })).status).toBe(422);

@@ -71,7 +71,7 @@ export const REPORTS = [
     key: 'failures',
     title: 'Failure reports',
     description: 'PPE failures with the employee, item, environment, brand, severity, SHEQ decision and outcome.',
-    filters: ['departmentId', 'sectionId', 'q', 'status', 'from', 'to'],
+    filters: ['departmentId', 'sectionId', 'q', 'status', 'severity', 'from', 'to'],
     roles: ALL_ROLES,
   },
 ] as const;
@@ -757,6 +757,9 @@ export const failuresReport = async (auth: AuthContext, q: FailuresReportQuery):
   const parts = [f.sql];
   if (q.status) parts.push('fr.status::text = :status');
   if (q.severity) parts.push('fr.severity::text = :severity');
+  if (q.failureType) parts.push('fr.failure_type::text = :failureType');
+  if (q.observedAt) parts.push('fr.observed_at ILIKE :observedAt');
+  if (q.brand) parts.push('fr.brand ILIKE :brand');
   if (q.q) parts.push(`(e."firstName" || ' ' || e."lastName" ILIKE :term OR e."worksNumber" ILIKE :term OR p.name ILIKE :term OR fr.description ILIKE :term)`);
   dateRangeSql('fr.reported_date', q, parts);
   const rows = capped(
@@ -773,7 +776,16 @@ export const failuresReport = async (auth: AuthContext, q: FailuresReportQuery):
        WHERE ${parts.join(' AND ')}
        ORDER BY fr.reported_date DESC
        LIMIT :limit`,
-      { ...f.replacements, status: q.status, severity: q.severity, term: q.q ? likeTerm(q.q) : null, limit: MAX_ROWS + 1 }
+      {
+        ...f.replacements,
+        status: q.status,
+        severity: q.severity,
+        failureType: q.failureType,
+        observedAt: q.observedAt ? likeTerm(q.observedAt) : null,
+        brand: q.brand ? likeTerm(q.brand) : null,
+        term: q.q ? likeTerm(q.q) : null,
+        limit: MAX_ROWS + 1,
+      }
     )
   );
   const data = rows.map((r) => ({

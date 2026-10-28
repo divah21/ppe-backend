@@ -34,6 +34,9 @@ export const failuresReportQuery = z
     q: text,
     status: z.enum(['pending-sheq-review', 'sheq-approved', 'stores-processing', 'resolved', 'replaced']).optional(),
     severity: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+    failureType: z.enum(['damage', 'defect', 'lost', 'wear']).optional(),
+    observedAt: text,
+    brand: text,
     ...range,
   })
   .refine(validRange, RANGE_MESSAGE);
