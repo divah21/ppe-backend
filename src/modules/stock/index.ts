@@ -1,10 +1,23 @@
 import { Router } from 'express';
-import { audit } from '../../core/audit';
+import { audit, skipAudit } from '../../core/audit';
 import { ROLES, authenticate, requireRole } from '../../core/auth';
 import { ok, paged, parse, route, uuidParam } from '../../core/http';
 import { defineModule } from '../../core/module';
-import { adjustBody, bulkTopupBody, stockCreateBody, stockListQuery } from './schemas';
-import { adjustStock, bulkTopup, createStock, getStock, listStock, stockLookups, stockSummary } from './service';
+import { importStock } from './import';
+import { adjustBody, bulkTopupBody, shortfallQuery, stockCreateBody, stockImportBody, stockListQuery, stockUpdateBody } from './schemas';
+import {
+  adjustStock,
+  bulkTopup,
+  createStock,
+  deleteStock,
+  getStock,
+  listStock,
+  stockLookups,
+  stockMovements,
+  stockShortfalls,
+  stockSummary,
+  updateStock,
+} from './service';
 
 const router = Router();
 router.use(authenticate);
@@ -25,6 +38,53 @@ router.get(
 router.get('/summary', canRead, route(async (_req, res) => ok(res, await stockSummary())));
 
 router.get('/lookups', canRead, route(async (_req, res) => ok(res, await stockLookups())));
+
+router.get(
+  '/shortfalls',
+  canRead,
+  route(async (req, res) => ok(res, await stockShortfalls(parse(shortfallQuery, req.query).q)))
+);
+
+router.post(
+  '/import',
+  canWrite,
+  route(async (req, res) => {
+    const input = parse(stockImportBody, req.body);
+    const report = await importStock(input);
+    if (input.dryRun || report.errors.length) skipAudit(req);
+    else await audit(req, 'BULK_IMPORT', 'Stock', null, { created: report.created, added: report.added, updated: report.updated, units: report.units });
+    return ok(res, report, input.dryRun || report.errors.length ? 200 : 201);
+  })
+);
+
+router.get(
+  '/:id/movements',
+  canRead,
+  route(async (req, res) => ok(res, await stockMovements(parse(uuidParam, req.params).id)))
+);
+
+router.put(
+  '/:id',
+  canWrite,
+  route(async (req, res) => {
+    const { id } = parse(uuidParam, req.params);
+    const input = parse(stockUpdateBody, req.body);
+    const stock = await updateStock(id, input);
+    await audit(req, 'STOCK_UPDATE', 'Stock', id, input);
+    return ok(res, stock);
+  })
+);
+
+router.delete(
+  '/:id',
+  canWrite,
+  route(async (req, res) => {
+    const { id } = parse(uuidParam, req.params);
+    const removed = await deleteStock(id);
+    await audit(req, 'STOCK_DELETE', 'Stock', id, removed);
+    return res.status(204).end();
+  })
+);
 
 router.get(
   '/:id',
@@ -58,7 +118,7 @@ router.post(
         quantity: r.addedQuantity,
         previousQuantity: r.previousQuantity,
         newQuantity: r.newQuantity,
-        reason: input.reason,
+        reason: r.reason || input.reason,
         bulk: true,
       });
     }
@@ -75,6 +135,7 @@ router.post(
     const result = await adjustStock(id, input);
     await audit(req, 'STOCK_ADJUST', 'Stock', id, {
       delta: input.delta,
+      reasonCode: input.reasonCode,
       reason: input.reason,
       previousQuantity: result.previousQuantity,
       newQuantity: result.quantity,

@@ -2,7 +2,7 @@ import { Op, QueryTypes, literal, type Order, type Transaction, type WhereOption
 import { inTransaction, models, sequelize, type Row } from '../../core/db';
 import { AppError, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
-import type { AdjustInput, BulkTopupInput, StockCreateInput, StockListQuery } from './schemas';
+import type { AdjustInput, BulkTopupInput, StockCreateInput, StockListQuery, StockUpdateInput } from './schemas';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const { deductStock, restoreStock } = require('../../../helpers/stock_helper') as {
@@ -367,12 +367,116 @@ export const bulkTopup = async ({ items }: BulkTopupInput) =>
 
     const now = new Date();
     const results = [];
-    for (const { stockId, quantity } of items) {
+    for (const { stockId, quantity, reason } of items) {
       const row = found.get(stockId)!;
       const next = await restoreStock(stockId, quantity, { transaction: t });
       if (next === null) throw notFound('Stock line');
       await models.Stock.update({ lastRestocked: now }, { where: { id: stockId }, transaction: t });
-      results.push({ stockId, previousQuantity: Number(row.quantity), addedQuantity: quantity, newQuantity: next });
+      results.push({ stockId, previousQuantity: Number(row.quantity), addedQuantity: quantity, newQuantity: next, reason });
     }
     return results;
   });
+
+/** Changes a line's details; its quantity only moves through receipts, adjustments and issues. */
+export const updateStock = async (id: string, input: StockUpdateInput) => {
+  const row = await models.Stock.findByPk(id);
+  if (!row) throw notFound('Stock line');
+  await row.update(input);
+  return getStock(id);
+};
+
+/** Removes a line that was never issued from; one with history is kept and adjusted to zero instead. */
+export const deleteStock = async (id: string) => {
+  const row = await models.Stock.findByPk(id, { attributes: ['id', 'quantity'] });
+  if (!row) throw notFound('Stock line');
+  const issued = await models.Allocation.count({ where: { stockId: id } });
+  if (issued > 0) {
+    throw new AppError('CONFLICT', `PPE has been issued from this line ${issued} time${issued === 1 ? '' : 's'}, so it is kept for history. Adjust it to zero instead.`);
+  }
+  await row.destroy();
+  return { quantity: Number(row.quantity) };
+};
+
+/** Receipts, adjustments and issues on one line, newest first, from the audit log and allocations. */
+export const stockMovements = async (id: string) => {
+  if (!(await models.Stock.count({ where: { id } }))) throw notFound('Stock line');
+  const rows = await sequelize.query<{ kind: string; at: Date; who: string | null; change: string | null; balance: string | null; note: string | null; ref: string | null }>(
+    `SELECT l.action AS kind, l.created_at AS at, u.username AS who,
+            COALESCE(l.meta->>'delta', l.meta->>'quantity', l.changes->>'delta', l.changes->>'quantity') AS change,
+            COALESCE(l.meta->>'newQuantity', l.changes->>'newQuantity') AS balance,
+            COALESCE(l.meta->>'reason', l.changes->>'reason') AS note, NULL AS ref
+     FROM audit_logs l LEFT JOIN users u ON u.id = l.user_id
+     WHERE l.entity_type = 'Stock' AND l.entity_id = :id AND l.action LIKE 'STOCK%'
+     UNION ALL
+     SELECT 'ISSUE', a.created_at, u.username, (-a.quantity)::text, NULL,
+            concat(e."firstName", ' ', e."lastName", ' (', e."worksNumber", ')'), a.id::text
+     FROM allocations a
+     LEFT JOIN employees e ON e.id = a.employee_id
+     LEFT JOIN users u ON u.id = a.issued_by_id
+     WHERE a.stock_id = :id
+     ORDER BY at DESC
+     LIMIT 100`,
+    { replacements: { id }, type: QueryTypes.SELECT }
+  );
+  return rows.map((r) => ({
+    kind: r.kind,
+    at: new Date(r.at).toISOString(),
+    by: r.who,
+    change: r.change === null ? null : Number(r.change),
+    balance: r.balance === null ? null : Number(r.balance),
+    note: r.note,
+  }));
+};
+
+const SHORT_STATUSES = ['stores-review', 'approved', 'partially-fulfilled'];
+
+/**
+ * What approved requests still need against stock on hand, per item and size: the v1 "out of stock"
+ * reorder list. Pending approvals are counted separately as coming demand.
+ */
+export const stockShortfalls = async (q?: string) => {
+  const rows = await sequelize.query<{
+    ppe_item_id: string;
+    name: string;
+    item_code: string | null;
+    category: string | null;
+    size: string | null;
+    needed: string;
+    requests: string;
+    in_stock: string;
+  }>(
+    `WITH need AS (
+       SELECT ri.ppe_item_id, NULLIF(TRIM(ri.size), '') AS size,
+              SUM(GREATEST(ri.quantity - COALESCE(ri.approved_quantity, 0), 0)) AS needed,
+              COUNT(DISTINCT r.id) AS requests
+       FROM request_items ri JOIN requests r ON r.id = ri.request_id
+       WHERE r.status::text IN (:statuses)
+       GROUP BY 1, 2
+     )
+     SELECT n.ppe_item_id, p.name, p.item_code, p.category, n.size, n.needed, n.requests,
+            COALESCE((SELECT SUM(s.quantity) FROM stocks s WHERE s.ppe_item_id = n.ppe_item_id
+                      AND (n.size IS NULL OR LOWER(COALESCE(s.size, '')) = LOWER(n.size))), 0) AS in_stock
+     FROM need n JOIN ppe_items p ON p.id = n.ppe_item_id
+     WHERE n.needed > 0 ${q ? 'AND (p.name ILIKE :q OR p.item_code ILIKE :q)' : ''}
+     ORDER BY n.needed - COALESCE((SELECT SUM(s.quantity) FROM stocks s WHERE s.ppe_item_id = n.ppe_item_id
+                      AND (n.size IS NULL OR LOWER(COALESCE(s.size, '')) = LOWER(n.size))), 0) DESC, p.name`,
+    { replacements: { statuses: SHORT_STATUSES, q: q ? likeTerm(q) : undefined }, type: QueryTypes.SELECT }
+  );
+  return rows
+    .map((r) => {
+      const needed = Number(r.needed);
+      const inStock = Number(r.in_stock);
+      return {
+        ppeItemId: r.ppe_item_id,
+        name: r.name,
+        itemCode: r.item_code,
+        category: r.category,
+        size: r.size,
+        needed,
+        inStock,
+        shortBy: Math.max(0, needed - inStock),
+        requests: Number(r.requests),
+      };
+    })
+    .filter((r) => r.shortBy > 0);
+};
