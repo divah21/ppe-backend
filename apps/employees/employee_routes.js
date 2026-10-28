@@ -24,9 +24,6 @@ router.get('/', authenticate, async (req, res, next) => {
     // ROLE-BASED FILTERING: Section Rep can only see employees in their section
     if (req.userRole === 'section-rep' && req.user.sectionId) {
       where.sectionId = req.user.sectionId;
-    } else if (req.userRole === 'dept-rep' && req.user.departmentId) {
-      // Department Rep can see all employees in their department
-      // Will be filtered via include below
     }
     
     if (search) {
@@ -61,7 +58,7 @@ router.get('/', authenticate, async (req, res, next) => {
     // Filter by department through section
     if (departmentId) {
       include[0].where = { departmentId };
-    } else if (req.userRole === 'dept-rep' && req.user.departmentId) {
+    } else if (req.userRole === 'department-rep' && req.user.departmentId) {
       // Department Rep sees only their department
       include[0].where = { departmentId: req.user.departmentId };
     }
