@@ -38,11 +38,12 @@ export const pricedItem = async (fx: Fx, opts: { price: number; quantity: number
 
 export const allocate = (
   fx: Fx,
-  values: { employeeId: string; ppeItemId: string; quantity: number; issueDate: Date; totalCost?: number | null; expiryDate?: Date; status?: string }
+  values: { employeeId: string; ppeItemId: string; quantity: number; issueDate: Date; totalCost?: number | null; nextRenewalDate?: Date; status?: string }
 ) =>
   fx.make('Allocation', {
     status: 'active',
     allocationType: 'replacement',
     totalCost: null,
+    replacementFrequency: null,
     ...values,
   });

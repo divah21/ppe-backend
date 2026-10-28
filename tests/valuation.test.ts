@@ -23,6 +23,10 @@ beforeAll(async () => {
   other = await fx.org();
   const eMine = await fx.employee(mine.section.id);
   const eOther = await fx.employee(other.section.id);
+  // Forecast rows get their own employees: a later issue of the same item would supersede them
+  const dueMine = await fx.employee(mine.section.id);
+  const dueMine2 = await fx.employee(mine.section.id);
+  const dueOther = await fx.employee(other.section.id);
   // Stock: 100 x 10 = 1000 and 4 x 2.5 = 10 (below its minimum of 5)
   gloves = await pricedItem(fx, { price: 10, quantity: 100 });
   boots = await pricedItem(fx, { price: 2.5, quantity: 4, minLevel: 5 });
@@ -31,10 +35,10 @@ beforeAll(async () => {
   await allocate(fx, { employeeId: eMine.id, ppeItemId: boots.item.id, quantity: 2, issueDate: new Date('2031-03-10T10:00:00Z'), status: 'expired' });
   await allocate(fx, { employeeId: eOther.id, ppeItemId: gloves.item.id, quantity: 1, totalCost: 7, issueDate: new Date('2031-03-20T10:00:00Z'), status: 'expired' });
 
-  // Forecast: 5 boots due in 10 days and 2 in 100 days for mine; 1 pair of gloves due in 20 days elsewhere
-  await allocate(fx, { employeeId: eMine.id, ppeItemId: boots.item.id, quantity: 5, totalCost: 12.5, issueDate: daysFromNow(-300), expiryDate: daysFromNow(10) });
-  await allocate(fx, { employeeId: eMine.id, ppeItemId: boots.item.id, quantity: 2, totalCost: 5, issueDate: daysFromNow(-200), expiryDate: daysFromNow(100) });
-  await allocate(fx, { employeeId: eOther.id, ppeItemId: gloves.item.id, quantity: 1, totalCost: 10, issueDate: daysFromNow(-300), expiryDate: daysFromNow(20) });
+  // Forecast (renewal dates): 5 boots due in 10 days and 2 in 100 days for mine; 1 pair of gloves due in 20 days elsewhere
+  await allocate(fx, { employeeId: dueMine.id, ppeItemId: boots.item.id, quantity: 5, totalCost: 12.5, issueDate: daysFromNow(-300), nextRenewalDate: daysFromNow(10) });
+  await allocate(fx, { employeeId: dueMine2.id, ppeItemId: boots.item.id, quantity: 2, totalCost: 5, issueDate: daysFromNow(-200), nextRenewalDate: daysFromNow(100) });
+  await allocate(fx, { employeeId: dueOther.id, ppeItemId: gloves.item.id, quantity: 1, totalCost: 10, issueDate: daysFromNow(-300), nextRenewalDate: daysFromNow(20) });
 
   const agents = await Promise.all([
     fx.user('admin').then((u) => signIn(u.username)),

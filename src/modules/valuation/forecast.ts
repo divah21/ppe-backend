@@ -2,27 +2,35 @@ import { QueryTypes } from 'sequelize';
 import type { AuthContext } from '../../core/auth';
 import { sequelize } from '../../core/db';
 import { likeTerm, pageWindow } from '../../core/http';
+import { awaitingRenewal, dueSql } from '../allocations/rules';
 import { effectiveDepartment } from '../budgets/policy';
 import { money, round2 } from '../budgets/spend';
 import type { DemandQuery, ForecastQuery, ForecastSummaryQuery } from './schemas';
 
 /*
- * Forecast (v1 /valuation/forecast-90-days): active allocations that expire within the next
- * `days` will need replacing. Demand is counted per PPE item, bucketed by when it falls due,
- * and compared with the stock on hand across all variants.
+ * Forecast (v1 /valuation/forecast-90-days): PPE that falls due for renewal within the next `days`
+ * will need replacing, by the same rule as the renewals screen. Demand is counted per PPE item,
+ * bucketed by when it falls due, compared with the stock on hand across all variants, and charged
+ * to the department the employee is in now.
  */
-const dueSql = (auth: AuthContext, f: ForecastSummaryQuery) => {
+const forecastSql = (auth: AuthContext, f: ForecastSummaryQuery) => {
   const dept = effectiveDepartment(auth, f.departmentId);
   const sql = `WITH stock AS (
       SELECT ppe_item_id, SUM(quantity) AS qty, AVG(unit_price_u_s_d) AS price FROM stocks GROUP BY ppe_item_id
     ),
-    due AS (
-      SELECT a.ppe_item_id, a.quantity, a.expiry_date - now() AS left_
+    renewing AS (
+      SELECT a.ppe_item_id, a.quantity, ${dueSql('a', 'p')} AS due_on
       FROM allocations a
+      JOIN ppe_items p ON p.id = a.ppe_item_id
       JOIN employees e ON e.id = a.employee_id
       LEFT JOIN sections s ON s.id = e."sectionId"
-      WHERE a.status = 'active' AND a.expiry_date >= now() AND a.expiry_date <= now() + make_interval(days => :days)
+      WHERE ${awaitingRenewal('a', 'e')}
       ${dept ? 'AND s.department_id = :dept' : ''}
+    ),
+    due AS (
+      SELECT ppe_item_id, quantity, due_on - now() AS left_
+      FROM renewing
+      WHERE due_on >= now() AND due_on <= now() + make_interval(days => :days)
     ),
     per_item AS (
       SELECT i.id, i.name, i.item_code, i.category,
@@ -62,7 +70,7 @@ interface ForecastRow {
 }
 
 export const listForecast = async (auth: AuthContext, q: ForecastQuery) => {
-  const { sql, replacements } = dueSql(auth, q);
+  const { sql, replacements } = forecastSql(auth, q);
   const dir = q.order === 'asc' ? 'ASC' : 'DESC';
   const order = q.sort ? `${SORT[q.sort]} ${dir}` : 'shortage DESC, required DESC';
   const search = q.q ? 'WHERE name ILIKE :q OR item_code ILIKE :q' : '';
@@ -103,7 +111,7 @@ export const listForecast = async (auth: AuthContext, q: ForecastQuery) => {
 };
 
 export const forecastSummary = async (auth: AuthContext, f: ForecastSummaryQuery) => {
-  const { sql, replacements } = dueSql(auth, f);
+  const { sql, replacements } = forecastSql(auth, f);
   const [r] = await sequelize.query<Record<string, string | null>>(
     `${sql} SELECT COUNT(*) AS items, COALESCE(SUM(required), 0) AS required, COALESCE(SUM(shortage), 0) AS shortage,
        COUNT(*) FILTER (WHERE shortage > 0) AS short_items, COALESCE(SUM(shortage * COALESCE(price, 0)), 0) AS shortage_value,
