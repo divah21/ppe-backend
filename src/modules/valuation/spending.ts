@@ -48,9 +48,13 @@ const GROUPS = {
   department: { key: 'department_id', label: `COALESCE(MAX(department_name), 'No department')`, sub: 'NULL' },
   section: { key: 'section_id', label: `COALESCE(MAX(section_name), 'No section')`, sub: 'MAX(department_name)' },
   item: { key: 'ppe_item_id', label: `COALESCE(MAX(item_name), 'Unknown item')`, sub: 'MAX(item_code)' },
-  employee: { key: 'employee_id', label: `COALESCE(MAX(employee_name), 'Visitor issues')`, sub: 'MAX(works_number)' },
-  month: { key: `to_char(issue_date, 'YYYY-MM')`, label: `to_char(MIN(issue_date), 'Mon YYYY')`, sub: 'NULL' },
-  year: { key: `to_char(issue_date, 'YYYY')`, label: `to_char(MIN(issue_date), 'YYYY')`, sub: 'NULL' },
+  employee: {
+    key: 'employee_id',
+    label: `COALESCE(MAX(employee_name), CASE WHEN employee_id IS NULL THEN 'Visitor issues' ELSE 'Removed employee' END)`,
+    sub: 'MAX(works_number)',
+  },
+  month: { key: `to_char(issue_date, 'YYYY-MM')`, label: `COALESCE(to_char(MIN(issue_date), 'Mon YYYY'), 'No date')`, sub: 'NULL' },
+  year: { key: `to_char(issue_date, 'YYYY')`, label: `COALESCE(to_char(issue_date, 'YYYY'), 'No date')`, sub: 'NULL' },
 } as const;
 
 const SORT = { spent: 'spent', label: 'label', allocationCount: 'allocations' } as const;

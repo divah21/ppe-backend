@@ -86,7 +86,7 @@ const employeeCosts = async (dept: string | null): Promise<EmployeeCost[]> => {
       if (applied.has(r.ppeItemId)) continue;
       applied.add(r.ppeItemId);
       const unitPrice = price.get(r.ppeItemId) ?? 0;
-      items.push({ ppeItemId: r.ppeItemId, quantity: r.quantity, unitPrice: round2(unitPrice), cost: round2(unitPrice * r.quantity) });
+      items.push({ ppeItemId: r.ppeItemId, quantity: r.quantity, unitPrice, cost: unitPrice * r.quantity });
     }
     return {
       id: e.id,
@@ -96,7 +96,7 @@ const employeeCosts = async (dept: string | null): Promise<EmployeeCost[]> => {
       sectionName: e.section_name,
       departmentId: e.department_id,
       jobTitle: e.job_title_name ?? e.job_title,
-      cost: round2(items.reduce((sum, i) => sum + i.cost, 0)),
+      cost: items.reduce((sum, i) => sum + i.cost, 0),
       matched: items.some((i) => i.cost > 0),
       items,
     };
@@ -170,25 +170,24 @@ export const suggestedForDepartment = async (auth: AuthContext, departmentId: st
   if (scoped && scoped !== departmentId) throw notFound('Department');
   const department = await models.Department.findByPk(departmentId, { attributes: ['id', 'name'] });
   if (!department) throw notFound('Department');
-  const costs = await employeeCosts(departmentId);
-  const names = new Map(
-    (await models.PPEItem.findAll({ where: { id: [...new Set(costs.flatMap((c) => c.items.map((i) => i.ppeItemId)))] }, attributes: ['id', 'name', 'itemCode'] })).map(
-      (p) => [p.id as string, { name: p.name as string, itemCode: (p.itemCode as string | null) ?? null }]
-    )
-  );
+  const [costs, catalogue] = await Promise.all([
+    employeeCosts(departmentId),
+    models.PPEItem.findAll({ attributes: ['id', 'name', 'itemCode'] }),
+  ]);
+  const names = new Map(catalogue.map((p) => [p.id as string, { name: p.name as string, itemCode: (p.itemCode as string | null) ?? null }]));
 
   const sections = new Map<string, { id: string; name: string; total: number; employees: Array<Omit<EmployeeCost, 'items' | 'departmentId' | 'sectionId' | 'sectionName' | 'matched'> & { items: number }> }>();
   const items = new Map<string, { ppeItemId: string; name: string; itemCode: string | null; quantity: number; cost: number }>();
   for (const c of costs) {
     const s = sections.get(c.sectionId) ?? { id: c.sectionId, name: c.sectionName, total: 0, employees: [] };
-    s.total = round2(s.total + c.cost);
-    s.employees.push({ id: c.id, name: c.name, worksNumber: c.worksNumber, jobTitle: c.jobTitle, cost: c.cost, items: c.items.length });
+    s.total += c.cost;
+    s.employees.push({ id: c.id, name: c.name, worksNumber: c.worksNumber, jobTitle: c.jobTitle, cost: round2(c.cost), items: c.items.length });
     sections.set(c.sectionId, s);
     for (const i of c.items) {
       const ref = names.get(i.ppeItemId);
       const row = items.get(i.ppeItemId) ?? { ppeItemId: i.ppeItemId, name: ref?.name ?? 'Unknown item', itemCode: ref?.itemCode ?? null, quantity: 0, cost: 0 };
       row.quantity += i.quantity;
-      row.cost = round2(row.cost + i.cost);
+      row.cost += i.cost;
       items.set(i.ppeItemId, row);
     }
   }
@@ -198,8 +197,8 @@ export const suggestedForDepartment = async (auth: AuthContext, departmentId: st
     total,
     employeeCount: costs.length,
     sections: [...sections.values()]
-      .map((s) => ({ ...s, employees: s.employees.sort((a, b) => b.cost - a.cost || a.name.localeCompare(b.name)) }))
+      .map((s) => ({ ...s, total: round2(s.total), employees: s.employees.sort((a, b) => b.cost - a.cost || a.name.localeCompare(b.name)) }))
       .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name)),
-    items: [...items.values()].sort((a, b) => b.cost - a.cost || a.name.localeCompare(b.name)),
+    items: [...items.values()].map((i) => ({ ...i, cost: round2(i.cost) })).sort((a, b) => b.cost - a.cost || a.name.localeCompare(b.name)),
   };
 };
