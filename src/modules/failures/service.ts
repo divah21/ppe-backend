@@ -76,6 +76,8 @@ export const listFailures = async (auth: AuthContext, q: FailureListQuery) => {
   if (q.ppeItemId) where.push({ ppeItemId: q.ppeItemId });
   if (q.from) where.push({ reportedDate: { [Op.gte]: new Date(`${q.from}T00:00:00`) } });
   if (q.to) where.push({ reportedDate: { [Op.lte]: new Date(`${q.to}T23:59:59.999`) } });
+  if (q.observedAt) where.push({ observedAt: { [Op.iLike]: likeTerm(q.observedAt) } });
+  if (q.brand) where.push({ brand: { [Op.iLike]: likeTerm(q.brand) } });
   if (q.q) {
     const term = likeTerm(q.q);
     where.push({

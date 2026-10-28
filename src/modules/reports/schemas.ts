@@ -27,6 +27,18 @@ export const REQUEST_STATUSES = [
 ] as const;
 export const REQUEST_TYPES = ['new', 'replacement', 'emergency', 'annual'] as const;
 
+export const failuresReportQuery = z
+  .object({
+    departmentId: id,
+    sectionId: id,
+    q: text,
+    status: z.enum(['pending-sheq-review', 'sheq-approved', 'stores-processing', 'resolved', 'replaced']).optional(),
+    severity: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+    ...range,
+  })
+  .refine(validRange, RANGE_MESSAGE);
+export type FailuresReportQuery = z.infer<typeof failuresReportQuery>;
+
 export const employeesReportQuery = z.object({
   departmentId: id,
   sectionId: id,

@@ -7,6 +7,7 @@ import { defineModule } from '../../core/module';
 import {
   allocationsReportQuery,
   employeesReportQuery,
+  failuresReportQuery,
   matrixReportQuery,
   ppeCardsReportQuery,
   requestsReportQuery,
@@ -15,6 +16,7 @@ import {
 import {
   allocationsReport,
   employeesReport,
+  failuresReport,
   generatedBy,
   listReports,
   matrixReport,
@@ -64,6 +66,7 @@ const exportRoute = <S extends ZodTypeAny>(
   );
 
 exportRoute('employees', employeesReportQuery, employeesReport);
+exportRoute('failures', failuresReportQuery, failuresReport);
 exportRoute('allocations', allocationsReportQuery, allocationsReport);
 exportRoute('requests', requestsReportQuery, requestsReport);
 exportRoute('stock', stockReportQuery, stockReport);

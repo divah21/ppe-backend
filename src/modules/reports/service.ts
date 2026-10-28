@@ -7,6 +7,7 @@ import { COST_SQL, RENEWAL_SQL, REQUEST_DEPARTMENT, REQUEST_SECTION, filterSql, 
 import type {
   AllocationsReportQuery,
   EmployeesReportQuery,
+  FailuresReportQuery,
   MatrixReportQuery,
   PpeCardsReportQuery,
   RequestsReportQuery,
@@ -64,6 +65,13 @@ export const REPORTS = [
     title: 'Employees',
     description: 'Employees with their section, job title, contact details and the PPE they hold.',
     filters: ['departmentId', 'sectionId', 'q', 'status'],
+    roles: ALL_ROLES,
+  },
+  {
+    key: 'failures',
+    title: 'Failure reports',
+    description: 'PPE failures with the employee, item, environment, brand, severity, SHEQ decision and outcome.',
+    filters: ['departmentId', 'sectionId', 'q', 'status', 'from', 'to'],
     roles: ALL_ROLES,
   },
 ] as const;
@@ -717,6 +725,86 @@ export const employeesReport = async (auth: AuthContext, q: EmployeesReportQuery
       columns: EMPLOYEE_COLUMNS,
       rows: data,
       totalLabel: `Employees: ${data.length}   |   Active: ${data.filter((r) => r.status === 'Active').length}`,
+    },
+  ];
+};
+
+// ---------------------------------------------------------------------------------------------
+
+const FAILURE_COLUMNS: Column[] = [
+  { header: 'Reported', key: 'reported', width: 12, numFmt: DATE_FMT },
+  { header: 'Failure date', key: 'failed', width: 12, numFmt: DATE_FMT },
+  { header: 'Works no.', key: 'worksNumber', width: 12 },
+  { header: 'Employee', key: 'employee', width: 24 },
+  { header: 'Section', key: 'section', width: 20 },
+  { header: 'Job title', key: 'jobTitle', width: 20 },
+  { header: 'PPE item', key: 'item', width: 26 },
+  { header: 'Date issued', key: 'issued', width: 12, numFmt: DATE_FMT },
+  { header: 'Type', key: 'type', width: 10 },
+  { header: 'Severity', key: 'severity', width: 10, align: 'center' },
+  { header: 'Environment', key: 'environment', width: 18 },
+  { header: 'Brand', key: 'brand', width: 14 },
+  { header: 'Description', key: 'description', width: 40 },
+  { header: 'SHEQ decision', key: 'decision', width: 30 },
+  { header: 'Status', key: 'status', width: 16 },
+  { header: 'Remarks', key: 'remarks', width: 30 },
+];
+
+/** Failure reports with everything v1's CSV carried, scoped as the failures page is. */
+export const failuresReport = async (auth: AuthContext, q: FailuresReportQuery): Promise<Sheet[]> => {
+  const scope = scopeOf(auth);
+  const f = filterSql(scope, q, 'sec.id', 'sec.department_id');
+  const parts = [f.sql];
+  if (q.status) parts.push('fr.status::text = :status');
+  if (q.severity) parts.push('fr.severity::text = :severity');
+  if (q.q) parts.push(`(e."firstName" || ' ' || e."lastName" ILIKE :term OR e."worksNumber" ILIKE :term OR p.name ILIKE :term OR fr.description ILIKE :term)`);
+  dateRangeSql('fr.reported_date', q, parts);
+  const rows = capped(
+    await select<Record<string, any>>(
+      `SELECT fr.reported_date, fr.failure_date, e."worksNumber" AS works_number, e."firstName" AS first_name, e."lastName" AS last_name,
+              sec.name AS section, COALESCE(jt.name, e."jobTitle") AS job_title, p.name AS item, a.issue_date,
+              fr.failure_type, fr.severity, fr.observed_at, fr.brand, fr.description, fr.sheq_decision, fr.status, fr.remarks
+       FROM failure_reports fr
+       JOIN employees e ON e.id = fr.employee_id
+       LEFT JOIN sections sec ON sec.id = e."sectionId"
+       LEFT JOIN job_titles jt ON jt.id = e."jobTitleId"
+       LEFT JOIN ppe_items p ON p.id = fr.ppe_item_id
+       LEFT JOIN allocations a ON a.id = fr.allocation_id
+       WHERE ${parts.join(' AND ')}
+       ORDER BY fr.reported_date DESC
+       LIMIT :limit`,
+      { ...f.replacements, status: q.status, severity: q.severity, term: q.q ? likeTerm(q.q) : null, limit: MAX_ROWS + 1 }
+    )
+  );
+  const data = rows.map((r) => ({
+    reported: date(r.reported_date),
+    failed: date(r.failure_date),
+    worksNumber: r.works_number,
+    employee: fullName(r.first_name, r.last_name),
+    section: r.section ?? '',
+    jobTitle: r.job_title ?? '',
+    item: r.item ?? '',
+    issued: date(r.issue_date),
+    type: r.failure_type ?? '',
+    severity: r.severity ?? '',
+    environment: r.observed_at ?? '',
+    brand: r.brand ?? '',
+    description: r.description ?? '',
+    decision: r.sheq_decision ?? '',
+    status: r.status ?? '',
+    remarks: r.remarks ?? '',
+  }));
+  return [
+    {
+      name: 'Failures',
+      title: 'PPE Failure Reports',
+      infoLines: await describe(auth, scope, {
+        ...q,
+        extra: [q.status && `Status: ${q.status}`, q.severity && `Severity: ${q.severity}`].filter(Boolean) as string[],
+      }),
+      columns: FAILURE_COLUMNS,
+      rows: data,
+      totalLabel: `Failure reports: ${data.length}`,
     },
   ];
 };
