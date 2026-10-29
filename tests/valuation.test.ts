@@ -133,7 +133,7 @@ describe('actual spending', () => {
     const bad = await admin.get(`${BASE}/spending`).query({ from: to, to: from });
     expect(bad.status).toBe(422);
     expect(bad.body.error.details.fieldErrors.to).toBeDefined();
-    expect((await admin.get(`${BASE}/spending`).query({ groupBy: 'employee' })).status).toBe(422);
+    expect((await admin.get(`${BASE}/spending`).query({ groupBy: 'colour' })).status).toBe(422);
   });
 });
 

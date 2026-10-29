@@ -31,11 +31,13 @@ const base = (auth: AuthContext, f: SpendingTotalsQuery) => {
     SELECT a.id, a.quantity, a.employee_id, a.ppe_item_id, a.issue_date,
            s.id AS section_id, s.name AS section_name, d.id AS department_id, d.name AS department_name,
            i.name AS item_name, i.item_code, i.category,
+           NULLIF(TRIM(concat(em."firstName", ' ', em."lastName")), '') AS employee_name, em."worksNumber" AS works_number,
            ${allocationCost()} AS cost, ${allocationCostIsEstimated()} AS estimated
     FROM allocations a
     LEFT JOIN sections s ON s.id = a.section_id
     LEFT JOIN departments d ON d.id = a.department_id
     LEFT JOIN ppe_items i ON i.id = a.ppe_item_id
+    LEFT JOIN employees em ON em.id = a.employee_id
     LEFT JOIN price p ON p.ppe_item_id = a.ppe_item_id
     ${parts.length ? `WHERE ${parts.join(' AND ')}` : ''}
   )`;
@@ -46,7 +48,13 @@ const GROUPS = {
   department: { key: 'department_id', label: `COALESCE(MAX(department_name), 'No department')`, sub: 'NULL' },
   section: { key: 'section_id', label: `COALESCE(MAX(section_name), 'No section')`, sub: 'MAX(department_name)' },
   item: { key: 'ppe_item_id', label: `COALESCE(MAX(item_name), 'Unknown item')`, sub: 'MAX(item_code)' },
-  month: { key: `to_char(issue_date, 'YYYY-MM')`, label: `to_char(MIN(issue_date), 'Mon YYYY')`, sub: 'NULL' },
+  employee: {
+    key: 'employee_id',
+    label: `COALESCE(MAX(employee_name), CASE WHEN employee_id IS NULL THEN 'Visitor issues' ELSE 'Removed employee' END)`,
+    sub: 'MAX(works_number)',
+  },
+  month: { key: `to_char(issue_date, 'YYYY-MM')`, label: `COALESCE(to_char(MIN(issue_date), 'Mon YYYY'), 'No date')`, sub: 'NULL' },
+  year: { key: `to_char(issue_date, 'YYYY')`, label: `COALESCE(to_char(issue_date, 'YYYY'), 'No date')`, sub: 'NULL' },
 } as const;
 
 const SORT = { spent: 'spent', label: 'label', allocationCount: 'allocations' } as const;
@@ -56,7 +64,7 @@ export const listSpending = async (auth: AuthContext, q: SpendingQuery) => {
   const { sql, replacements } = base(auth, q);
   const g = GROUPS[q.groupBy];
   const dir = q.order === 'asc' ? 'ASC' : 'DESC';
-  const order = q.sort ? `${SORT[q.sort]} ${dir}` : q.groupBy === 'month' ? 'key ASC' : 'spent DESC';
+  const order = q.sort ? `${SORT[q.sort]} ${dir}` : q.groupBy === 'month' || q.groupBy === 'year' ? 'key ASC' : 'spent DESC';
   const rows = await sequelize.query<{
     key: string | null;
     label: string;

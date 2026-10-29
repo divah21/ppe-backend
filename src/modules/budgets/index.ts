@@ -24,7 +24,7 @@ import {
   updateBudget,
   updateCompanyBudget,
 } from './service';
-import { suggestedBudgets } from './suggested';
+import { suggestedBudgets, suggestedForDepartment } from './suggested';
 
 const { ADMIN, SHEQ, STORES, HOD, DEPARTMENT_REP } = ROLES;
 
@@ -45,6 +45,12 @@ router.get(
   '/suggested',
   readers,
   route(async (req, res) => ok(res, await suggestedBudgets(getAuth(req), parse(yearQuery, req.query).fiscalYear)))
+);
+
+router.get(
+  '/suggested/departments/:id',
+  readers,
+  route(async (req, res) => ok(res, await suggestedForDepartment(getAuth(req), parse(uuidParam, req.params).id)))
 );
 
 router.get(
