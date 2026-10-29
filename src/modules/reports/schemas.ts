@@ -111,3 +111,13 @@ export type RequestsReportQuery = z.infer<typeof requestsReportQuery>;
 export type StockReportQuery = z.infer<typeof stockReportQuery>;
 export type MatrixReportQuery = z.infer<typeof matrixReportQuery>;
 export type PpeCardsReportQuery = z.infer<typeof ppeCardsReportQuery>;
+
+export const insightsQuery = z.object({
+  months: z.coerce
+    .number()
+    .int()
+    .refine((n) => [6, 12, 24].includes(n), 'Choose 6, 12 or 24 months')
+    .default(12),
+  departmentId: id,
+});
+export type InsightsQuery = z.infer<typeof insightsQuery>;
