@@ -101,3 +101,10 @@ export type BudgetInput = z.infer<typeof budgetBody>;
 export type BudgetUpdate = z.infer<typeof budgetUpdateBody>;
 export type BudgetListQuery = z.infer<typeof budgetListQuery>;
 export type CompanyListQuery = z.infer<typeof companyListQuery>;
+
+export const STANDINGS = ['no-budget', 'on-track', 'nearly-spent', 'over'] as const;
+export const departmentBudgetQuery = listQuery(['department', 'allocated', 'spent', 'remaining', 'utilisation'], {
+  fiscalYear: year.default(() => new Date().getFullYear()),
+  standing: z.enum(STANDINGS).optional(),
+});
+export type DepartmentBudgetQuery = z.infer<typeof departmentBudgetQuery>;

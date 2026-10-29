@@ -9,6 +9,7 @@ import {
   companyBody,
   companyListQuery,
   companyUpdateBody,
+  departmentBudgetQuery,
   yearQuery,
 } from './schemas';
 import {
@@ -24,6 +25,7 @@ import {
   updateBudget,
   updateCompanyBudget,
 } from './service';
+import { departmentBudgets } from './departments';
 import { suggestedBudgets, suggestedForDepartment } from './suggested';
 
 const { ADMIN, SHEQ, STORES, HOD, DEPARTMENT_REP } = ROLES;
@@ -39,6 +41,16 @@ router.get(
   '/summary',
   readers,
   route(async (req, res) => ok(res, await budgetSummary(getAuth(req), parse(yearQuery, req.query).fiscalYear)))
+);
+
+router.get(
+  '/departments',
+  readers,
+  route(async (req, res) => {
+    const q = parse(departmentBudgetQuery, req.query);
+    const { rows, total } = await departmentBudgets(getAuth(req), q);
+    return paged(res, rows, total, q);
+  })
 );
 
 router.get(
