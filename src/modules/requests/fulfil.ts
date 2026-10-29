@@ -69,6 +69,10 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
       lock: t.LOCK.UPDATE,
       transaction: t,
     });
+    // Items a substitute stock line may hold: those already on the request, plus any other item
+    const known = new Map(items.filter((i) => i.ppeItem).map((i) => [i.ppeItemId as string, i.ppeItem]));
+    const otherIds = [...new Set(stocks.map((s) => s.ppeItemId as string))].filter((pid) => !known.has(pid));
+    for (const p of otherIds.length ? await models.PPEItem.findAll({ where: { id: otherIds }, transaction: t }) : []) known.set(p.id, p);
     const stockById = new Map(stocks.map((s) => [s.id as string, s]));
 
     const outstanding = new Map(items.map((i) => [i.id as string, Number(i.quantity) - Number(i.approvedQuantity ?? 0)]));
@@ -86,9 +90,13 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
         throw conflict('Items on this request were issued while you were working. Check the request and try again.');
       }
       const stock = stockById.get(line.stockId);
-      if (!stock || stock.ppeItemId !== item.ppeItemId) {
+      const swapped = !!stock && stock.ppeItemId !== item.ppeItemId;
+      if (!stock || (swapped && !line.substitute)) {
         throw invalid(`Choose a stock line of ${item.ppeItem?.name ?? 'the requested item'}`);
       }
+      // What is actually handed over: the requested item, or the substitute stores chose
+      const issuedItem = swapped ? known.get(stock.ppeItemId) : item.ppeItem;
+      if (swapped && (!issuedItem || issuedItem.isActive === false)) throw invalid('The substitute item is no longer available');
 
       const left = outstanding.get(item.id) ?? 0;
       const quantity = Math.min(line.quantity, left);
@@ -99,24 +107,26 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
         const fresh = await models.Stock.findByPk(stock.id, { attributes: ['quantity'], transaction: t });
         throw new AppError(
           'INSUFFICIENT_STOCK',
-          `Not enough ${item.ppeItem?.name ?? 'stock'}${stock.size ? ` (size ${stock.size})` : ''} in stock: ${fresh?.quantity ?? 0} available, ${quantity} needed`,
+          `Not enough ${issuedItem?.name ?? 'stock'}${stock.size ? ` (size ${stock.size})` : ''} in stock: ${fresh?.quantity ?? 0} available, ${quantity} needed`,
           { requestItemId: item.id, stockId: stock.id, available: Number(fresh?.quantity ?? 0), requested: quantity }
         );
       }
 
-      if (RENEWING_TYPES.has(request.requestType) && !renewed.has(item.ppeItemId)) {
-        renewed.add(item.ppeItemId);
-        await closePrevious(request, item.ppeItemId, issueDate, t);
+      const issuedId = stock.ppeItemId as string;
+      if (RENEWING_TYPES.has(request.requestType) && !renewed.has(issuedId)) {
+        renewed.add(issuedId);
+        await closePrevious(request, issuedId, issueDate, t);
       }
 
-      const months = item.ppeItem?.replacementFrequency ? parseInt(item.ppeItem.replacementFrequency, 10) : null;
+      const months = issuedItem?.replacementFrequency ? parseInt(issuedItem.replacementFrequency, 10) : null;
       const cost = (parseFloat(stock.unitPriceUSD) || 0) * quantity;
       const size: string | null = stock.size || item.size || null;
       const sizeNote = item.size && stock.size && stock.size !== item.size ? `; size override: ${item.size} → ${stock.size}` : '';
+      const swapNote = swapped ? `; issued ${issuedItem?.name} in place of ${item.ppeItem?.name ?? 'the requested item'}` : '';
       await models.Allocation.create(
         {
           employeeId: request.employeeId,
-          ppeItemId: item.ppeItemId,
+          ppeItemId: issuedId,
           requestId: request.id,
           requestItemId: item.id,
           stockId: stock.id,
@@ -128,7 +138,7 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
           nextRenewalDate: nextRenewal(issueDate, months && !Number.isNaN(months) ? months : null),
           status: 'active',
           totalCost: cost,
-          notes: `Allocated from request #${requestNumber(request.id)}${sizeNote}`,
+          notes: `Allocated from request #${requestNumber(request.id)}${sizeNote}${swapNote}`,
         },
         { transaction: t }
       );
@@ -136,7 +146,7 @@ export const fulfilRequest = (auth: AuthContext, id: string, input: FulfilInput)
       outstanding.set(item.id, left - quantity);
       issuedByItem.set(item.id, (issuedByItem.get(item.id) ?? 0) + quantity);
       totalCost += cost;
-      issued.push({ requestItemId: item.id, ppeName: item.ppeItem?.name ?? 'PPE item', quantity, size });
+      issued.push({ requestItemId: item.id, ppeName: issuedItem?.name ?? 'PPE item', quantity, size });
     }
 
     if (issued.length === 0) throw conflict('Everything on this request has already been issued');
@@ -276,4 +286,39 @@ export const stockOptions = async (auth: AuthContext, id: string) => {
       stock: lines,
     };
   });
+};
+
+/** Stock of other PPE items stores can issue in place of a requested one that is out of stock. */
+export const substituteOptions = async (auth: AuthContext, id: string, q: string) => {
+  const request = await models.Request.findOne({ where: { [Op.and]: [requestScope(auth), { id }] }, attributes: ['id'] });
+  if (!request) throw notFound('Request');
+  const term = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+  const stocks = await models.Stock.findAll({
+    where: { quantity: { [Op.gt]: 0 } },
+    include: [
+      {
+        model: models.PPEItem,
+        as: 'ppeItem',
+        required: true,
+        attributes: ['id', 'name', 'itemCode', 'category'],
+        where: { isActive: { [Op.ne]: false }, [Op.or]: [{ name: { [Op.iLike]: term } }, { itemCode: { [Op.iLike]: term } }] },
+      },
+    ],
+    order: [
+      [{ model: models.PPEItem, as: 'ppeItem' }, 'name', 'ASC'],
+      ['size', 'ASC'],
+    ],
+    limit: 30,
+  });
+  return stocks.map((s) => ({
+    stockId: s.id as string,
+    ppeItemId: s.ppeItem.id as string,
+    ppeItemName: s.ppeItem.name as string,
+    itemCode: (s.ppeItem.itemCode as string | null) ?? null,
+    size: (s.size as string | null) ?? null,
+    gender: (s.gender as string | null) ?? null,
+    location: [s.location, s.binLocation].filter(Boolean).join(' / ') || null,
+    quantity: Number(s.quantity),
+    unitPriceUSD: s.unitPriceUSD === null ? null : Number(s.unitPriceUSD),
+  }));
 };

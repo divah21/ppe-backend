@@ -82,13 +82,12 @@ export const createRequestWorld = async () => {
   };
 
   const cleanup = async () => {
-    const replacements = { ids: employeeIds };
-    await sequelize.query(`DELETE FROM allocations WHERE employee_id IN (:ids)`, { replacements });
-    await sequelize.query(
-      `DELETE FROM request_items WHERE request_id IN (SELECT id FROM requests WHERE employee_id IN (:ids))`,
-      { replacements }
-    );
-    await sequelize.query(`DELETE FROM requests WHERE employee_id IN (:ids)`, { replacements });
+    // Visitor requests have no employee, so they are found by who raised them
+    const replacements = { ids: employeeIds, users: Object.values(users).map((u) => u.id as string) };
+    const mine = `SELECT id FROM requests WHERE employee_id IN (:ids) OR requested_by_id IN (:users)`;
+    await sequelize.query(`DELETE FROM allocations WHERE employee_id IN (:ids) OR request_id IN (${mine})`, { replacements });
+    await sequelize.query(`DELETE FROM request_items WHERE request_id IN (${mine})`, { replacements });
+    await sequelize.query(`DELETE FROM requests WHERE id IN (${mine})`, { replacements });
     await fx.cleanup();
   };
 
