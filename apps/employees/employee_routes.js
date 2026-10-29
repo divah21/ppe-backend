@@ -10,6 +10,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../database/db');
 const { sendEmployeeOnboardedEmail, escapeHtml } = require('../../helpers/email_helper');
 const { employeeScopeWhere, requireEmployeeParamInScope, sectionInScope } = require('../../middlewares/scope_middleware');
+const { placementOf, recordTransfer } = require('../../src/modules/employees/transfer');
 
 const outOfScopeSection = (res) =>
   res.status(403).json({ success: false, message: 'You can only manage employees in your own section or department' });
@@ -601,8 +602,12 @@ router.put(
         }
       }
 
-      // Update employee
-      await employee.update(req.body);
+      // Update employee; a changed section or job title moves open requests with them (as v2 does)
+      await sequelize.transaction(async (transaction) => {
+        const from = placementOf(employee);
+        await employee.update(req.body, { transaction });
+        await recordTransfer(transaction, employee.id, from, placementOf(employee), { actorId: req.user?.id ?? null });
+      });
 
       // Get updated employee with relations
       const updatedEmployee = await Employee.findByPk(employee.id, {

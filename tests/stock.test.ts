@@ -83,6 +83,8 @@ describe('GET /api/v2/stock', () => {
     const low = await get({ lowStock: 'true', sort: 'quantity', order: 'asc' });
     expect(low.body.data.map((s: { id: string }) => s.id)).toEqual([emptyLine.id, bootsLine.id]);
     expect(low.body.data.every((s: { lowStock: boolean }) => s.lowStock)).toBe(true);
+    const above = await get({ lowStock: 'false' });
+    expect(above.body.data.map((s: { id: string }) => s.id)).toEqual([glovesLine.id]);
   });
 
   it('sorts by value and item', async () => {

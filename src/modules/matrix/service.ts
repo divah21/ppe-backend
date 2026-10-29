@@ -560,7 +560,13 @@ const activeItem = () => ({
  * for their job title, else what it shows for the PPE category job title it maps to, else legacy
  * rows held by the job title text on the employee record. Inactive PPE items are left out.
  */
-const jobTitleEntriesFor = async (employee: Row, t?: Transaction) => {
+interface MatrixSubject {
+  sectionId: string | null;
+  jobTitleRef: Row | null;
+  jobTitle: string | null;
+}
+
+const jobTitleEntriesFor = async (employee: MatrixSubject, t?: Transaction) => {
   const usable = (rows: Row[]) => rows.filter((r) => r.ppeItem && r.ppeItem.isActive !== false);
   const shownFor = async (jt: Row) => resolveEntries(jt, await jobTitleMatrixRows([jt], { transaction: t }));
 
@@ -588,12 +594,13 @@ const jobTitleEntriesFor = async (employee: Row, t?: Transaction) => {
 /**
  * What PPE an employee is entitled to and when each item is next due. The section matrix is
  * the baseline for everyone in the section and the job-title matrix overrides or extends it.
+ * `placement` answers for a section and job title the employee is not in yet (a transfer preview).
  * Does no access check: callers must have scoped the employee already. Returns null when the
  * employee does not exist.
  */
 export const computeEligibility = async (
   employeeId: string,
-  opts: { transaction?: Transaction; now?: Date } = {}
+  opts: { transaction?: Transaction; now?: Date; placement?: { sectionId: string; jobTitleId: string | null } } = {}
 ): Promise<Eligibility | null> => {
   const t = opts.transaction;
   const now = opts.now ?? new Date();
@@ -606,15 +613,27 @@ export const computeEligibility = async (
   });
   if (!employee) return null;
 
+  // A picked job title replaces the legacy free-text one, as saving the employee does
+  const { placement } = opts;
+  const matrixOf: MatrixSubject = placement
+    ? {
+        sectionId: placement.sectionId,
+        jobTitleRef: placement.jobTitleId
+          ? await models.JobTitle.findByPk(placement.jobTitleId, { attributes: ['id', 'name', 'ppeCategoryId'], transaction: t })
+          : null,
+        jobTitle: placement.jobTitleId ? null : employee.jobTitle,
+      }
+    : { sectionId: employee.sectionId, jobTitleRef: employee.jobTitleRef ?? null, jobTitle: employee.jobTitle };
+
   const [sectionRows, jobTitleRows] = await Promise.all([
-    employee.sectionId
+    matrixOf.sectionId
       ? models.SectionPPEMatrix.findAll({
-          where: { [Op.and]: [activeEntry, { sectionId: employee.sectionId }] },
+          where: { [Op.and]: [activeEntry, { sectionId: matrixOf.sectionId }] },
           include: [activeItem()],
           transaction: t,
         })
       : Promise.resolve([] as Row[]),
-    jobTitleEntriesFor(employee, t),
+    jobTitleEntriesFor(matrixOf, t),
   ]);
 
   const entitled = new Map<string, { row: Row; source: EligibilitySource }>();

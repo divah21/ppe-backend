@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { models } from '../src/core/db';
 import { prepareV2 } from '../src/v2';
 import { app, createFixtures, signIn, write } from './helpers';
 
@@ -55,6 +56,8 @@ describe('writes', () => {
     expect(updated.body.data).toMatchObject({ name: `${fx.tag}-renamed`, isActive: false, code: null });
 
     expect((await write(adminAgent, 'delete', `/api/v2/departments/${created.body.data.id}`)).status).toBe(204);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await models.AuditLog.count({ where: { entityId: created.body.data.id, action: 'DELETE' } })).toBe(1);
   });
 
   it('refuses to delete a department that still has sections', async () => {
@@ -63,9 +66,13 @@ describe('writes', () => {
     expect(res.body.error.message).toMatch(/still has 1 section/);
   });
 
-  it('reports duplicates as 409 and bad input as 422', async () => {
+  it('names the clashing field for duplicates and reports bad input as 422', async () => {
     const dup = await write(adminAgent, 'post', '/api/v2/departments').send({ name: mine.department.name });
-    expect(dup.status).toBe(409);
+    expect(dup.status).toBe(422);
+    expect(dup.body.error.details.fieldErrors.name[0]).toMatch(/already called/);
+    const code = await write(adminAgent, 'post', '/api/v2/departments').send({ name: `${fx.tag}-other`, code: mine.department.code });
+    expect(code.status).toBe(422);
+    expect(code.body.error.details.fieldErrors).toEqual({ code: [`Another department already uses the code ${mine.department.code}`] });
     const bad = await write(adminAgent, 'post', '/api/v2/departments').send({ name: 'x' });
     expect(bad.status).toBe(422);
     expect(bad.body.error.details.fieldErrors.name).toBeDefined();

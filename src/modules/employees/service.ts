@@ -1,13 +1,14 @@
 import { Op, literal, type Includeable, type Order, type Transaction, type WhereOptions } from 'sequelize';
 import type { z } from 'zod';
-import type { AuthContext } from '../../core/auth';
+import { ROLES, type AuthContext } from '../../core/auth';
 import { config } from '../../core/config';
 import { inTransaction, models, sequelize, type Row } from '../../core/db';
-import { AppError, conflict, notFound } from '../../core/errors';
+import { conflict, fieldError, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { logger } from '../../core/logger';
 import { allowedActions, employeeScope, sectionScope, sectionWithinScope } from './policy';
-import type { EmployeeInput, employeeListQuery, employeeOptionsQuery } from './schemas';
+import type { EmployeeInput, EmployeeUpdate, employeeListQuery, employeeOptionsQuery, TransferQuery } from './schemas';
+import { placementOf, recordTransfer, transferHistory, transferPreview, type KnownDepartments } from './transfer';
 
 /* eslint-disable-next-line @typescript-eslint/no-require-imports */
 const { sendEmployeeOnboardedEmail } = require('../../../helpers/email_helper');
@@ -159,7 +160,7 @@ export const employeeLookups = async (auth: AuthContext) => {
       attributes: ['id', 'name', 'sectionId'],
       order: [['name', 'ASC']],
     }),
-    models.CostCenter.findAll({ where: { isActive: true }, attributes: ['id', 'code', 'name'], order: [['code', 'ASC']] }),
+    models.CostCenter.findAll({ where: { isActive: true }, attributes: ['id', 'code', 'name', 'departmentId'], order: [['code', 'ASC']] }),
   ]);
   const departments = new Map<string, { id: string; name: string }>();
   for (const s of sections) {
@@ -175,7 +176,12 @@ export const employeeLookups = async (auth: AuthContext) => {
       departmentId: (s.departmentId as string | null) ?? null,
     })),
     jobTitles: jobTitles.map((j) => ({ id: j.id as string, name: j.name as string, sectionId: j.sectionId as string })),
-    costCentres: costCentres.map((c) => ({ id: c.id as string, code: c.code as string, name: c.name as string })),
+    costCentres: costCentres.map((c) => ({
+      id: c.id as string,
+      code: c.code as string,
+      name: c.name as string,
+      departmentId: (c.departmentId as string | null) ?? null,
+    })),
   };
 };
 
@@ -245,7 +251,7 @@ const toRequest = (row: Row) => ({
 
 export const getEmployee = async (auth: AuthContext, id: string) => {
   const row = await findInScope(auth, id);
-  const [allocations, requests, requestCount] = await Promise.all([
+  const [allocations, requests, requestCount, transfers] = await Promise.all([
     models.Allocation.findAll({
       where: { employeeId: id, status: 'active' },
       include: [
@@ -261,6 +267,7 @@ export const getEmployee = async (auth: AuthContext, id: string) => {
       limit: RECENT_REQUESTS,
     }),
     models.Request.count({ where: { employeeId: id } }),
+    transferHistory(id),
   ]);
 
   const now = new Date();
@@ -275,32 +282,46 @@ export const getEmployee = async (auth: AuthContext, id: string) => {
     },
     currentPpe,
     recentRequests: requests.map(toRequest),
+    transfers,
   };
 };
 
-const fieldError = (field: string, message: string) =>
-  new AppError('VALIDATION_FAILED', message, { fieldErrors: { [field]: [message] } });
-
-/**
- * Checks the referenced section (and that it is in the user's scope), job title and cost centre.
- * A job title must belong to the chosen section, except one the record already carries in that
- * section (older data linked titles across sections) so such records can still be edited.
- */
-const checkReferences = async (auth: AuthContext, input: EmployeeInput, t?: Transaction, current?: Row) => {
-  const [section, jobTitle, costCentre] = await Promise.all([
-    models.Section.findByPk(input.sectionId, { attributes: ['id', 'departmentId'], transaction: t }),
-    input.jobTitleId ? models.JobTitle.findByPk(input.jobTitleId, { attributes: ['id', 'sectionId'], transaction: t }) : null,
-    input.costCenterId ? models.CostCenter.findByPk(input.costCenterId, { attributes: ['id'], transaction: t }) : null,
-  ]);
+/** The section, if it exists and the user may place employees in it. */
+const sectionInScope = async (auth: AuthContext, sectionId: string, t?: Transaction) => {
+  const section = await models.Section.findByPk(sectionId, { attributes: ['id', 'departmentId'], transaction: t });
   if (!section || !sectionWithinScope(auth, { id: section.id, departmentId: section.departmentId ?? null })) {
     throw fieldError('sectionId', 'Choose a section you manage');
   }
+  return section;
+};
+
+/**
+ * Checks the referenced section (and that it is in the user's scope), job title and cost centre.
+ * A job title must belong to the chosen section and a cost centre to its department, except ones the
+ * record already carries there (older data crossed both) so such records can still be edited.
+ */
+const checkReferences = async (auth: AuthContext, input: EmployeeInput, t?: Transaction, current?: Row) => {
+  const [section, jobTitle, costCentre, currentSection] = await Promise.all([
+    sectionInScope(auth, input.sectionId, t),
+    input.jobTitleId ? models.JobTitle.findByPk(input.jobTitleId, { attributes: ['id', 'sectionId'], transaction: t }) : null,
+    input.costCenterId ? models.CostCenter.findByPk(input.costCenterId, { attributes: ['id', 'departmentId'], transaction: t }) : null,
+    current ? models.Section.findByPk(current.sectionId, { attributes: ['id', 'departmentId'], transaction: t }) : null,
+  ]);
   if (input.jobTitleId && !jobTitle) throw fieldError('jobTitleId', 'This job title no longer exists');
   const unchanged = !!current && current.jobTitleId === input.jobTitleId && current.sectionId === input.sectionId;
   if (jobTitle && jobTitle.sectionId !== section.id && !unchanged) {
     throw fieldError('jobTitleId', 'Choose a job title from the selected section');
   }
   if (input.costCenterId && !costCentre) throw fieldError('costCenterId', 'This cost centre no longer exists');
+  const keptCostCentre =
+    !!current && current.costCenterId === input.costCenterId && currentSection?.departmentId === section.departmentId;
+  if (costCentre?.departmentId && costCentre.departmentId !== section.departmentId && !keptCostCentre) {
+    throw fieldError('costCenterId', "Choose a cost centre in the employee's department");
+  }
+  // Departments of the new and old section, so a transfer need not look them up again
+  const departments: KnownDepartments = new Map([[section.id as string, (section.departmentId as string | null) ?? null]]);
+  if (currentSection) departments.set(currentSection.id as string, (currentSection.departmentId as string | null) ?? null);
+  return departments;
 };
 
 const duplicateWorksNumber = (worksNumber: string) =>
@@ -347,15 +368,33 @@ export const createEmployee = async (auth: AuthContext, input: EmployeeInput) =>
   return created;
 };
 
-export const updateEmployee = async (auth: AuthContext, id: string, input: EmployeeInput) => {
-  await inTransaction(async (t) => {
+export const updateEmployee = async (auth: AuthContext, id: string, { moveAccounts, ...input }: EmployeeUpdate) => {
+  const transfer = await inTransaction(async (t) => {
     const row = await findInScope(auth, id, t);
-    await checkReferences(auth, input, t, row);
+    const departments = await checkReferences(auth, input, t, row);
     if (input.worksNumber !== row.worksNumber) await assertWorksNumberFree(input.worksNumber, id, t);
+    const from = placementOf(row);
     // A picked job title replaces the legacy free-text one
     await row.update({ ...input, ...(input.jobTitleId ? { jobTitle: null } : {}) }, { transaction: t });
+    // Only an admin manages user accounts
+    return recordTransfer(t, id, from, placementOf(row), {
+      actorId: auth.userId,
+      moveAccounts: moveAccounts && auth.role === ROLES.ADMIN,
+      departments,
+    });
   });
-  return toEmployee(await findInScope(auth, id), auth);
+  return { employee: toEmployee(await findInScope(auth, id), auth), transfer };
+};
+
+/** What moving the employee to another section or job title would change. */
+export const previewTransfer = async (auth: AuthContext, id: string, q: TransferQuery) => {
+  const [row, section] = await Promise.all([findInScope(auth, id), sectionInScope(auth, q.sectionId)]);
+  const departments: KnownDepartments = new Map([
+    [section.id as string, (section.departmentId as string | null) ?? null],
+    [row.sectionId as string, (row.section?.departmentId as string | null) ?? null],
+  ]);
+  const to = { sectionId: q.sectionId, jobTitleId: q.jobTitleId, costCenterId: row.costCenterId ?? null };
+  return transferPreview(auth, row, to, departments);
 };
 
 export const setEmployeeActive = async (auth: AuthContext, id: string, isActive: boolean) => {

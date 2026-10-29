@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { audit } from '../../core/audit';
+import { audit, skipAudit } from '../../core/audit';
 import { ROLES, authenticate, getAuth, requireRole } from '../../core/auth';
 import { ok, paged, parse, route, uuidParam } from '../../core/http';
 import { defineModule } from '../../core/module';
@@ -67,7 +67,8 @@ router.post(
   route(async (req, res) => {
     const input = parse(importBody, req.body);
     const report = await importAllocations(getAuth(req), input);
-    if (!input.dryRun) await audit(req, 'BULK_IMPORT', 'Allocation', null, { summary: report.summary });
+    if (input.dryRun) skipAudit(req);
+    else await audit(req, 'BULK_IMPORT', 'Allocation', null, { summary: report.summary });
     return ok(res, report, input.dryRun ? 200 : 201);
   })
 );

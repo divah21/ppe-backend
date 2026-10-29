@@ -68,8 +68,9 @@ export interface SpendTarget {
 }
 
 /**
- * Spend per budget: allocations issued in the budget's period to employees of its department
- * (or its section, for section budgets). One query for the whole page.
+ * Spend per budget: allocations issued in the budget's period under its department (or its
+ * section, for section budgets), as recorded at issue, so a transfer does not move past spend.
+ * One query for the whole page.
  */
 export const spendByBudget = async (targets: SpendTarget[], transaction?: Transaction) => {
   const out = new Map<string, { spent: number; allocationCount: number }>();
@@ -82,9 +83,8 @@ export const spendByBudget = async (targets: SpendTarget[], transaction?: Transa
      )
      SELECT r.id, COALESCE(SUM(${allocationCost()}), 0) AS spent, COUNT(a.id) AS n
      FROM r
-     LEFT JOIN sections s ON (r.section_id IS NULL AND s.department_id = r.department_id) OR s.id = r.section_id
-     LEFT JOIN employees e ON e."sectionId" = s.id
-     LEFT JOIN allocations a ON a.employee_id = e.id AND a.issue_date >= r.start_on AND a.issue_date < r.end_before
+     LEFT JOIN allocations a ON a.issue_date >= r.start_on AND a.issue_date < r.end_before
+       AND (a.section_id = r.section_id OR (r.section_id IS NULL AND a.department_id = r.department_id))
      LEFT JOIN price p ON p.ppe_item_id = a.ppe_item_id
      GROUP BY r.id`,
     {
@@ -107,14 +107,12 @@ export const spendByBudget = async (targets: SpendTarget[], transaction?: Transa
 export const spendByDepartment = async (range: { start: string; end: string }, departmentId: string | null) => {
   const rows = await sequelize.query<{ department_id: string; spent: string; n: string }>(
     `WITH ${PRICE_CTE}
-     SELECT s.department_id, COALESCE(SUM(${allocationCost()}), 0) AS spent, COUNT(a.id) AS n
+     SELECT a.department_id, COALESCE(SUM(${allocationCost()}), 0) AS spent, COUNT(a.id) AS n
      FROM allocations a
-     JOIN employees e ON e.id = a.employee_id
-     JOIN sections s ON s.id = e."sectionId"
      LEFT JOIN price p ON p.ppe_item_id = a.ppe_item_id
-     WHERE a.issue_date >= :start AND a.issue_date < :end
-       ${departmentId ? 'AND s.department_id = :departmentId' : ''}
-     GROUP BY s.department_id`,
+     WHERE a.issue_date >= :start AND a.issue_date < :end AND a.department_id IS NOT NULL
+       ${departmentId ? 'AND a.department_id = :departmentId' : ''}
+     GROUP BY a.department_id`,
     { type: QueryTypes.SELECT, replacements: { ...range, departmentId } }
   );
   return new Map(rows.map((r) => [r.department_id, { spent: money(r.spent), allocationCount: Number(r.n) }]));

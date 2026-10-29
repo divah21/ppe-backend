@@ -2,8 +2,7 @@ import { AppError } from '../../core/errors';
 import { models, type Row } from '../../core/db';
 
 /** A 422 that the form shows next to one field. */
-export const fieldError = (field: string, message: string) =>
-  new AppError('VALIDATION_FAILED', message, { fieldErrors: { [field]: [message] } });
+export { fieldError } from '../../core/errors';
 
 export const personInclude = (as: string) => ({
   model: models.User,

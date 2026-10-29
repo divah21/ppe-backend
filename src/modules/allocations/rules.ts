@@ -15,3 +15,7 @@ export const newerHolding = (a: string) => `EXISTS (
       SELECT 1 FROM allocations n
       WHERE n.employee_id = ${a}.employee_id AND n.ppe_item_id = ${a}.ppe_item_id AND n.status IN ('active', 'expired')
         AND (n.issue_date, n.created_at, n.id) > (${a}.issue_date, ${a}.created_at, ${a}.id))`;
+
+/** Still with an active employee and the latest issue of its item, so it will need renewing. */
+export const awaitingRenewal = (a: string, e: string) =>
+  `${a}.status IN ('active', 'expired') AND ${e}."isActive" IS NOT FALSE AND NOT ${newerHolding(a)}`;

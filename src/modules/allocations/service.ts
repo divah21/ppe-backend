@@ -21,7 +21,7 @@ const { deductStock, restoreStock } = require('../../../helpers/stock_helper') a
 };
 
 const DAY_MS = 86_400_000;
-import { DEFAULT_FREQUENCY_MONTHS, dueSql, newerHolding } from './rules';
+import { DEFAULT_FREQUENCY_MONTHS, awaitingRenewal, dueSql, newerHolding } from './rules';
 
 const DUE = literal(dueSql('"Allocation"', '"ppeItem"'));
 
@@ -315,7 +315,7 @@ const renewalWindow = (auth: AuthContext, q: RenewalsQuery) => {
       JOIN ppe_items p ON p.id = a.ppe_item_id
       JOIN employees e ON e.id = a.employee_id
       JOIN sections s ON s.id = e."sectionId"
-      WHERE a.status IN ('active', 'expired') AND e."isActive" IS NOT FALSE AND NOT ${newerHolding('a')}
+      WHERE ${awaitingRenewal('a', 'e')}
       ${filters.map((f) => `AND ${f}`).join(' ')}
     ), win AS (
       SELECT * FROM due

@@ -99,7 +99,8 @@ export const listStock = async (q: StockListQuery) => {
   if (q.ppeItemId) where.push({ ppeItemId: q.ppeItemId });
   if (q.size) where.push({ size: q.size });
   if (q.lowStock === 'true') where.push(LOW_STOCK);
-  if (q.lowStock === 'false') where.push({ [Op.not]: LOW_STOCK });
+  // Sequelize drops Op.not around a bare literal, so the negation is written out
+  if (q.lowStock === 'false') where.push(literal(`NOT (${lowSql('"Stock"')})`));
 
   const { rows, count } = await models.Stock.findAndCountAll({
     where: { [Op.and]: where },

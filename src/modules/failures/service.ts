@@ -1,7 +1,7 @@
 import { Op, col, fn, type Transaction, type WhereOptions } from 'sequelize';
 import type { AuthContext } from '../../core/auth';
 import { inTransaction, models, type Row } from '../../core/db';
-import { AppError, conflict, notFound } from '../../core/errors';
+import { AppError, conflict, fieldError, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { allowedActions, canDo, employeeScope, scopedEmployee, sectionInclude, type FailureAction } from './policy';
 import type { FailureInput, FailureListQuery, FailureStatus, ReplaceInput, ResolveInput, ReviewInput } from './schemas';
@@ -18,9 +18,6 @@ const CLOSED_ALLOCATION = new Set(['replaced', 'returned']);
 /** The short reference v1 writes into allocation notes, e.g. "Failure Report #1a2b3c4d". */
 const reference = (id: string) => id.substring(0, 8);
 const referenceTag = (id: string) => `Failure Report #${reference(id)}`;
-
-const fieldError = (field: string, message: string) =>
-  new AppError('VALIDATION_FAILED', message, { fieldErrors: { [field]: [message] } });
 
 const invalidTransition = (message: string) => new AppError('INVALID_TRANSITION', message);
 

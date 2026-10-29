@@ -63,6 +63,20 @@ export const employeeBody = z.object({
 
 export type EmployeeInput = z.infer<typeof employeeBody>;
 
+export const employeeUpdateBody = employeeBody.extend({
+  // Admin only: also move user accounts that managed the old section or department
+  moveAccounts: z.boolean().default(false),
+});
+
+export type EmployeeUpdate = z.infer<typeof employeeUpdateBody>;
+
+export const transferQuery = z.object({
+  sectionId: z.string().uuid('Choose a section'),
+  jobTitleId: optionalId,
+});
+
+export type TransferQuery = z.infer<typeof transferQuery>;
+
 export const IMPORT_MAX_ROWS = 2000;
 
 export const importBody = z.object({

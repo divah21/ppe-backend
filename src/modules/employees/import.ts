@@ -3,6 +3,7 @@ import { inTransaction, models, type Row } from '../../core/db';
 import { AppError } from '../../core/errors';
 import { importRow, type ImportRow } from './schemas';
 import { localToday } from './service';
+import { placementOf, recordTransfer } from './transfer';
 
 export interface ImportIssue {
   /** 0-based position in the submitted rows */
@@ -76,9 +77,9 @@ const plan = async (rawRows: Array<Record<string, unknown>>, t?: Transaction) =>
   }
 
   const [sections, jobTitles, costCentres, existing] = await Promise.all([
-    models.Section.findAll({ attributes: ['id', 'name', 'code'], transaction: t }),
+    models.Section.findAll({ attributes: ['id', 'name', 'code', 'departmentId'], transaction: t }),
     models.JobTitle.findAll({ attributes: ['id', 'name', 'sectionId'], transaction: t }),
-    models.CostCenter.findAll({ attributes: ['id', 'name', 'code'], transaction: t }),
+    models.CostCenter.findAll({ attributes: ['id', 'name', 'code', 'departmentId'], transaction: t }),
     models.Employee.findAll({
       where: { worksNumber: { [Op.in]: [...seen] } },
       transaction: t,
@@ -91,6 +92,13 @@ const plan = async (rawRows: Array<Record<string, unknown>>, t?: Transaction) =>
   const jobTitleIds = new Map(jobTitles.map((j) => [`${j.sectionId}|${key(j.name)}`, j.id as string]));
   const jobTitleSection = new Map(jobTitles.map((j) => [j.id as string, j.sectionId as string]));
   const existingBy = new Map(existing.map((e) => [e.worksNumber as string, e]));
+  const sectionDepartment = new Map(sections.map((s) => [s.id as string, (s.departmentId as string | null) ?? null]));
+  const costCentreDepartment = new Map(costCentres.map((c) => [c.id as string, (c.departmentId as string | null) ?? null]));
+  /** A cost centre tied to another department than the section's does not fit it. */
+  const misfits = (costCentreId: string, sectionId: string) => {
+    const dept = costCentreDepartment.get(costCentreId);
+    return !!dept && dept !== sectionDepartment.get(sectionId);
+  };
 
   const planned: Planned[] = [];
   for (const { index, row } of parsed) {
@@ -117,10 +125,10 @@ const plan = async (rawRows: Array<Record<string, unknown>>, t?: Transaction) =>
       if (!jobTitleId) warnings.push(issue('jobTitle', `Job title "${row.jobTitle}" is not set up for this section; it is kept as text`));
     }
 
-    let costCenterId: string | null = null;
+    let costCenterId: string | null | undefined;
     if (row.costCentre) {
       const cc = costCentreBy(row.costCentre);
-      costCenterId = cc.id;
+      costCenterId = cc.id ?? undefined;
       if (!cc.id)
         warnings.push(
           issue(
@@ -128,6 +136,13 @@ const plan = async (rawRows: Array<Record<string, unknown>>, t?: Transaction) =>
             cc.ambiguous ? `"${row.costCentre}" matches more than one cost centre; left blank` : `Cost centre "${row.costCentre}" was not found; left blank`
           )
         );
+      else if (misfits(cc.id, section.id)) {
+        costCenterId = undefined;
+        warnings.push(issue('costCentre', `Cost centre "${row.costCentre}" belongs to another department; left blank`));
+      }
+    } else if (current?.costCenterId && current.sectionId !== section.id && misfits(current.costCenterId as string, section.id)) {
+      costCenterId = null;
+      warnings.push(issue('costCentre', "The current cost centre belongs to the old department and is cleared"));
     }
 
     const values: Record<string, unknown> = {
@@ -150,7 +165,7 @@ const plan = async (rawRows: Array<Record<string, unknown>>, t?: Transaction) =>
     const optional: Record<string, unknown> = {
       jobTitle: row.jobTitle,
       jobTitleId: linkedJobTitle,
-      costCenterId: costCenterId ?? undefined,
+      costCenterId,
       jobType: row.jobType,
       gender: row.gender,
       contractType: row.contractType,
@@ -172,7 +187,7 @@ const plan = async (rawRows: Array<Record<string, unknown>>, t?: Transaction) =>
 
   errors.sort((a, b) => a.index - b.index);
   warnings.sort((a, b) => a.index - b.index);
-  return { errors, warnings, planned };
+  return { errors, warnings, planned, sectionDepartment };
 };
 
 const counts = (planned: Planned[]) => ({
@@ -180,14 +195,14 @@ const counts = (planned: Planned[]) => ({
   updated: planned.filter((p) => p.existing).length,
 });
 
-export const importEmployees = async (rows: Array<Record<string, unknown>>, dryRun: boolean) => {
+export const importEmployees = async (rows: Array<Record<string, unknown>>, dryRun: boolean, actorId: string | null = null) => {
   if (dryRun) {
     const { errors, warnings, planned } = await plan(rows);
     return { dryRun: true, valid: errors.length === 0, total: rows.length, ...counts(planned), errors, warnings };
   }
 
   return inTransaction(async (t) => {
-    const { errors, warnings, planned } = await plan(rows, t);
+    const { errors, warnings, planned, sectionDepartment } = await plan(rows, t);
     if (errors.length > 0) {
       throw new AppError('VALIDATION_FAILED', `${errors.length} problem${errors.length === 1 ? '' : 's'} found. Nothing was imported.`, {
         errors,
@@ -201,7 +216,11 @@ export const importEmployees = async (rows: Array<Record<string, unknown>>, dryR
         { transaction: t }
       );
     }
-    for (const p of updates) await p.existing!.update(p.values, { transaction: t });
+    for (const p of updates) {
+      const from = placementOf(p.existing!);
+      await p.existing!.update(p.values, { transaction: t });
+      await recordTransfer(t, p.existing!.id, from, placementOf(p.existing!), { actorId, departments: sectionDepartment });
+    }
     return { dryRun: false, valid: true, total: rows.length, ...counts(planned), errors: [] as ImportIssue[], warnings };
   });
 };

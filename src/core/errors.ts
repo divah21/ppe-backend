@@ -45,6 +45,14 @@ export const forbidden = (message = 'You do not have access to this resource') =
 export const notFound = (entity: string) => new AppError('NOT_FOUND', `${entity} not found`);
 export const conflict = (message: string, details?: unknown) => new AppError('CONFLICT', message, details);
 
+/** A 422 that the web forms show against the named fields; the first message is the summary. */
+export const fieldErrors = (messages: Record<string, string>) =>
+  new AppError('VALIDATION_FAILED', Object.values(messages)[0] ?? 'Some fields are invalid', {
+    fieldErrors: Object.fromEntries(Object.entries(messages).map(([field, message]) => [field, [message]])),
+  });
+
+export const fieldError = (field: string, message: string) => fieldErrors({ [field]: message });
+
 export const notFoundHandler: RequestHandler = (req, _res, next) =>
   next(new AppError('NOT_FOUND', `No route for ${req.method} ${req.originalUrl}`));
 

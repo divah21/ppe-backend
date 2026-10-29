@@ -7,6 +7,7 @@ import { configError } from './core/config';
 import { errorHandler, notFoundHandler } from './core/errors';
 import { sequelize } from './core/db';
 import { logger } from './core/logger';
+import { ensureTransferSchema } from './core/schema';
 import type { V2Module } from './core/module';
 import { ensureSessionTable, purgeStaleSessions } from './core/sessions';
 
@@ -54,6 +55,8 @@ export const createV2Router = () => {
 
 /** Schema the v2 API needs before it serves traffic. */
 export const prepareV2 = async () => {
+  // v1 records transfers too, so this runs even when v2 itself is not configured
+  await ensureTransferSchema();
   if (configError) return;
   await ensureSessionTable();
   await ensureIndexes(sequelize);

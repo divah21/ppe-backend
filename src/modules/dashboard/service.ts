@@ -3,7 +3,7 @@ import { ROLES, type AuthContext, type Role } from '../../core/auth';
 import { sequelize } from '../../core/db';
 import { PRICE_CTE, allocationCost } from '../budgets/spend';
 import type { DashboardQuery } from './schemas';
-import { newerHolding } from '../allocations/rules';
+import { awaitingRenewal } from '../allocations/rules';
 import { CLOSED_REQUEST_STATUSES, RENEWAL_SQL, REQUEST_DEPARTMENT, REQUEST_SECTION, scopeOf, scopeSql, type Scope } from './scope';
 
 /** Request stages each role acts on (v1 approval chain: section rep, dept rep, HOD, stores; SHEQ for replacements). */
@@ -37,12 +37,20 @@ const ALLOCATIONS_FROM = `
   LEFT JOIN ppe_items p ON p.id = a.ppe_item_id`;
 const allocationScope = (scope: Scope) => scopeSql(scope, 'sec.id', 'sec.department_id');
 
+// Spend stays with the section and department an allocation was issued under, wherever the employee is now
+const ISSUED_FROM = `
+  FROM allocations a
+  LEFT JOIN sections sec ON sec.id = a.section_id
+  LEFT JOIN departments d ON d.id = a.department_id
+  LEFT JOIN ppe_items p ON p.id = a.ppe_item_id`;
+const issuedScope = (scope: Scope) => scopeSql(scope, 'a.section_id', 'a.department_id');
+
 /** Priced as on the budget pages, so spend agrees across screens. Queries using it start WITH PRICE_CTE. */
 const COST = allocationCost('a', 'pr');
 const JOIN_PRICE = 'LEFT JOIN price pr ON pr.ppe_item_id = a.ppe_item_id';
 
 // Matches the renewals screen: still held, latest issue of the item only, due within the window
-const RENEWAL_DUE = `a.status IN ('active', 'expired') AND e."isActive" IS NOT FALSE AND NOT ${newerHolding('a')}
+const RENEWAL_DUE = `${awaitingRenewal('a', 'e')}
   AND ${RENEWAL_SQL('a', 'p')} >= NOW() AND ${RENEWAL_SQL('a', 'p')} <= NOW() + make_interval(days => :renewalDays)`;
 
 const select = <T extends object>(sql: string, replacements: Record<string, unknown>) =>
@@ -58,37 +66,40 @@ const LOW_STOCK_LINES = `
 const kpis = async (auth: AuthContext, scope: Scope, period: DashboardQuery['period']) => {
   const rs = requestScope(scope);
   const as = allocationScope(scope);
-  const [requests] = await select<{ awaiting: string; open: string }>(
-    `SELECT
-       COUNT(*) FILTER (WHERE r.status::text IN (:actionStatuses)) AS awaiting,
-       COUNT(*) FILTER (WHERE r.status::text NOT IN (:closed)) AS open
-     ${REQUESTS_FROM}
-     WHERE ${rs.sql}`,
-    { ...rs.replacements, actionStatuses: ACTION_STATUSES[auth.role] ?? ['none'], closed: CLOSED_REQUEST_STATUSES }
-  );
-  const [allocations] = await select<{ issued: string; spend: string; renewals: string }>(
-    `WITH ${PRICE_CTE}
-     SELECT
-       COALESCE(SUM(a.quantity) FILTER (WHERE a.issue_date >= date_trunc(:period, NOW())), 0) AS issued,
-       COALESCE(SUM(${COST}) FILTER (WHERE a.issue_date >= date_trunc(:period, NOW())), 0) AS spend,
-       COUNT(*) FILTER (WHERE ${RENEWAL_DUE}) AS renewals
-     ${ALLOCATIONS_FROM}
-     ${JOIN_PRICE}
-     WHERE ${as.sql} AND (a.issue_date >= date_trunc(:period, NOW()) OR a.status = 'active')`,
-    { ...as.replacements, period, renewalDays: RENEWAL_WINDOW_DAYS }
-  );
-  let lowStock: number | null = null;
-  if (SEES_STOCK.has(auth.role)) {
-    const [row] = await select<{ count: string }>(`SELECT COUNT(*) AS count ${LOW_STOCK_LINES}`, {});
-    lowStock = num(row?.count);
-  }
+  const is = issuedScope(scope);
+  const [[requests], [issued], [renewals], low] = await Promise.all([
+    select<{ awaiting: string; open: string }>(
+      `SELECT
+         COUNT(*) FILTER (WHERE r.status::text IN (:actionStatuses)) AS awaiting,
+         COUNT(*) FILTER (WHERE r.status::text NOT IN (:closed)) AS open
+       ${REQUESTS_FROM}
+       WHERE ${rs.sql}`,
+      { ...rs.replacements, actionStatuses: ACTION_STATUSES[auth.role] ?? ['none'], closed: CLOSED_REQUEST_STATUSES }
+    ),
+    // Issued and spent under the scope at issue time
+    select<{ issued: string; spend: string }>(
+      `WITH ${PRICE_CTE}
+       SELECT COALESCE(SUM(a.quantity), 0) AS issued, COALESCE(SUM(${COST}), 0) AS spend
+       ${ISSUED_FROM}
+       ${JOIN_PRICE}
+       WHERE ${is.sql} AND a.issue_date >= date_trunc(:period, NOW())`,
+      { ...is.replacements, period }
+    ),
+    // Renewals for the people in scope now
+    select<{ renewals: string }>(
+      `SELECT COUNT(*) AS renewals ${ALLOCATIONS_FROM} WHERE ${as.sql} AND ${RENEWAL_DUE}`,
+      { ...as.replacements, renewalDays: RENEWAL_WINDOW_DAYS }
+    ),
+    SEES_STOCK.has(auth.role) ? select<{ count: string }>(`SELECT COUNT(*) AS count ${LOW_STOCK_LINES}`, {}) : null,
+  ]);
+  const lowStock = low ? num(low[0]?.count) : null;
   return {
     awaitingMyAction: num(requests?.awaiting),
     openRequests: num(requests?.open),
-    issuedThisPeriod: num(allocations?.issued),
-    spendThisPeriod: Math.round(num(allocations?.spend) * 100) / 100,
+    issuedThisPeriod: num(issued?.issued),
+    spendThisPeriod: Math.round(num(issued?.spend) * 100) / 100,
     lowStock,
-    renewalsDue: num(allocations?.renewals),
+    renewalsDue: num(renewals?.renewals),
   };
 };
 
@@ -118,14 +129,13 @@ const SPEND_GROUP_BY = {
 } as const;
 
 const spendBreakdown = async (scope: Scope, period: DashboardQuery['period']) => {
-  const as = allocationScope(scope);
+  const as = issuedScope(scope);
   const g = SPEND_GROUP_BY[scope.kind];
   const rows = await select<{ id: string | null; name: string; amount: string }>(
     `WITH ${PRICE_CTE}
      SELECT ${g.id} AS id, ${g.name} AS name, SUM(${COST}) AS amount
-     ${ALLOCATIONS_FROM}
+     ${ISSUED_FROM}
      ${JOIN_PRICE}
-     LEFT JOIN departments d ON d.id = sec.department_id
      WHERE ${as.sql} AND a.issue_date >= date_trunc(:period, NOW())
      GROUP BY 1, 2
      HAVING SUM(${COST}) > 0
