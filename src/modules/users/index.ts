@@ -3,6 +3,7 @@ import { audit } from '../../core/audit';
 import { ROLES, authenticate, getAuth, requireRole } from '../../core/auth';
 import { ok, paged, parse, route, uuidParam } from '../../core/http';
 import { defineModule } from '../../core/module';
+import { deleteUser, userSummary } from './admin';
 import { createUserBody, employeeOptionsQuery, updateUserBody, userListQuery } from './schemas';
 import {
   createUser,
@@ -28,6 +29,8 @@ router.get(
     return paged(res, rows, count, q);
   })
 );
+
+router.get('/summary', route(async (_req, res) => ok(res, await userSummary())));
 
 router.get(
   '/employee-options',
@@ -64,6 +67,16 @@ router.post(
     const result = await resetPassword(getAuth(req), id);
     await audit(req, 'RESET', 'User', id, { action: 'admin_password_reset' });
     return ok(noStore(res), result);
+  })
+);
+
+router.delete(
+  '/:id',
+  route(async (req, res) => {
+    const { id } = parse(uuidParam, req.params);
+    await deleteUser(getAuth(req), id);
+    await audit(req, 'DELETE', 'User', id);
+    res.status(204).end();
   })
 );
 
