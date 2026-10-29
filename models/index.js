@@ -57,6 +57,7 @@ Section.belongsTo(Department, { foreignKey: 'departmentId', as: 'department' });
 // Section <-> JobTitle
 Section.hasMany(JobTitle, { foreignKey: 'sectionId', as: 'jobTitles' });
 JobTitle.belongsTo(Section, { foreignKey: 'sectionId', as: 'section' });
+JobTitle.belongsTo(JobTitle, { foreignKey: 'ppeCategoryId', as: 'ppeCategory' });
 
 // Department <-> CostCenter
 Department.hasMany(CostCenter, { foreignKey: 'departmentId', as: 'costCenters' });
