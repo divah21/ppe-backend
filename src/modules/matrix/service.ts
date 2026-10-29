@@ -67,17 +67,20 @@ const legacyByName = (names: string[]): WhereOptions => ({
 });
 
 // Same rule as resolveEntries: a legacy row counts unless the job title has its own row for the item
-const JOB_TITLE_HAS_ENTRY = (extra = '') => `EXISTS (
-  SELECT 1 FROM job_title_ppe_matrix m
+/** A job title's entries (own rows, and legacy rows held by its name), for a query over "JobTitle". */
+export const JOB_TITLE_ENTRIES = (extra = '') => `FROM job_title_ppe_matrix m
   WHERE m.is_active IS NOT FALSE ${extra}
     AND (m."jobTitleId" = "JobTitle"."id"
       OR (m."jobTitleId" IS NULL AND lower(trim(m.job_title)) = lower(trim("JobTitle"."name"))
         AND NOT EXISTS (SELECT 1 FROM job_title_ppe_matrix o
-          WHERE o."jobTitleId" = "JobTitle"."id" AND o.ppe_item_id = m.ppe_item_id))))`;
+          WHERE o."jobTitleId" = "JobTitle"."id" AND o.ppe_item_id = m.ppe_item_id)))`;
 
-const SECTION_HAS_ENTRY = (extra = '') => `EXISTS (
-  SELECT 1 FROM section_ppe_matrix m
-  WHERE m.is_active IS NOT FALSE ${extra} AND m.section_id = "Section"."id")`;
+/** A section's entries, for a query over "Section". */
+export const SECTION_ENTRIES = (extra = '') => `FROM section_ppe_matrix m
+  WHERE m.is_active IS NOT FALSE ${extra} AND m.section_id = "Section"."id"`;
+
+const JOB_TITLE_HAS_ENTRY = (extra = '') => `EXISTS (SELECT 1 ${JOB_TITLE_ENTRIES(extra)})`;
+const SECTION_HAS_ENTRY = (extra = '') => `EXISTS (SELECT 1 ${SECTION_ENTRIES(extra)})`;
 
 const itemFilter = (ppeItemId?: string) => (ppeItemId ? `AND m.ppe_item_id = ${sequelize.escape(ppeItemId)}` : '');
 
@@ -113,7 +116,7 @@ const jobTitleMatrixRows = (jobTitles: Row[], opts: { transaction?: Transaction;
     transaction: opts.transaction,
   });
 
-const loadJobTitleEntries = async (jobTitles: Row[], t?: Transaction) => {
+export const loadJobTitleEntries = async (jobTitles: Row[], t?: Transaction) => {
   const rows = jobTitles.length ? await jobTitleMatrixRows(jobTitles, { transaction: t }) : [];
   return new Map<string, Row[]>(jobTitles.map((jt) => [jt.id as string, resolveEntries(jt, rows)]));
 };
@@ -365,7 +368,7 @@ export const deleteJobTitleEntry = (auth: AuthContext, id: string) =>
 
 /* ------------------------------------------------------------------ section matrix */
 
-const loadSectionEntries = async (sections: Row[]) => {
+export const loadSectionEntries = async (sections: Row[]) => {
   const bySection = new Map<string, Row[]>(sections.map((s) => [s.id as string, []]));
   if (!sections.length) return bySection;
   const rows = await models.SectionPPEMatrix.findAll({
