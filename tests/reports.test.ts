@@ -49,9 +49,9 @@ const download = async (agent: Agent, path: string, query: Record<string, string
 describe('GET /api/v2/reports', () => {
   it('lists the reports each role may run', async () => {
     const keys = async (agent: Agent) => (await agent.get('/api/v2/reports')).body.data.map((r: { key: string }) => r.key);
-    expect(await keys(stores)).toEqual(['allocations', 'requests', 'stock', 'matrix', 'ppe-cards']);
-    expect(await keys(hod)).toEqual(['allocations', 'requests', 'ppe-cards']);
-    expect(await keys(sectionRep)).toEqual(['allocations', 'requests', 'ppe-cards']);
+    expect(await keys(stores)).toEqual(['allocations', 'requests', 'stock', 'matrix', 'ppe-cards', 'employees']);
+    expect(await keys(hod)).toEqual(['allocations', 'requests', 'ppe-cards', 'employees']);
+    expect(await keys(sectionRep)).toEqual(['allocations', 'requests', 'ppe-cards', 'employees']);
   });
 
   it('offers only in-scope departments and sections as filters', async () => {

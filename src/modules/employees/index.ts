@@ -5,10 +5,12 @@ import { ok, paged, parse, route, uuidParam } from '../../core/http';
 import { defineModule } from '../../core/module';
 import { importEmployees } from './import';
 import { EDITOR_ROLES } from './policy';
-import { employeeBody, employeeListQuery, employeeOptionsQuery, employeeUpdateBody, importBody, transferQuery } from './schemas';
+import { employeeBody, employeeListQuery, employeeOptionsQuery, employeeSummaryQuery, employeeUpdateBody, importBody, transferQuery } from './schemas';
 import {
   createEmployee,
+  employeeJobTypes,
   employeeLookups,
+  employeeSummary,
   employeeOptions,
   getEmployee,
   listEmployees,
@@ -43,12 +45,22 @@ router.post(
   '/import',
   requireRole(ROLES.ADMIN),
   route(async (req, res) => {
-    const { rows, dryRun } = parse(importBody, req.body);
-    const result = await importEmployees(rows, dryRun, getAuth(req).userId);
-    if (dryRun) skipAudit(req);
-    else await audit(req, 'BULK_IMPORT', 'Employee', null, { created: result.created, updated: result.updated });
+    const { rows, ...options } = parse(importBody, req.body);
+    const result = await importEmployees(rows, options, getAuth(req).userId);
+    if (options.dryRun) skipAudit(req);
+    else await audit(req, 'BULK_IMPORT', 'Employee', null, { created: result.created, updated: result.updated, skipped: result.skipped });
     return ok(res, result);
   })
+);
+
+router.get(
+  '/summary',
+  route(async (req, res) => ok(res, await employeeSummary(getAuth(req), parse(employeeSummaryQuery, req.query))))
+);
+
+router.get(
+  '/job-types',
+  route(async (req, res) => ok(res, await employeeJobTypes(getAuth(req))))
 );
 
 router.get(

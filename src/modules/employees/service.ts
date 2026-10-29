@@ -115,15 +115,56 @@ export const listEmployees = async (auth: AuthContext, q: z.infer<typeof employe
   if (q.sectionId) where.push({ sectionId: q.sectionId });
   if (q.jobTitleId) where.push({ jobTitleId: q.jobTitleId });
   if (q.status) where.push({ isActive: q.status === 'active' });
+  if (q.jobType) where.push(sequelize.where(literal(JOB_TYPE), q.jobType.toUpperCase()));
 
   const sorted = !!q.sort;
   const { rows, count } = await models.Employee.findAndCountAll({
     where: { [Op.and]: where },
     include: INCLUDE,
+    attributes: { include: [[PPE_HELD, 'ppeHeld']] },
     order: orderFor(q.sort, sorted ? (q.order.toUpperCase() as 'ASC' | 'DESC') : 'ASC'),
     ...pageWindow(q),
   });
-  return { rows: rows.map((r) => toEmployee(r, auth)), count };
+  return { rows: rows.map((r) => ({ ...toEmployee(r, auth), ppeHeld: Number(r.get('ppeHeld') ?? 0) })), count };
+};
+
+/** Items an employee holds now, as the profile's "PPE in use" counts them; shared by the list, cards and report. */
+export const ppeHeldSql = (employee: string) =>
+  `(SELECT COALESCE(SUM(a.quantity), 0) FROM allocations a WHERE a.employee_id = ${employee}.id AND a.status = 'active')`;
+const PPE_HELD = literal(ppeHeldSql('"Employee"'));
+/** Job types are stored as typed; lists and filters compare them trimmed and in capitals. */
+const JOB_TYPE = `UPPER(TRIM("Employee"."jobType"))`;
+
+/** Figures for the employees cards, within the user's scope and the chosen department or section. */
+export const employeeSummary = async (auth: AuthContext, q: { departmentId?: string; sectionId?: string }) => {
+  const where: WhereOptions[] = [employeeScope(auth)];
+  if (q.departmentId) where.push({ sectionId: { [Op.in]: inDepartment(q.departmentId) } });
+  if (q.sectionId) where.push({ sectionId: q.sectionId });
+  const [r] = (await models.Employee.findAll({
+    where: { [Op.and]: where },
+    attributes: [
+      [literal('COUNT(*)'), 'total'],
+      [literal('COUNT(*) FILTER (WHERE "Employee"."isActive")'), 'active'],
+      // Matches the list's status=inactive filter, which leaves out rows with no status
+      [literal('COUNT(*) FILTER (WHERE "Employee"."isActive" = FALSE)'), 'inactive'],
+      [literal(`COUNT(*) FILTER (WHERE "Employee"."isActive" AND ${JOB_TYPE} = 'NEC')`), 'nec'],
+      [literal(`COUNT(*) FILTER (WHERE "Employee"."isActive" AND ${JOB_TYPE} = 'SALARIED')`), 'salaried'],
+      [literal(`COUNT(*) FILTER (WHERE "Employee"."isActive" AND ${ppeHeldSql('"Employee"')} = 0)`), 'withoutPpe'],
+    ],
+    raw: true,
+  })) as unknown as Array<Record<string, string>>;
+  const n = (k: string) => Number(r?.[k] ?? 0);
+  return { total: n('total'), active: n('active'), inactive: n('inactive'), nec: n('nec'), salaried: n('salaried'), withoutPpe: n('withoutPpe') };
+};
+
+/** Job types in use, for the list filter. */
+export const employeeJobTypes = async (auth: AuthContext) => {
+  const rows = (await models.Employee.findAll({
+    where: { [Op.and]: [employeeScope(auth), sequelize.where(literal(JOB_TYPE), { [Op.ne]: '' })] },
+    attributes: [[literal(`DISTINCT ${JOB_TYPE}`), 'jobType']],
+    raw: true,
+  })) as unknown as Array<{ jobType: string }>;
+  return rows.map((r) => r.jobType).filter(Boolean).sort();
 };
 
 export const OPTIONS_LIMIT = 20;
@@ -348,11 +389,20 @@ export const onboardingEmail = (employee: EmployeeDto) => ({
   jobTitle: escapeHtml(employee.jobTitle?.name ?? employee.jobType),
 });
 
-const sendOnboarding = (employee: EmployeeDto) => {
-  if (!employee.email || config.env === 'test') return;
-  Promise.resolve(sendEmployeeOnboardedEmail(onboardingEmail(employee))).catch((err: unknown) =>
-    logger.warn({ err }, 'Employee onboarding email failed')
+export const sendOnboarding = (employee: EmployeeDto): Promise<void> => {
+  if (!employee.email || config.env === 'test') return Promise.resolve();
+  return Promise.resolve(sendEmployeeOnboardedEmail(onboardingEmail(employee))).then(
+    () => undefined,
+    (err: unknown) => logger.warn({ err }, 'Employee onboarding email failed')
   );
+};
+
+/** Emails each new employee who has an address, for imports (v1 "send onboarding emails"). */
+export const onboardEmployees = async (ids: string[]) => {
+  const rows = await models.Employee.findAll({ where: { id: ids }, include: INCLUDE });
+  // One at a time, so a large import does not flood the mail relay. Only the employee's own
+  // details go into the email, so the role passed here does not matter.
+  for (const row of rows) await sendOnboarding(toEmployee(row, { role: ROLES.ADMIN } as AuthContext));
 };
 
 export const createEmployee = async (auth: AuthContext, input: EmployeeInput) => {

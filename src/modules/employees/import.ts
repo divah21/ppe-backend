@@ -1,8 +1,9 @@
 import { Op, type Transaction } from 'sequelize';
 import { inTransaction, models, type Row } from '../../core/db';
 import { AppError } from '../../core/errors';
+import { logger } from '../../core/logger';
 import { importRow, type ImportRow } from './schemas';
-import { localToday } from './service';
+import { localToday, onboardEmployees } from './service';
 import { placementOf, recordTransfer } from './transfer';
 
 export interface ImportIssue {
@@ -195,14 +196,48 @@ const counts = (planned: Planned[]) => ({
   updated: planned.filter((p) => p.existing).length,
 });
 
-export const importEmployees = async (rows: Array<Record<string, unknown>>, dryRun: boolean, actorId: string | null = null) => {
+export interface ImportOptions {
+  dryRun: boolean;
+  skipExisting?: boolean;
+  sendOnboardingEmails?: boolean;
+}
+
+export const importEmployees = async (
+  rows: Array<Record<string, unknown>>,
+  { dryRun, skipExisting = false, sendOnboardingEmails = false }: ImportOptions,
+  actorId: string | null = null
+) => {
+  // "Skip existing" leaves those rows out entirely: their problems and warnings do not apply
+  const existing = skipExisting
+    ? new Set(
+        (
+          await models.Employee.findAll({
+            where: { worksNumber: rows.map(rawWorksNumber).filter((v): v is string => !!v) },
+            attributes: ['worksNumber'],
+          })
+        ).map((e) => e.worksNumber as string)
+      )
+    : new Set<string>();
+  const applies = (issue: ImportIssue) => !issue.worksNumber || !existing.has(issue.worksNumber);
+  const run = async (t?: Transaction) => {
+    const result = await plan(rows, t);
+    const planned = skipExisting ? result.planned.filter((p) => !p.existing) : result.planned;
+    return {
+      ...result,
+      planned,
+      errors: result.errors.filter(applies),
+      warnings: result.warnings.filter(applies),
+      skipped: skipExisting ? rows.filter((r) => existing.has(rawWorksNumber(r) ?? '')).length : 0,
+    };
+  };
+
   if (dryRun) {
-    const { errors, warnings, planned } = await plan(rows);
-    return { dryRun: true, valid: errors.length === 0, total: rows.length, ...counts(planned), errors, warnings };
+    const { errors, warnings, planned, skipped } = await run();
+    return { dryRun: true, valid: errors.length === 0, total: rows.length, ...counts(planned), skipped, errors, warnings };
   }
 
   return inTransaction(async (t) => {
-    const { errors, warnings, planned, sectionDepartment } = await plan(rows, t);
+    const { errors, warnings, planned, skipped, sectionDepartment } = await run(t);
     if (errors.length > 0) {
       throw new AppError('VALIDATION_FAILED', `${errors.length} problem${errors.length === 1 ? '' : 's'} found. Nothing was imported.`, {
         errors,
@@ -210,17 +245,24 @@ export const importEmployees = async (rows: Array<Record<string, unknown>>, dryR
     }
     const creates = planned.filter((p) => !p.existing);
     const updates = planned.filter((p) => p.existing);
-    if (creates.length > 0) {
-      await models.Employee.bulkCreate(
-        creates.map((p) => ({ dateJoined: localToday(), isActive: true, ...p.values })),
-        { transaction: t }
-      );
+    const created = creates.length
+      ? await models.Employee.bulkCreate(
+          creates.map((p) => ({ dateJoined: localToday(), isActive: true, ...p.values })),
+          { transaction: t }
+        )
+      : [];
+    const emailed = sendOnboardingEmails ? created.filter((e) => e.email).map((e) => e.id as string) : [];
+    if (emailed.length) {
+      // After the commit, so nobody is emailed about a row that was rolled back
+      t.afterCommit(() => {
+        onboardEmployees(emailed).catch((err: unknown) => logger.warn({ err }, 'Onboarding emails after import failed'));
+      });
     }
     for (const p of updates) {
       const from = placementOf(p.existing!);
       await p.existing!.update(p.values, { transaction: t });
       await recordTransfer(t, p.existing!.id, from, placementOf(p.existing!), { actorId, departments: sectionDepartment });
     }
-    return { dryRun: false, valid: true, total: rows.length, ...counts(planned), errors: [] as ImportIssue[], warnings };
+    return { dryRun: false, valid: true, total: rows.length, ...counts(planned), skipped, errors: [] as ImportIssue[], warnings };
   });
 };

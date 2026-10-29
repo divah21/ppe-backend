@@ -6,12 +6,14 @@ import { likeTerm } from '../../core/http';
 import { COST_SQL, RENEWAL_SQL, REQUEST_DEPARTMENT, REQUEST_SECTION, filterSql, scopeOf, scopeSql, type Scope } from '../dashboard/scope';
 import type {
   AllocationsReportQuery,
+  EmployeesReportQuery,
   MatrixReportQuery,
   PpeCardsReportQuery,
   RequestsReportQuery,
   StockReportQuery,
 } from './schemas';
 import { DATE_FMT, MONEY_FMT, type Cell, type Column, type Sheet } from './xlsx';
+import { ppeHeldSql } from '../employees/service';
 
 /** Larger exports time out in the browser and in Excel; ask for narrower filters instead. */
 export const MAX_ROWS = 50_000;
@@ -55,6 +57,13 @@ export const REPORTS = [
     title: 'Employee PPE cards',
     description: 'Each employee’s required PPE with last issue, next renewal and what is overdue.',
     filters: ['departmentId', 'sectionId', 'q'],
+    roles: ALL_ROLES,
+  },
+  {
+    key: 'employees',
+    title: 'Employees',
+    description: 'Employees with their section, job title, contact details and the PPE they hold.',
+    filters: ['departmentId', 'sectionId', 'q', 'status'],
     roles: ALL_ROLES,
   },
 ] as const;
@@ -638,4 +647,76 @@ export const reportOptions = async (auth: AuthContext) => {
     categories: categories.map((c) => c.category),
     locations: locations.map((l) => l.location),
   };
+};
+
+// ---------------------------------------------------------------------------------------------
+
+const EMPLOYEE_COLUMNS: Column[] = [
+  { header: 'Works no.', key: 'worksNumber', width: 12 },
+  { header: 'Employee', key: 'employee', width: 26 },
+  { header: 'Section', key: 'section', width: 22 },
+  { header: 'Department', key: 'department', width: 20 },
+  { header: 'Job title', key: 'jobTitle', width: 22 },
+  { header: 'Job type', key: 'jobType', width: 10 },
+  { header: 'Gender', key: 'gender', width: 9 },
+  { header: 'Email', key: 'email', width: 26 },
+  { header: 'Phone', key: 'phone', width: 14 },
+  { header: 'Date joined', key: 'joined', width: 13, numFmt: DATE_FMT },
+  { header: 'Status', key: 'status', width: 10, align: 'center' },
+  { header: 'PPE held', key: 'held', width: 10, align: 'right' },
+];
+
+/** The employee list, scoped as the Employees page is. */
+export const employeesReport = async (auth: AuthContext, q: EmployeesReportQuery): Promise<Sheet[]> => {
+  const scope = scopeOf(auth);
+  const f = filterSql(scope, q, 'sec.id', 'sec.department_id');
+  const parts = [f.sql];
+  // The same filters as the Employees list, so an export is what the list shows
+  if (q.status) parts.push(q.status === 'active' ? 'e."isActive"' : 'e."isActive" = FALSE');
+  if (q.jobTitleId) parts.push('e."jobTitleId" = :jobTitleId');
+  if (q.jobType) parts.push('UPPER(TRIM(e."jobType")) = UPPER(:jobType)');
+  if (q.q) parts.push(`(e."firstName" || ' ' || e."lastName" ILIKE :term OR e."worksNumber" ILIKE :term)`);
+  const rows = capped(
+    await select<Record<string, any>>(
+      `SELECT e."worksNumber" AS works_number, e."firstName" AS first_name, e."lastName" AS last_name, sec.name AS section,
+              d.name AS department, COALESCE(jt.name, e."jobTitle") AS job_title, e."jobType" AS job_type, e.gender, e.email,
+              e."phoneNumber" AS phone, e."dateJoined" AS joined, e."isActive" AS active,
+              ${ppeHeldSql('e')} AS held
+       FROM employees e
+       JOIN sections sec ON sec.id = e."sectionId"
+       LEFT JOIN departments d ON d.id = sec.department_id
+       LEFT JOIN job_titles jt ON jt.id = e."jobTitleId"
+       WHERE ${parts.join(' AND ')}
+       ORDER BY sec.name, e."lastName", e."firstName"
+       LIMIT :limit`,
+      { ...f.replacements, jobTitleId: q.jobTitleId, jobType: q.jobType, term: q.q ? likeTerm(q.q) : null, limit: MAX_ROWS + 1 }
+    )
+  );
+  const data = rows.map((r) => ({
+    worksNumber: r.works_number,
+    employee: fullName(r.first_name, r.last_name),
+    section: r.section,
+    department: r.department ?? '',
+    jobTitle: r.job_title ?? '',
+    jobType: r.job_type ?? '',
+    gender: r.gender ?? '',
+    email: r.email ?? '',
+    phone: r.phone ?? '',
+    joined: date(r.joined),
+    status: r.active ? 'Active' : 'Inactive',
+    held: Number(r.held),
+  }));
+  return [
+    {
+      name: 'Employees',
+      title: 'Employees Report',
+      infoLines: await describe(auth, scope, {
+        ...q,
+        extra: [q.status && `Status: ${q.status}`, q.jobType && `Job type: ${q.jobType}`].filter(Boolean) as string[],
+      }),
+      columns: EMPLOYEE_COLUMNS,
+      rows: data,
+      totalLabel: `Employees: ${data.length}   |   Active: ${data.filter((r) => r.status === 'Active').length}`,
+    },
+  ];
 };
