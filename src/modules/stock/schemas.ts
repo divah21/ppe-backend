@@ -50,7 +50,11 @@ export const stockCreateBody = z
   });
 export type StockCreateInput = z.infer<typeof stockCreateBody>;
 
+/** v1's adjustment reasons, kept with the free-text note */
+export const ADJUST_REASONS = ['restock', 'damage', 'return', 'expired', 'theft', 'stocktake', 'transfer', 'correction', 'other'] as const;
+
 export const adjustBody = z.object({
+  reasonCode: z.enum(ADJUST_REASONS).optional(),
   delta: z
     .number()
     .int('Enter a whole number')
@@ -69,11 +73,49 @@ export const bulkTopupBody = z.object({
         stockId: z.string().uuid(),
         quantity: z.number().int('Enter a whole number').min(1, 'Enter at least 1').max(1_000_000),
         expectedQuantity: z.number().int().min(0).optional(),
+        /** Overrides the batch reason for this line (top-up from a spreadsheet) */
+        reason: z.string().trim().max(500).optional(),
       })
     )
     .min(1, 'Choose at least one stock line')
     .max(200)
     .refine((items) => new Set(items.map((i) => i.stockId)).size === items.length, 'Each stock line can appear only once'),
   reason: z.string().trim().max(500).optional().transform((v) => v || 'Bulk top-up'),
+  /** Check the lines exist and save nothing */
+  dryRun: z.boolean().default(false),
 });
 export type BulkTopupInput = z.infer<typeof bulkTopupBody>;
+
+export const stockUpdateBody = z
+  .object({
+    size: optionalText(50),
+    color: optionalText(50),
+    gender: z.enum(GENDERS).nullish().transform((v) => v ?? null),
+    location: optionalText(100).transform((v) => v ?? 'Main Store'),
+    binLocation: optionalText(50),
+    minLevel: level.nullish(),
+    maxLevel: level.nullish(),
+    reorderPoint: level.nullish(),
+    unitPriceUSD: money,
+    supplier: optionalText(255),
+    batchNumber: optionalText(100),
+    expiryDate: z.coerce.date().nullish(),
+    stockAccount: optionalText(50),
+    notes: optionalText(2000),
+  })
+  .refine((v) => v.maxLevel == null || v.minLevel == null || v.maxLevel >= v.minLevel, {
+    path: ['maxLevel'],
+    message: 'Maximum level must be at least the minimum level',
+  });
+export type StockUpdateInput = z.infer<typeof stockUpdateBody>;
+
+export const stockImportBody = z.object({
+  dryRun: z.boolean().default(true),
+  /** Replace the quantity and price of lines that already exist, instead of adding to them */
+  updateExisting: z.boolean().default(false),
+  // Each row is checked on its own in import.ts, so problems are reported per row
+  rows: z.array(z.record(z.unknown())).min(1, 'The file has no rows').max(2000, 'Upload at most 2000 rows at a time'),
+});
+export type StockImportInput = z.infer<typeof stockImportBody>;
+
+export const shortfallQuery = z.object({ q: z.string().trim().max(100).optional() });

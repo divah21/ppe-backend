@@ -2,7 +2,7 @@ import { Op, QueryTypes, literal, type Order, type Transaction, type WhereOption
 import { inTransaction, models, sequelize, type Row } from '../../core/db';
 import { AppError, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
-import type { AdjustInput, BulkTopupInput, StockCreateInput, StockListQuery } from './schemas';
+import type { AdjustInput, BulkTopupInput, StockCreateInput, StockListQuery, StockUpdateInput } from './schemas';
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const { deductStock, restoreStock } = require('../../../helpers/stock_helper') as {
@@ -367,12 +367,165 @@ export const bulkTopup = async ({ items }: BulkTopupInput) =>
 
     const now = new Date();
     const results = [];
-    for (const { stockId, quantity } of items) {
+    for (const { stockId, quantity, reason } of items) {
       const row = found.get(stockId)!;
       const next = await restoreStock(stockId, quantity, { transaction: t });
       if (next === null) throw notFound('Stock line');
       await models.Stock.update({ lastRestocked: now }, { where: { id: stockId }, transaction: t });
-      results.push({ stockId, previousQuantity: Number(row.quantity), addedQuantity: quantity, newQuantity: next });
+      results.push({ stockId, previousQuantity: Number(row.quantity), addedQuantity: quantity, newQuantity: next, reason });
     }
     return results;
   });
+
+/** Changes a line's details; its quantity only moves through receipts, adjustments and issues. */
+export const updateStock = async (id: string, input: StockUpdateInput) => {
+  await inTransaction(async (t) => {
+    const row = await models.Stock.findByPk(id, { include: [{ model: models.PPEItem, as: 'ppeItem' }], transaction: t, lock: { level: t.LOCK.UPDATE, of: models.Stock } });
+    if (!row) throw notFound('Stock line');
+    const sized = await validateRequestedSize(row.ppeItem, input.size);
+    if (!sized.valid) throw fieldError('size', sized.message ?? 'Choose a valid size');
+    // Becoming the same variant and batch as another line would split one stock in two
+    const twin = await models.Stock.findOne({
+      where: {
+        id: { [Op.ne]: id },
+        ppeItemId: row.ppeItemId,
+        size: input.size,
+        color: input.color,
+        gender: input.gender,
+        location: input.location,
+        batchNumber: input.batchNumber,
+      },
+      attributes: ['id'],
+      transaction: t,
+    });
+    if (twin) throw new AppError('CONFLICT', 'Another stock line already has this size, colour, gender, location and batch. Adjust that line instead.');
+    await row.update(input, { transaction: t });
+  });
+  return getStock(id);
+};
+
+/**
+ * Removes a line entered by mistake. One that PPE was issued from, or that a failure report
+ * points to, is kept for history and adjusted to zero instead.
+ */
+export const deleteStock = async (id: string) =>
+  inTransaction(async (t) => {
+    const row = await lockStock(id, t);
+    if (!row) throw notFound('Stock line');
+    const [issued, reports] = await Promise.all([
+      models.Allocation.count({ where: { stockId: id }, transaction: t }),
+      models.FailureReport.count({ where: { [Op.or]: [{ stockId: id }, { replacementStockId: id }] }, transaction: t }),
+    ]);
+    if (issued || reports) {
+      const why = issued ? `PPE has been issued from this line ${issued} time${issued === 1 ? '' : 's'}` : 'Failure reports refer to this line';
+      throw new AppError('CONFLICT', `${why}, so it is kept for history. Adjust it to zero instead.`);
+    }
+    await row.destroy({ transaction: t });
+    return { quantity: Number(row.quantity) };
+  });
+
+/** Which lines of a top-up file no longer exist, without saving anything. */
+export const checkTopup = async ({ items }: BulkTopupInput) => {
+  const ids = items.map((i) => i.stockId);
+  const found = new Set((await models.Stock.findAll({ where: { id: { [Op.in]: ids } }, attributes: ['id'] })).map((r) => r.id as string));
+  return { missing: ids.filter((id) => !found.has(id)) };
+};
+
+/** Receipts, adjustments and issues on one line, newest first, from the audit log and allocations. */
+export const stockMovements = async (id: string) => {
+  if (!(await models.Stock.count({ where: { id } }))) throw notFound('Stock line');
+  const rows = await sequelize.query<{ kind: string; at: Date; who: string | null; change: string | null; balance: string | null; note: string | null; ref: string | null }>(
+    `SELECT l.action AS kind, l.created_at AS at, u.username AS who,
+            COALESCE(l.meta->>'delta', l.meta->>'quantity', l.changes->>'delta', l.changes->>'quantity') AS change,
+            COALESCE(l.meta->>'newQuantity', l.changes->>'newQuantity') AS balance,
+            COALESCE(l.meta->>'reason', l.changes->>'reason') AS note, NULL AS ref
+     FROM audit_logs l LEFT JOIN users u ON u.id = l.user_id
+     WHERE l.entity_type = 'Stock' AND l.entity_id = :id AND l.action LIKE 'STOCK%'
+     UNION ALL
+     SELECT 'ISSUE', a.created_at, u.username, (-a.quantity)::text, NULL,
+            concat(e."firstName", ' ', e."lastName", ' (', e."worksNumber", ')'), a.id::text
+     FROM allocations a
+     LEFT JOIN employees e ON e.id = a.employee_id
+     LEFT JOIN users u ON u.id = a.issued_by_id
+     WHERE a.stock_id = :id
+     ORDER BY at DESC
+     LIMIT 100`,
+    { replacements: { id }, type: QueryTypes.SELECT }
+  );
+  return rows.map((r) => ({
+    kind: r.kind,
+    at: new Date(r.at).toISOString(),
+    by: r.who,
+    change: r.change === null ? null : Number(r.change),
+    balance: r.balance === null ? null : Number(r.balance),
+    note: r.note,
+  }));
+};
+
+// Approved by everyone and waiting for stores to issue: demand that is certain
+const SHORT_STATUSES = ['approved', 'partially-fulfilled'];
+
+/** What approved requests still need against stock on hand, per item and size (v1 "out of stock" reorder list). */
+export const stockShortfalls = async (q?: string) => {
+  const filter = q ? 'AND (p.name ILIKE :q OR p.item_code ILIKE :q)' : '';
+  const replacements = { statuses: SHORT_STATUSES, q: q ? likeTerm(q) : undefined };
+  const [rows, [blocked]] = await Promise.all([
+    sequelize.query<{
+      ppe_item_id: string;
+      name: string;
+      item_code: string | null;
+      category: string | null;
+      size: string | null;
+      needed: string;
+      requests: string;
+      in_stock: string;
+    }>(
+      `WITH need AS (
+         SELECT ri.ppe_item_id, NULLIF(TRIM(ri.size), '') AS size,
+                SUM(GREATEST(ri.quantity - COALESCE(ri.approved_quantity, 0), 0)) AS needed,
+                COUNT(DISTINCT r.id) AS requests
+         FROM request_items ri JOIN requests r ON r.id = ri.request_id
+         WHERE r.status::text IN (:statuses)
+         GROUP BY 1, 2
+       )
+       SELECT n.ppe_item_id, p.name, p.item_code, p.category, n.size, n.needed, n.requests, s.in_stock
+       FROM need n
+       JOIN ppe_items p ON p.id = n.ppe_item_id
+       CROSS JOIN LATERAL (
+         SELECT COALESCE(SUM(st.quantity), 0) AS in_stock FROM stocks st
+         WHERE st.ppe_item_id = n.ppe_item_id AND (n.size IS NULL OR LOWER(COALESCE(st.size, '')) = LOWER(n.size))
+       ) s
+       WHERE n.needed > s.in_stock ${filter}
+       ORDER BY n.needed - s.in_stock DESC, p.name`,
+      { replacements, type: QueryTypes.SELECT }
+    ),
+    sequelize.query<{ n: string }>(
+      `SELECT COUNT(DISTINCT r.id) AS n
+       FROM requests r JOIN request_items ri ON ri.request_id = r.id JOIN ppe_items p ON p.id = ri.ppe_item_id
+       WHERE r.status::text IN (:statuses) AND ri.quantity > COALESCE(ri.approved_quantity, 0) ${filter}
+         AND COALESCE((SELECT SUM(st.quantity) FROM stocks st
+                       WHERE st.ppe_item_id = ri.ppe_item_id
+                         AND (NULLIF(TRIM(ri.size), '') IS NULL OR LOWER(COALESCE(st.size, '')) = LOWER(TRIM(ri.size)))), 0)
+             < ri.quantity - COALESCE(ri.approved_quantity, 0)`,
+      { replacements, type: QueryTypes.SELECT }
+    ),
+  ]);
+  return {
+    blockedRequests: Number(blocked?.n ?? 0),
+    rows: rows.map((r) => {
+      const needed = Number(r.needed);
+      const inStock = Number(r.in_stock);
+      return {
+        ppeItemId: r.ppe_item_id,
+        name: r.name,
+        itemCode: r.item_code,
+        category: r.category,
+        size: r.size,
+        needed,
+        inStock,
+        shortBy: needed - inStock,
+        requests: Number(r.requests),
+      };
+    }),
+  };
+};
