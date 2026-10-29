@@ -8,6 +8,7 @@ import {
   allocationsReportQuery,
   employeesReportQuery,
   failuresReportQuery,
+  insightsQuery,
   matrixReportQuery,
   overviewReportQuery,
   ppeCardsReportQuery,
@@ -25,12 +26,14 @@ import {
   matrixReport,
   ppeCardsReport,
   reportOptions,
+  ALL_ROLES,
   reportRoles,
   requestsReport,
   stockReport,
   type ReportKey,
 } from './service';
 import { overviewReport, projectedCostReport, spendingReport } from './finance';
+import { reportInsights } from './insights';
 import { streamWorkbook, type Sheet } from './xlsx';
 
 const router = Router();
@@ -45,6 +48,12 @@ router.get(
   '/options',
   requireRole(...reportRoles('allocations')),
   route(async (req, res) => ok(res, await reportOptions(getAuth(req))))
+);
+
+router.get(
+  '/insights',
+  requireRole(...ALL_ROLES),
+  route(async (req, res) => ok(res, await reportInsights(getAuth(req), parse(insightsQuery, req.query))))
 );
 
 const exportRoute = <S extends ZodTypeAny>(

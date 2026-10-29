@@ -22,9 +22,9 @@ export const MAX_ROWS = 50_000;
 const WHOLE_MINE: readonly Role[] = [ROLES.ADMIN, ROLES.STORES, ROLES.SHEQ];
 const MANAGERS: readonly Role[] = [...WHOLE_MINE, ROLES.HOD, ROLES.DEPARTMENT_REP];
 // Section reps export their own section's issues, requests and PPE cards, as they could in v1
-const ALL_ROLES: readonly Role[] = [...MANAGERS, ROLES.SECTION_REP];
+export const ALL_ROLES: readonly Role[] = [...MANAGERS, ROLES.SECTION_REP];
 // The same people who see spend and the forecast on screen
-const SPEND_ROLES: readonly Role[] = [ROLES.ADMIN, ROLES.STORES, ROLES.HOD];
+export const SPEND_ROLES: readonly Role[] = [ROLES.ADMIN, ROLES.STORES, ROLES.HOD];
 
 export const REPORTS = [
   {
