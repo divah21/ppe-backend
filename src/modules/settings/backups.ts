@@ -66,3 +66,38 @@ export const resolveBackup = async (filename: string) => {
   if (!BACKUP_FILENAME.test(filename) || path.dirname(file) !== dir || !fs.existsSync(file)) throw notFound('Backup');
   return file;
 };
+
+/** Deletes one backup file; the newest is always kept so there is something to restore from. */
+// While a backup runs its unfinished file is the newest, so housekeeping waits for it
+const assertIdle = () => {
+  if (running) throw conflict('A backup is running. Try again when it finishes.');
+};
+
+export const deleteBackup = async (req: Request, filename: string) => {
+  assertIdle();
+  const file = await resolveBackup(filename);
+  const [newest] = await listBackups();
+  if (newest?.filename === filename) throw conflict('This is the newest backup. Create a new one before deleting it.');
+  await fs.promises.unlink(file);
+  await audit(req, 'BACKUP_DELETE', 'Backup', null, { filename });
+};
+
+/** Deletes backups older than the retention setting (v1 cleanup), always keeping the newest. */
+export const cleanupBackups = async (req: Request) => {
+  assertIdle();
+  const row = await models.Setting.findOne({ where: { category: 'database', key: 'backupRetention' } });
+  const days = Math.max(1, Number(row?.value) || 30);
+  const cutoff = Date.now() - days * 86_400_000;
+  const [newest, ...rest] = await listBackups();
+  const dir = await backupPath();
+  const old = rest.filter((b) => Date.parse(b.createdAt) < cutoff);
+  let deleted = 0;
+  for (const b of old) {
+    await fs.promises
+      .unlink(path.join(dir, b.filename))
+      .then(() => (deleted += 1))
+      .catch((err) => logger.warn({ err, filename: b.filename }, 'Old backup could not be deleted'));
+  }
+  if (deleted) await audit(req, 'BACKUP_CLEANUP', 'Backup', null, { deleted, retentionDays: days, kept: newest?.filename ?? null });
+  return { deleted, retentionDays: days };
+};

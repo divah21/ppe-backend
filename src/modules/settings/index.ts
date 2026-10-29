@@ -2,7 +2,8 @@ import { Router } from 'express';
 import { ROLES, authenticate, getAuth, requireRole } from '../../core/auth';
 import { ok, paged, pageWindow, parse, route } from '../../core/http';
 import { defineModule } from '../../core/module';
-import { backupRunning, createBackup, listBackups, resolveBackup } from './backups';
+import { backupRunning, cleanupBackups, createBackup, deleteBackup, listBackups, resolveBackup } from './backups';
+import { databaseStats } from './database';
 import { backupListQuery, backupParam, categoryParam } from './schemas';
 import { getCategory, listSettings, ppeItemOptions, updateCategory } from './service';
 
@@ -46,6 +47,19 @@ router.post(
   route(async (req, res) => ok(res, await createBackup(req), 201))
 );
 
+router.post(
+  '/backups/cleanup',
+  route(async (req, res) => ok(res, await cleanupBackups(req)))
+);
+
+router.delete(
+  '/backups/:filename',
+  route(async (req, res) => {
+    await deleteBackup(req, parse(backupParam, req.params).filename);
+    res.status(204).end();
+  })
+);
+
 router.get(
   '/backups/:filename',
   route(async (req, res) => {
@@ -55,6 +69,9 @@ router.get(
     await new Promise<void>((resolve, reject) => res.download(file, filename, (err) => (err && !res.headersSent ? reject(err) : resolve())));
   })
 );
+
+// Not /database: that path is the database settings group
+router.get('/database-stats', route(async (_req, res) => ok(res, await databaseStats())));
 
 router.get(
   '/allocation/item-options',
