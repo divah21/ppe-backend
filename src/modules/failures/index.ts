@@ -3,10 +3,12 @@ import { ROLES, authenticate, getAuth, requireRole } from '../../core/auth';
 import { audit } from '../../core/audit';
 import { ok, paged, parse, route, uuidParam } from '../../core/http';
 import { defineModule } from '../../core/module';
+import { failureAnalytics } from './analytics';
 import { ACTION_ROLES } from './policy';
 import {
   allocationOptionsQuery,
   failureBody,
+  failureAnalyticsQuery,
   failureListQuery,
   optionsQuery,
   replaceBody,
@@ -40,6 +42,11 @@ router.get(
     const { rows, count } = await listFailures(getAuth(req), q);
     return paged(res, rows, count, q);
   })
+);
+
+router.get(
+  '/analytics',
+  route(async (req, res) => ok(res, await failureAnalytics(getAuth(req), parse(failureAnalyticsQuery, req.query))))
 );
 
 router.get(

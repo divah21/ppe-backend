@@ -18,8 +18,18 @@ export const failureListQuery = listQuery(['reportedDate', 'failureDate', 'sever
   sectionId: z.string().uuid().optional(),
   from: isoDate.optional(),
   to: isoDate.optional(),
+  /** Where it happened (v1 "environment") and the brand, matched as typed */
+  observedAt: z.string().trim().max(100).optional(),
+  brand: z.string().trim().max(100).optional(),
 });
 export type FailureListQuery = z.infer<typeof failureListQuery>;
+
+export const failureAnalyticsQuery = z.object({
+  departmentId: z.string().uuid().optional(),
+  sectionId: z.string().uuid().optional(),
+  months: z.coerce.number().int().min(3).max(36).default(12),
+});
+export type FailureAnalyticsQuery = z.infer<typeof failureAnalyticsQuery>;
 
 const optionalText = (max: number) =>
   z

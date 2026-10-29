@@ -52,6 +52,8 @@ export const toFailureSummary = (row: Row, auth: AuthContext) => ({
   description: row.description as string,
   reportedDate: iso(row.reportedDate),
   failureDate: iso(row.failureDate),
+  observedAt: (row.observedAt as string | null) ?? null,
+  brand: (row.brand as string | null) ?? null,
   employee: toEmployee(row.employee),
   ppeItem: row.ppeItem
     ? { id: row.ppeItem.id as string, name: row.ppeItem.name as string, itemCode: (row.ppeItem.itemCode as string | null) ?? null }
@@ -76,6 +78,8 @@ export const listFailures = async (auth: AuthContext, q: FailureListQuery) => {
   if (q.ppeItemId) where.push({ ppeItemId: q.ppeItemId });
   if (q.from) where.push({ reportedDate: { [Op.gte]: new Date(`${q.from}T00:00:00`) } });
   if (q.to) where.push({ reportedDate: { [Op.lte]: new Date(`${q.to}T23:59:59.999`) } });
+  if (q.observedAt) where.push({ observedAt: { [Op.iLike]: likeTerm(q.observedAt) } });
+  if (q.brand) where.push({ brand: { [Op.iLike]: likeTerm(q.brand) } });
   if (q.q) {
     const term = likeTerm(q.q);
     where.push({
