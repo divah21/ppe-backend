@@ -12,7 +12,7 @@ const { deductStock } = require('../../../helpers/stock_helper') as {
 };
 
 const REJECTED = 'Rejected by SHEQ';
-const OPEN_STATUSES: FailureStatus[] = ['pending-sheq-review', 'sheq-approved', 'stores-processing'];
+export const OPEN_STATUSES: FailureStatus[] = ['pending-sheq-review', 'sheq-approved', 'stores-processing'];
 const CLOSED_ALLOCATION = new Set(['replaced', 'returned']);
 
 /** The short reference v1 writes into allocation notes, e.g. "Failure Report #1a2b3c4d". */

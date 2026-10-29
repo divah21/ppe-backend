@@ -20,13 +20,18 @@ describe('GET /api/v2/dashboard/summary', () => {
     expect(res.status).toBe(200);
     const d = res.body.data;
     expect(d.scope).toEqual({ kind: 'department', id: w.mine.department.id, name: w.mine.department.name });
-    expect(d.kpis).toEqual({
+    expect(d.kpis).toMatchObject({
       awaitingMyAction: 1,
       openRequests: 2,
       issuedThisPeriod: 2,
       spendThisPeriod: 40,
       lowStock: null,
       renewalsDue: 1,
+      renewalsOverdue: 0,
+      fulfilledThisPeriod: 0,
+      employees: 1,
+      stockValue: null,
+      outOfStock: null,
     });
     expect(d.requestsPerWeek).toHaveLength(8);
     expect(d.requestsPerWeek.at(-1).count).toBe(2);
@@ -94,6 +99,38 @@ describe('GET /api/v2/dashboard/summary', () => {
     expect(res.body.data.scope.kind).not.toBe('mine');
     expect(res.body.data.kpis).toMatchObject({ awaitingMyAction: 0, openRequests: 0, issuedThisPeriod: 0, spendThisPeriod: 0, lowStock: null, renewalsDue: 0 });
     expect(res.body.data.spendBreakdown.rows).toEqual([]);
+  });
+
+  it('lists the requests waiting on the user, oldest first, and the latest in scope', async () => {
+    const hod = (await (await w.agent(w.users.hod)).get(URL)).body.data;
+    expect(hod.actionQueue.map((r: { id: string }) => r.id)).toEqual([w.requests.hodReview.id]);
+    expect(hod.actionQueue[0]).toMatchObject({ status: 'hod-review', sectionName: w.mine.section.name, itemCount: expect.any(Number) });
+    expect(hod.recentRequests.map((r: { id: string }) => r.id)).toEqual(
+      expect.arrayContaining([w.requests.pending.id, w.requests.hodReview.id])
+    );
+    expect(hod.recentRequests.map((r: { id: string }) => r.id)).not.toContain(w.requests.storesReview.id);
+    expect(hod.failures).toBeNull();
+    expect(hod.forecastShortfall).toBeNull();
+    expect(hod.recentActivity).toBeNull();
+
+    const sectionRep = (await (await w.agent(w.users.sectionRep)).get(URL)).body.data;
+    expect(sectionRep.actionQueue.map((r: { id: string }) => r.id)).toEqual([w.requests.pending.id]);
+    expect(sectionRep.kpis.budget).toBeNull();
+  });
+
+  it('gives stock roles stock value, failures and the forecast shortfall, and admins recent activity', async () => {
+    const stores = (await (await w.agent(w.users.stores)).get(URL)).body.data;
+    expect(stores.kpis.stockValue).toEqual(expect.any(Number));
+    expect(stores.kpis.outOfStock).toEqual(expect.any(Number));
+    expect(Object.keys(stores.failures.bySeverity)).toEqual(['critical', 'high', 'medium', 'low']);
+    expect(stores.failures.recent.length).toBeLessThanOrEqual(5);
+    expect(Array.isArray(stores.forecastShortfall)).toBe(true);
+    for (const r of stores.forecastShortfall) expect(r.shortage).toBeGreaterThan(0);
+    expect(stores.recentActivity).toBeNull();
+
+    const admin = (await (await w.agent(w.users.admin)).get(URL)).body.data;
+    expect(Array.isArray(admin.recentActivity)).toBe(true);
+    for (const a of admin.recentActivity) expect(a.action).not.toBe('LOGIN');
   });
 
   it('rejects an unknown period', async () => {

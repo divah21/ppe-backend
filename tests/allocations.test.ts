@@ -165,6 +165,12 @@ describe('GET /api/v2/allocations/renewals-due', () => {
     expect(week.body.meta.total).toBe(0);
   });
 
+  it('can show only overdue items', async () => {
+    const overdue = await stores.get('/api/v2/allocations/renewals-due').query({ q: fx.tag, onlyOverdue: 'true' });
+    expect(overdue.body.data.map((r: { employee: { id: string } }) => r.employee.id)).toEqual([empA2.id]);
+    expect(overdue.body.meta.summary).toMatchObject({ items: 1, overdue: 1 });
+  });
+
   it('pages and sorts by employee', async () => {
     const res = await stores
       .get('/api/v2/allocations/renewals-due')

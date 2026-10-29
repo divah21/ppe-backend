@@ -46,6 +46,10 @@ export const renewalsQuery = listQuery(['dueDate', 'employee', 'items'], {
   ...scopeFilters,
   days: z.coerce.number().int().min(1).max(365).default(30),
   includeOverdue: flag,
+  onlyOverdue: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
 });
 
 export type RenewalsQuery = z.infer<typeof renewalsQuery>;

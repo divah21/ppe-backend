@@ -69,7 +69,7 @@ interface ForecastRow {
   price: string | null;
 }
 
-export const listForecast = async (auth: AuthContext, q: ForecastQuery) => {
+export const listForecast = async (auth: AuthContext, q: ForecastQuery, { count = true } = {}) => {
   const { sql, replacements } = forecastSql(auth, q);
   const dir = q.order === 'asc' ? 'ASC' : 'DESC';
   const order = q.sort ? `${SORT[q.sort]} ${dir}` : 'shortage DESC, required DESC';
@@ -79,10 +79,13 @@ export const listForecast = async (auth: AuthContext, q: ForecastQuery) => {
     `${sql} SELECT * FROM per_item ${search} ORDER BY ${order}, name ASC, id ASC LIMIT :limit OFFSET :offset`,
     { type: QueryTypes.SELECT, replacements: { ...replacements, q: term, ...pageWindow(q) } }
   );
-  const [c] = await sequelize.query<{ n: string }>(`${sql} SELECT COUNT(*) AS n FROM per_item ${search}`, {
-    type: QueryTypes.SELECT,
-    replacements: { ...replacements, q: term },
-  });
+  // The count re-runs the whole forecast; callers that only show the top rows skip it
+  const [c] = count
+    ? await sequelize.query<{ n: string }>(`${sql} SELECT COUNT(*) AS n FROM per_item ${search}`, {
+        type: QueryTypes.SELECT,
+        replacements: { ...replacements, q: term },
+      })
+    : [{ n: String(rows.length) }];
   const months = q.days / 30;
   return {
     rows: rows.map((r) => {
