@@ -32,6 +32,7 @@ export const allocationsReportQuery = z
     departmentId: id,
     sectionId: id,
     employeeId: id,
+    ppeItemId: id,
     q: text,
     status: z.enum(ALLOCATION_STATUSES).optional(),
     ...range,

@@ -18,6 +18,8 @@ export const MAX_ROWS = 50_000;
 
 const WHOLE_MINE: readonly Role[] = [ROLES.ADMIN, ROLES.STORES, ROLES.SHEQ];
 const MANAGERS: readonly Role[] = [...WHOLE_MINE, ROLES.HOD, ROLES.DEPARTMENT_REP];
+// Section reps export their own section's issues, requests and PPE cards, as they could in v1
+const ALL_ROLES: readonly Role[] = [...MANAGERS, ROLES.SECTION_REP];
 
 export const REPORTS = [
   {
@@ -25,14 +27,14 @@ export const REPORTS = [
     title: 'Allocations',
     description: 'PPE issued to each employee with dates, sizes, renewals and cost.',
     filters: ['departmentId', 'sectionId', 'q', 'status', 'from', 'to'],
-    roles: MANAGERS,
+    roles: ALL_ROLES,
   },
   {
     key: 'requests',
     title: 'Requests',
     description: 'PPE requests with their items, status and who raised them.',
     filters: ['departmentId', 'sectionId', 'status', 'requestType', 'from', 'to'],
-    roles: MANAGERS,
+    roles: ALL_ROLES,
   },
   {
     key: 'stock',
@@ -53,7 +55,7 @@ export const REPORTS = [
     title: 'Employee PPE cards',
     description: 'Each employee’s required PPE with last issue, next renewal and what is overdue.',
     filters: ['departmentId', 'sectionId', 'q'],
-    roles: MANAGERS,
+    roles: ALL_ROLES,
   },
 ] as const;
 
@@ -161,7 +163,9 @@ export const allocationsReport = async (auth: AuthContext, q: AllocationsReportQ
   const parts = [f.sql];
   if (q.employeeId) parts.push('e.id = :employeeId');
   if (q.status) parts.push('a.status::text = :status');
-  if (q.q) parts.push(`(e."firstName" || ' ' || e."lastName" ILIKE :term OR e."worksNumber" ILIKE :term)`);
+  if (q.ppeItemId) parts.push('a.ppe_item_id = :ppeItemId');
+  // Same search as the Issued list: employee, works number, item name or code
+  if (q.q) parts.push(`(e."firstName" || ' ' || e."lastName" ILIKE :term OR e."worksNumber" ILIKE :term OR p.name ILIKE :term OR p.item_code ILIKE :term)`);
   dateRangeSql('a.issue_date', q, parts);
 
   const rows = capped(

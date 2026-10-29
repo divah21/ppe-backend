@@ -42,8 +42,9 @@ export const paged = (
   res: Response,
   rows: unknown[],
   total: number,
-  { page, pageSize }: { page: number; pageSize: number }
-) => res.json({ data: rows, meta: { page, pageSize, total, pageCount: Math.max(1, Math.ceil(total / pageSize)) } });
+  { page, pageSize }: { page: number; pageSize: number },
+  extra: Record<string, unknown> = {}
+) => res.json({ data: rows, meta: { page, pageSize, total, pageCount: Math.max(1, Math.ceil(total / pageSize)), ...extra } });
 
 /** Escapes LIKE wildcards so user search text matches literally. */
 export const likeTerm = (q: string) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;

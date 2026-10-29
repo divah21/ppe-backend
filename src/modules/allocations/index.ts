@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { allocationSummary, compliance, employeeSummaries, importTemplate } from './insights';
 import { audit, skipAudit } from '../../core/audit';
 import { ROLES, authenticate, getAuth, requireRole } from '../../core/auth';
 import { ok, paged, parse, route, uuidParam } from '../../core/http';
@@ -6,12 +7,15 @@ import { defineModule } from '../../core/module';
 import { importAllocations } from './import';
 import {
   allocationListQuery,
+  complianceQuery,
   employeeHistoryQuery,
+  employeeSummaryQuery,
   employeeParam,
   importBody,
   renewBody,
   renewalsQuery,
   returnBody,
+  templateQuery,
 } from './schemas';
 import {
   employeeHistory,
@@ -33,6 +37,37 @@ router.get(
     const { rows, count } = await listAllocations(getAuth(req), q);
     return paged(res, rows, count, q);
   })
+);
+
+router.get(
+  '/summary',
+  route(async (req, res) =>
+    ok(res, await allocationSummary(getAuth(req), parse(allocationListQuery, req.query), { activeOnly: req.query.activeOnly === 'true' }))
+  )
+);
+
+router.get(
+  '/employees',
+  route(async (req, res) => {
+    const q = parse(employeeSummaryQuery, req.query);
+    const { rows, count } = await employeeSummaries(getAuth(req), q);
+    return paged(res, rows, count, q);
+  })
+);
+
+router.get(
+  '/compliance',
+  route(async (req, res) => {
+    const q = parse(complianceQuery, req.query);
+    const { rows, count, summary } = await compliance(getAuth(req), q);
+    return paged(res, rows, count, q, { summary });
+  })
+);
+
+router.get(
+  '/import/template',
+  requireRole(ROLES.STORES),
+  route(async (req, res) => ok(res, await importTemplate(getAuth(req), parse(templateQuery, req.query))))
 );
 
 router.get(
