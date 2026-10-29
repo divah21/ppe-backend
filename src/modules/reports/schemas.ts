@@ -95,6 +95,17 @@ export const ppeCardsReportQuery = z.object({
   q: text,
 });
 
+export const spendingReportQuery = z
+  .object({ departmentId: id, sectionId: id, ...range })
+  .refine(validRange, RANGE_MESSAGE);
+export type SpendingReportQuery = z.infer<typeof spendingReportQuery>;
+
+export const projectedCostReportQuery = z.object({ departmentId: id, sectionId: id });
+export type ProjectedCostReportQuery = z.infer<typeof projectedCostReportQuery>;
+
+export const overviewReportQuery = z.object({ period: z.enum(['month', 'quarter', 'year']).default('month') });
+export type OverviewReportQuery = z.infer<typeof overviewReportQuery>;
+
 export type AllocationsReportQuery = z.infer<typeof allocationsReportQuery>;
 export type RequestsReportQuery = z.infer<typeof requestsReportQuery>;
 export type StockReportQuery = z.infer<typeof stockReportQuery>;

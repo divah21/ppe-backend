@@ -60,7 +60,7 @@ const GROUPS = {
 const SORT = { spent: 'spent', label: 'label', allocationCount: 'allocations' } as const;
 
 /** Actual PPE spend from issued allocations, grouped by department, section, item or month. */
-export const listSpending = async (auth: AuthContext, q: SpendingQuery) => {
+export const listSpending = async (auth: AuthContext, q: SpendingQuery, window = pageWindow(q)) => {
   const { sql, replacements } = base(auth, q);
   const g = GROUPS[q.groupBy];
   const dir = q.order === 'asc' ? 'ASC' : 'DESC';
@@ -78,7 +78,7 @@ export const listSpending = async (auth: AuthContext, q: SpendingQuery) => {
      SELECT ${g.key} AS key, ${g.label} AS label, ${g.sub} AS sublabel, SUM(quantity) AS quantity,
             COUNT(*) AS allocations, COUNT(DISTINCT employee_id) AS employees, SUM(cost) AS spent
      FROM base GROUP BY 1 ORDER BY ${order}, label ASC, key ASC NULLS LAST LIMIT :limit OFFSET :offset`,
-    { type: QueryTypes.SELECT, replacements: { ...replacements, ...pageWindow(q) } }
+    { type: QueryTypes.SELECT, replacements: { ...replacements, ...window } }
   );
   const [c] = await sequelize.query<{ n: string }>(`${sql} SELECT COUNT(DISTINCT ${g.key}) + MAX(CASE WHEN ${g.key} IS NULL THEN 1 ELSE 0 END) AS n FROM base`, {
     type: QueryTypes.SELECT,

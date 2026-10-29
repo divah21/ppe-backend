@@ -49,9 +49,9 @@ const download = async (agent: Agent, path: string, query: Record<string, string
 describe('GET /api/v2/reports', () => {
   it('lists the reports each role may run', async () => {
     const keys = async (agent: Agent) => (await agent.get('/api/v2/reports')).body.data.map((r: { key: string }) => r.key);
-    expect(await keys(stores)).toEqual(['allocations', 'requests', 'stock', 'matrix', 'ppe-cards', 'employees', 'failures']);
-    expect(await keys(hod)).toEqual(['allocations', 'requests', 'ppe-cards', 'employees', 'failures']);
-    expect(await keys(sectionRep)).toEqual(['allocations', 'requests', 'ppe-cards', 'employees', 'failures']);
+    expect(await keys(stores)).toEqual(['allocations', 'requests', 'stock', 'matrix', 'ppe-cards', 'employees', 'failures', 'spending', 'projected-cost', 'overview']);
+    expect(await keys(hod)).toEqual(['allocations', 'requests', 'ppe-cards', 'employees', 'failures', 'spending', 'projected-cost', 'overview']);
+    expect(await keys(sectionRep)).toEqual(['allocations', 'requests', 'ppe-cards', 'employees', 'failures', 'overview']);
   });
 
   it('offers only in-scope departments and sections as filters', async () => {
@@ -183,5 +183,31 @@ describe('requests report scope', () => {
     const [theirs] = await download(otherHod, 'requests');
     expect(theirs!.text).toContain(`${w.fx.tag}-misfiled`);
     expect(theirs!.text).toContain(w.other.department.name);
+  });
+});
+
+describe('spending, projected cost and overview reports', () => {
+  it('exports spend by each grouping within the caller’s department', async () => {
+    const sheets = await download(hod, 'spending');
+    expect(sheets.map((s) => s.name)).toEqual(['By department', 'By section', 'By item', 'By employee', 'By month']);
+    expect(sheets[0]!.text).toContain(w.mine.department.name);
+    expect(sheets[0]!.text).not.toContain(w.other.department.name);
+    expect(sheets[3]!.text).toContain(`${w.fx.tag}-Alice`);
+    expect((await sectionRep.get('/api/v2/reports/spending')).status).toBe(403);
+  });
+
+  it('projects each employee’s yearly matrix cost', async () => {
+    const [byEmployee, byItem] = await download(hod, 'projected-cost', { sectionId: w.mine.section.id });
+    expect(byEmployee!.text).toContain(`${w.fx.tag}-Alice`);
+    expect(byEmployee!.text).not.toContain(`${w.fx.tag}-Bob`);
+    expect(byItem!.text).toContain(`${w.fx.tag}-item-1`);
+  });
+
+  it('exports the dashboard figures for every role', async () => {
+    const sheets = await download(sectionRep, 'overview', { period: 'year' });
+    expect(sheets.map((s) => s.name)).toEqual(['Summary', 'Spend', 'Renewals due']);
+    expect(sheets[0]!.text).toContain('Employees');
+    expect(sheets[0]!.text).toContain('Period: This year');
+    expect((await download(stores, 'overview')).map((s) => s.name)).toContain('Low stock');
   });
 });

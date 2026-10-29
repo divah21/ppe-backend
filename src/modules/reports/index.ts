@@ -9,7 +9,10 @@ import {
   employeesReportQuery,
   failuresReportQuery,
   matrixReportQuery,
+  overviewReportQuery,
   ppeCardsReportQuery,
+  projectedCostReportQuery,
+  spendingReportQuery,
   requestsReportQuery,
   stockReportQuery,
 } from './schemas';
@@ -27,6 +30,7 @@ import {
   stockReport,
   type ReportKey,
 } from './service';
+import { overviewReport, projectedCostReport, spendingReport } from './finance';
 import { streamWorkbook, type Sheet } from './xlsx';
 
 const router = Router();
@@ -72,5 +76,8 @@ exportRoute('requests', requestsReportQuery, requestsReport);
 exportRoute('stock', stockReportQuery, stockReport);
 exportRoute('matrix', matrixReportQuery, matrixReport);
 exportRoute('ppe-cards', ppeCardsReportQuery, ppeCardsReport);
+exportRoute('spending', spendingReportQuery, spendingReport);
+exportRoute('projected-cost', projectedCostReportQuery, projectedCostReport);
+exportRoute('overview', overviewReportQuery, overviewReport);
 
 export default defineModule({ path: '/reports', router });

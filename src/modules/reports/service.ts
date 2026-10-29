@@ -23,6 +23,8 @@ const WHOLE_MINE: readonly Role[] = [ROLES.ADMIN, ROLES.STORES, ROLES.SHEQ];
 const MANAGERS: readonly Role[] = [...WHOLE_MINE, ROLES.HOD, ROLES.DEPARTMENT_REP];
 // Section reps export their own section's issues, requests and PPE cards, as they could in v1
 const ALL_ROLES: readonly Role[] = [...MANAGERS, ROLES.SECTION_REP];
+// The same people who see spend and the forecast on screen
+const SPEND_ROLES: readonly Role[] = [ROLES.ADMIN, ROLES.STORES, ROLES.HOD];
 
 export const REPORTS = [
   {
@@ -74,6 +76,27 @@ export const REPORTS = [
     filters: ['departmentId', 'sectionId', 'q', 'status', 'severity', 'from', 'to'],
     roles: ALL_ROLES,
   },
+  {
+    key: 'spending',
+    title: 'Spending',
+    description: 'Actual spend on issued PPE by department, section, item, employee and month.',
+    filters: ['departmentId', 'sectionId', 'from', 'to'],
+    roles: SPEND_ROLES,
+  },
+  {
+    key: 'projected-cost',
+    title: 'Projected cost',
+    description: 'What each employee’s PPE should cost for a year according to the PPE matrix, by employee and by item.',
+    filters: ['departmentId', 'sectionId'],
+    roles: SPEND_ROLES,
+  },
+  {
+    key: 'overview',
+    title: 'Overview summary',
+    description: 'The dashboard figures with spend, the next renewals and the lowest stock lines.',
+    filters: ['period'],
+    roles: ALL_ROLES,
+  },
 ] as const;
 
 export type ReportKey = (typeof REPORTS)[number]['key'];
@@ -86,7 +109,7 @@ export const listReports = (auth: AuthContext) =>
 const select = <T extends object>(sql: string, replacements: Record<string, unknown>) =>
   sequelize.query<T>(sql, { replacements, type: QueryTypes.SELECT });
 
-const capped = <T>(rows: T[]) => {
+export const capped = <T>(rows: T[]) => {
   if (rows.length > MAX_ROWS) {
     throw badRequest(`This report has more than ${MAX_ROWS.toLocaleString('en-ZA')} rows. Narrow the filters and try again.`);
   }
@@ -112,7 +135,7 @@ export const generatedBy = (auth: AuthContext) =>
   auth.user.employee ? fullName(auth.user.employee.firstName, auth.user.employee.lastName) : (auth.user.username as string);
 
 /** Header lines describing the scope and filters, with names instead of ids. */
-const describe = async (
+export const describe = async (
   auth: AuthContext,
   scope: Scope,
   f: { departmentId?: string; sectionId?: string; from?: string; to?: string; extra?: string[] }
