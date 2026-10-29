@@ -93,4 +93,13 @@ export const replacementFrequencyBody = z.object({
 });
 
 export type PpeItemInput = z.infer<typeof ppeItemBody>;
+
+/** Rows are checked one by one on the server, so each is passed as read from the spreadsheet. */
+export const ppeItemImportBody = z.object({
+  dryRun: z.boolean().default(true),
+  /** Overwrite items whose code already exists, instead of leaving them as they are */
+  updateExisting: z.boolean().default(false),
+  rows: z.array(z.record(z.unknown())).min(1, 'The file has no rows').max(1000, 'Upload at most 1000 items at a time'),
+});
+export type PpeItemImportInput = z.infer<typeof ppeItemImportBody>;
 export type ReplacementFrequencyInput = z.infer<typeof replacementFrequencyBody>;

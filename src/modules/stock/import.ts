@@ -1,6 +1,7 @@
 import { Op, type Transaction, type WhereOptions } from 'sequelize';
 import { z } from 'zod';
-import { inTransaction, models, type Row } from '../../core/db';
+import { models, type Row } from '../../core/db';
+import { importTransaction } from '../../core/import';
 import { parseIssueDate } from '../allocations/import';
 import { GENDERS, type StockImportInput } from './schemas';
 
@@ -8,9 +9,6 @@ import { GENDERS, type StockImportInput } from './schemas';
 const { validateRequestedSize } = require('../../../middlewares/size_validation') as {
   validateRequestedSize: (item: Row, size: unknown) => Promise<{ valid: boolean; message?: string }>;
 };
-
-/** Thrown to roll back a dry run once every row has been checked. */
-class DryRun extends Error {}
 
 const text = (max: number) =>
   z
@@ -95,8 +93,8 @@ export const importStock = async (input: StockImportInput) => {
   const byCode = new Map(items.filter((i) => i.itemCode).map((i) => [norm(i.itemCode), i]));
   const byName = new Map(items.map((i) => [norm(i.name), i]));
 
-  try {
-    await inTransaction(async (t: Transaction) => {
+  await importTransaction(
+    async (t: Transaction) => {
       for (const [index, raw] of input.rows.entries()) {
         const row = index + 1;
         const label = String(raw.itemCode ?? raw.itemName ?? 'Unnamed item');
@@ -166,10 +164,8 @@ export const importStock = async (input: StockImportInput) => {
         }
         report.units += r.quantity;
       }
-      if (input.dryRun || report.errors.length) throw new DryRun();
-    });
-  } catch (err) {
-    if (!(err instanceof DryRun)) throw err;
-  }
+    },
+    () => !input.dryRun && report.errors.length === 0
+  );
   return report;
 };

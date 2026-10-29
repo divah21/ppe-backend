@@ -5,7 +5,8 @@ import { inTransaction, models, sequelize, type Row } from '../../core/db';
 import { AppError, conflict, forbidden, notFound } from '../../core/errors';
 import { likeTerm, pageWindow } from '../../core/http';
 import { seesInactive } from '../ppe-items/policy';
-import type { CreateSizeScaleInput, SizeInput, UpdateSizeScaleInput, sizeScaleListQuery } from './schemas';
+import { importTransaction, savepoint } from '../../core/import';
+import { sizeScaleImportRow, type CreateSizeScaleInput, type SizeInput, type SizeScaleImportInput, type UpdateSizeScaleInput, type sizeScaleListQuery } from './schemas';
 
 const SIZE_COUNT = literal('(SELECT COUNT(*) FROM sizes z WHERE z.scale_id = "SizeScale"."id")');
 const ITEM_COUNT = literal('(SELECT COUNT(*) FROM ppe_items p WHERE p.size_scale = "SizeScale"."code")');
@@ -248,4 +249,80 @@ export const replaceSizes = async (auth: AuthContext, id: string, sizes: SizeInp
     await syncItemSizes(scale.code, renamed, removed, t);
   });
   return getSizeScale(auth, id);
+};
+
+/**
+ * Creates size scales from a spreadsheet (v1 size bulk upload), one row per scale with its sizes
+ * listed in order. An existing scale is left alone, or with updateExisting gains the sizes it lacks.
+ */
+export const importSizeScales = async (input: SizeScaleImportInput) => {
+  const report = { dryRun: input.dryRun, created: 0, extended: 0, unchanged: 0, sizesAdded: 0, errors: [] as Array<{ row: number; item: string; message: string }> };
+  await importTransaction(
+    async (t) => {
+      await lockScaleCodes(t);
+      const seen = new Set<string>();
+      for (const [index, raw] of input.rows.entries()) {
+        const row = index + 1;
+        const label = String(raw.code ?? raw.name ?? 'Unnamed scale');
+        const parsed = sizeScaleImportRow.safeParse(raw);
+        if (!parsed.success) {
+          report.errors.push({ row, item: label, message: parsed.error.issues.map((i) => i.message).join('; ') });
+          continue;
+        }
+        const r = parsed.data;
+        if (seen.has(r.code)) {
+          report.errors.push({ row, item: r.code, message: 'This scale code is listed twice in the file' });
+          continue;
+        }
+        seen.add(r.code);
+        try {
+          await savepoint(t, async (sp) => {
+            const existing = await models.SizeScale.findOne({ where: sqlWhere(fn('upper', col('code')), r.code), transaction: sp, lock: sp.LOCK.UPDATE });
+            if (!existing) {
+              const scale = await models.SizeScale.create(
+                { code: r.code, name: r.name, categoryGroup: r.categoryGroup, description: r.description, isActive: true },
+                { transaction: sp }
+              );
+              await models.Size.bulkCreate(r.sizes.map((value, i) => ({ scaleId: scale.id, value, sortOrder: i + 1 })), { transaction: sp });
+              report.created += 1;
+              report.sizesAdded += r.sizes.length;
+              return;
+            }
+            if (!input.updateExisting) {
+              report.unchanged += 1;
+              return;
+            }
+            const current = await models.Size.findAll({ where: { scaleId: existing.id }, attributes: ['value', 'sortOrder'], transaction: sp });
+            const have = new Set(current.map((z) => String(z.value).toLowerCase()));
+            const missing = r.sizes.filter((v) => !have.has(v.toLowerCase()));
+            const last = Math.max(0, ...current.map((z) => Number(z.sortOrder ?? 0)));
+            await existing.update({ name: r.name, categoryGroup: r.categoryGroup ?? existing.categoryGroup }, { transaction: sp });
+            if (missing.length) {
+              await models.Size.bulkCreate(missing.map((value, i) => ({ scaleId: existing.id, value, sortOrder: last + i + 1 })), { transaction: sp });
+            }
+            report.extended += 1;
+            report.sizesAdded += missing.length;
+          });
+        } catch {
+          report.errors.push({ row, item: r.code, message: 'This scale could not be saved. Check its sizes and try again.' });
+        }
+      }
+    },
+    () => !input.dryRun && report.errors.length === 0
+  );
+  return report;
+};
+
+/** Figures for the size scales cards. */
+export const sizeScaleSummary = async () => {
+  const [r] = await sequelize.query<Record<string, string>>(
+    `SELECT (SELECT COUNT(*) FROM size_scales) AS scales,
+            (SELECT COUNT(*) FROM size_scales WHERE is_active IS NOT FALSE) AS active,
+            (SELECT COUNT(*) FROM sizes) AS sizes,
+            (SELECT COUNT(*) FROM ppe_items p WHERE p.has_size_variants AND p.is_active IS NOT FALSE
+               AND EXISTS (SELECT 1 FROM size_scales sc WHERE sc.code = p.size_scale)) AS items`,
+    { type: QueryTypes.SELECT }
+  );
+  const n = (k: string) => Number(r?.[k] ?? 0);
+  return { scales: n('scales'), active: n('active'), sizes: n('sizes'), items: n('items') };
 };
